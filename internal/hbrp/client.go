@@ -59,7 +59,7 @@ func NewHBRPClient(hbrpCfg *config.HBRP) *HBRPClient {
 	tx_chan := make(chan proto.Packet, 256)
 	translator, err := ipsc.NewIPSCTranslator()
 	if err != nil {
-		slog.Warn("failed to load IPSC template", "error", err)
+		slog.Warn("failed to load IPSC translator", "error", err)
 	}
 	c := &HBRPClient{
 		hbrpCfg:    hbrpCfg,
@@ -189,25 +189,25 @@ func (h *HBRPClient) handler() {
 			currentState := h.state.Load()
 			switch currentState {
 			case uint32(STATE_IDLE):
-				slog.Info("Got data from HBRP server while idle")
+				slog.Info("Got data from HBRP server while idle", "network", h.hbrpCfg.Name)
 			case uint32(STATE_SENT_LOGIN):
 				if string(data[:6]) == packetTypeMstack {
-					slog.Info("Connected. Authenticating")
+					slog.Info("Connected. Authenticating", "network", h.hbrpCfg.Name)
 					random := data[len(data)-8:]
 					h.sendRPTK(random)
 					h.state.Store(uint32(STATE_SENT_AUTH))
 				} else {
-					slog.Info("Server rejected login request")
+					slog.Info("Server rejected login request", "network", h.hbrpCfg.Name)
 					time.Sleep(1 * time.Second)
 					h.sendLogin()
 				}
 			case uint32(STATE_SENT_AUTH):
 				if string(data[:6]) == packetTypeMstack {
-					slog.Info("Authenticated. Sending configuration")
+					slog.Info("Authenticated. Sending configuration", "network", h.hbrpCfg.Name)
 					h.state.Store(uint32(STATE_SENT_RPTC))
 					h.sendRPTC()
 				} else if string(data[:6]) == "MSTNAK" {
-					slog.Info("Password rejected")
+					slog.Info("Password rejected", "network", h.hbrpCfg.Name)
 					h.state.Store(uint32(STATE_SENT_LOGIN))
 					time.Sleep(1 * time.Second)
 					h.sendLogin()
@@ -215,12 +215,12 @@ func (h *HBRPClient) handler() {
 			case uint32(STATE_SENT_RPTC):
 				// The data starts with either MSTACK or MSTNAK
 				if string(data[:6]) == packetTypeMstack {
-					slog.Info("Config accepted, starting ping routine")
+					slog.Info("Config accepted, starting ping routine", "network", h.hbrpCfg.Name)
 					h.wg.Add(1)
 					go h.ping()
 					h.state.Store(uint32(STATE_READY))
 				} else if string(data[:6]) == "MSTNAK" {
-					slog.Info("Configuration rejected")
+					slog.Info("Configuration rejected", "network", h.hbrpCfg.Name)
 					time.Sleep(1 * time.Second)
 					h.sendRPTC()
 				}
@@ -232,12 +232,12 @@ func (h *HBRPClient) handler() {
 					}
 				case "RPTS":
 					if string(data[:7]) == "RPTSBKN" {
-						slog.Info("Server requested a roaming beacon transmission")
+						slog.Info("Server requested a roaming beacon transmission", "network", h.hbrpCfg.Name)
 					}
 				case "DMRD":
 					packet, ok := proto.Decode(data)
 					if !ok {
-						slog.Info("Error unpacking packet")
+						slog.Info("Error unpacking packet", "network", h.hbrpCfg.Name)
 						continue
 					}
 					slog.Debug("HBRP DMRD received", "network", h.hbrpCfg.Name, "packet", packet)
@@ -257,10 +257,10 @@ func (h *HBRPClient) handler() {
 						}
 					}
 				default:
-					slog.Info("Got unknown packet from HBRP server", "data", data)
+					slog.Info("Got unknown packet from HBRP server", "network", h.hbrpCfg.Name, "data", data)
 				}
 			case uint32(STATE_TIMEOUT):
-				slog.Info("Got data from HBRP server while in timeout state")
+				slog.Info("Got data from HBRP server while in timeout state", "network", h.hbrpCfg.Name)
 			}
 		case <-h.done:
 			return
@@ -279,15 +279,15 @@ func (h *HBRPClient) ping() {
 		case <-ticker.C:
 			lastPingTime := time.Unix(0, h.lastPing.Load())
 			if time.Now().After(lastPingTime.Add(h.timeout)) {
-				slog.Info("Connection timed out")
+				slog.Info("Connection timed out", "network", h.hbrpCfg.Name)
 				h.state.Store(uint32(STATE_TIMEOUT))
 				h.connMu.Lock()
 				if err := h.conn.Close(); err != nil {
-					slog.Error("Error closing connection", "error", err)
+					slog.Error("Error closing connection", "network", h.hbrpCfg.Name, "error", err)
 				}
 				h.connMu.Unlock()
 				if err := h.connect(); err != nil {
-					slog.Error("Error reconnecting to HBRP server", "error", err)
+					slog.Error("Error reconnecting to HBRP server", "network", h.hbrpCfg.Name, "error", err)
 				}
 				h.sendLogin()
 				h.state.Store(uint32(STATE_SENT_LOGIN))
@@ -314,7 +314,7 @@ func (h *HBRPClient) tx() {
 				if errors.Is(err, net.ErrClosed) {
 					return
 				}
-				slog.Error("Error writing to HBRP server", "error", err)
+				slog.Error("Error writing to HBRP server", "network", h.hbrpCfg.Name, "error", err)
 				continue
 			}
 		}
@@ -333,7 +333,7 @@ func (h *HBRPClient) rx() {
 			if !h.started.Load() || errors.Is(err, net.ErrClosed) {
 				return
 			}
-			slog.Error("Error reading from HBRP server", "error", err)
+			slog.Error("Error reading from HBRP server", "network", h.hbrpCfg.Name, "error", err)
 			continue
 		}
 		select {
@@ -375,7 +375,7 @@ func (h *HBRPClient) sendRPTCLDirect() {
 	n := copy(data, "RPTCL")
 	copy(data[n:], hexid)
 	if _, err := h.conn.Write(data); err != nil {
-		slog.Error("Error sending RPTCL disconnect", "error", err)
+		slog.Error("Error sending RPTCL disconnect", "network", h.hbrpCfg.Name, "error", err)
 	}
 }
 
