@@ -10,8 +10,8 @@ ipsc2hbrp is a protocol bridge that translates between Motorola's IP Site Connec
 
 ```mermaid
 flowchart LR
-    | A["Motorola<br>DMR Repeater"] <-->                     | "Ethernet<br>IPSC protocol<br>(direct cable)" | B |
-    | B["ipsc2hbrp<br>(Raspberry Pi <br>or Linux box)"] <--> | "Internet<br>HBRP protocol"                   | C |
+    A["Motorola<br>DMR Repeater"] <-->|"Ethernet<br>IPSC protocol<br>(direct cable)"| B
+    B["ipsc2hbrp<br>(Raspberry Pi <br>or Linux box)"] <-->|"Internet<br>HBRP protocol"| C
     C[DMR Master Server]
 ```
 
