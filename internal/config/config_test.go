@@ -12,14 +12,17 @@ import (
 func validConfig() Config {
 	return Config{
 		LogLevel: LogLevelInfo,
-		HBRP: HBRP{
-			Callsign:     "N0CALL",
-			ID:           12345,
-			ColorCode:    7,
-			Latitude:     30.0,
-			Longitude:    -97.0,
-			MasterServer: "master.example.com:62030",
-			Password:     "password",
+		HBRP: []HBRP{
+			{
+				Name:         "BM",
+				Callsign:     "N0CALL",
+				ID:           12345,
+				ColorCode:    7,
+				Latitude:     30.0,
+				Longitude:    -97.0,
+				MasterServer: "master.example.com:62030",
+				Password:     "password",
+			},
 		},
 		IPSC: IPSC{
 			Interface:  "lo", // loopback exists on all Linux hosts
@@ -74,7 +77,7 @@ func TestValidateLogLevel(t *testing.T) {
 func TestValidateHBRPCallsign(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.HBRP.Callsign = ""
+	c.HBRP[0].Callsign = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidHBRPCallsign) {
 		t.Fatalf("expected %v, got %v", ErrInvalidHBRPCallsign, err)
@@ -97,7 +100,7 @@ func TestValidateHBRPColorCode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.HBRP.ColorCode = tt.cc
+			c.HBRP[0].ColorCode = tt.cc
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidHBRPColorCode) {
 				t.Fatalf("expected %v, got %v", ErrInvalidHBRPColorCode, err)
@@ -126,7 +129,7 @@ func TestValidateHBRPLatitude(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.HBRP.Latitude = tt.lat
+			c.HBRP[0].Latitude = tt.lat
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidHBRPLatitude) {
 				t.Fatalf("expected %v, got %v", ErrInvalidHBRPLatitude, err)
@@ -155,7 +158,7 @@ func TestValidateHBRPLongitude(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
-			c.HBRP.Longitude = tt.lng
+			c.HBRP[0].Longitude = tt.lng
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidHBRPLongitude) {
 				t.Fatalf("expected %v, got %v", ErrInvalidHBRPLongitude, err)
@@ -170,7 +173,7 @@ func TestValidateHBRPLongitude(t *testing.T) {
 func TestValidateHBRPMasterServer(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.HBRP.MasterServer = ""
+	c.HBRP[0].MasterServer = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidHBRPMasterServer) {
 		t.Fatalf("expected %v, got %v", ErrInvalidHBRPMasterServer, err)
@@ -180,7 +183,7 @@ func TestValidateHBRPMasterServer(t *testing.T) {
 func TestValidateHBRPPassword(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.HBRP.Password = ""
+	c.HBRP[0].Password = ""
 	err := c.Validate()
 	if !errors.Is(err, ErrInvalidHBRPPassword) {
 		t.Fatalf("expected %v, got %v", ErrInvalidHBRPPassword, err)

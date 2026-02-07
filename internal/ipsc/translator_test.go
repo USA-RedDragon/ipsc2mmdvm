@@ -972,6 +972,7 @@ func TestPopulateEmbeddedSignallingBurstB(t *testing.T) {
 
 	// Check that embedded data was unpacked
 	packed := burst.PackEmbeddedSignallingData()
+	//nolint:gosec // packed is [4]byte, index is always in range
 	if packed[0] != 0xAB || packed[1] != 0xCD || packed[2] != 0xEF || packed[3] != 0x12 {
 		t.Fatalf("expected embedded data [AB CD EF 12], got [%02X %02X %02X %02X]",
 			packed[0], packed[1], packed[2], packed[3])
@@ -1000,6 +1001,7 @@ func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
 	}
 
 	packed := burst.PackEmbeddedSignallingData()
+	//nolint:gosec // packed is [4]byte, index is always in range
 	if packed[0] != 0x11 || packed[1] != 0x22 || packed[2] != 0x33 || packed[3] != 0x44 {
 		t.Fatalf("expected embedded data [11 22 33 44], got [%02X %02X %02X %02X]",
 			packed[0], packed[1], packed[2], packed[3])

@@ -12,11 +12,12 @@ import (
 
 	"github.com/USA-RedDragon/ipsc2hbrp/internal/config"
 	"github.com/USA-RedDragon/ipsc2hbrp/internal/hbrp/proto"
+	"github.com/USA-RedDragon/ipsc2hbrp/internal/hbrp/rewrite"
 	"github.com/USA-RedDragon/ipsc2hbrp/internal/ipsc"
 )
 
 type HBRPClient struct {
-	config      *config.Config
+	hbrpCfg     *config.HBRP
 	started     atomic.Bool
 	done        chan struct{}
 	stopOnce    sync.Once
@@ -32,6 +33,11 @@ type HBRPClient struct {
 	lastPing    atomic.Int64 // UnixNano
 	ipscHandler func(data []byte)
 	translator  *ipsc.IPSCTranslator
+
+	// Rewrite rules built from config, applied to packets
+	// flowing through this network.
+	rfRewrites  []rewrite.Rule // RF→Net (outbound to this master)
+	netRewrites []rewrite.Rule // Net→RF (inbound from this master)
 }
 
 type state uint8
@@ -49,14 +55,14 @@ const (
 	packetTypeMstack = "MSTACK"
 )
 
-func NewHBRPClient(config *config.Config) *HBRPClient {
+func NewHBRPClient(hbrpCfg *config.HBRP) *HBRPClient {
 	tx_chan := make(chan proto.Packet, 256)
 	translator, err := ipsc.NewIPSCTranslator()
 	if err != nil {
 		slog.Warn("failed to load IPSC template", "error", err)
 	}
 	c := &HBRPClient{
-		config:     config,
+		hbrpCfg:    hbrpCfg,
 		done:       make(chan struct{}),
 		tx_chan:    tx_chan,
 		connRX:     make(chan []byte, 16),
@@ -66,15 +72,82 @@ func NewHBRPClient(config *config.Config) *HBRPClient {
 		translator: translator,
 	}
 	c.state.Store(uint32(STATE_IDLE))
+	c.buildRewriteRules()
 	return c
+}
+
+// Name returns the configured network name for this client.
+func (h *HBRPClient) Name() string {
+	return h.hbrpCfg.Name
+}
+
+// buildRewriteRules constructs the rewrite rule chains from config.
+// For each TGRewrite config entry, two rules are created:
+//   - rfRewrite: fromSlot/fromTG → toSlot/toTG (for RF→Net direction)
+//   - netRewrite: toSlot/toTG → fromSlot/fromTG (reverse, for Net→RF direction)
+//
+// PCRewrite only creates an RF rewrite (outbound).
+// TypeRewrite only creates an RF rewrite (outbound).
+// SrcRewrite only creates a Net rewrite (inbound).
+func (h *HBRPClient) buildRewriteRules() {
+	name := h.hbrpCfg.Name
+
+	for _, cfg := range h.hbrpCfg.TGRewrites {
+		rng := cfg.Range
+		if rng == 0 {
+			rng = 1
+		}
+		h.rfRewrites = append(h.rfRewrites, &rewrite.TGRewrite{
+			Name: name, FromSlot: cfg.FromSlot, FromTG: cfg.FromTG,
+			ToSlot: cfg.ToSlot, ToTG: cfg.ToTG, Range: rng,
+		})
+		// Reverse direction
+		h.netRewrites = append(h.netRewrites, &rewrite.TGRewrite{
+			Name: name, FromSlot: cfg.ToSlot, FromTG: cfg.ToTG,
+			ToSlot: cfg.FromSlot, ToTG: cfg.FromTG, Range: rng,
+		})
+	}
+
+	for _, cfg := range h.hbrpCfg.PCRewrites {
+		rng := cfg.Range
+		if rng == 0 {
+			rng = 1
+		}
+		h.rfRewrites = append(h.rfRewrites, &rewrite.PCRewrite{
+			Name: name, FromSlot: cfg.FromSlot, FromID: cfg.FromID,
+			ToSlot: cfg.ToSlot, ToID: cfg.ToID, Range: rng,
+		})
+	}
+
+	for _, cfg := range h.hbrpCfg.TypeRewrites {
+		rng := cfg.Range
+		if rng == 0 {
+			rng = 1
+		}
+		h.rfRewrites = append(h.rfRewrites, &rewrite.TypeRewrite{
+			Name: name, FromSlot: cfg.FromSlot, FromTG: cfg.FromTG,
+			ToSlot: cfg.ToSlot, ToID: cfg.ToID, Range: rng,
+		})
+	}
+
+	for _, cfg := range h.hbrpCfg.SrcRewrites {
+		rng := cfg.Range
+		if rng == 0 {
+			rng = 1
+		}
+		h.netRewrites = append(h.netRewrites, &rewrite.SrcRewrite{
+			Name: name, FromSlot: cfg.FromSlot, FromID: cfg.FromID,
+			ToSlot: cfg.ToSlot, ToTG: cfg.ToTG, Range: rng,
+		})
+	}
 }
 
 func (h *HBRPClient) Start() error {
 	if h.translator != nil {
-		h.translator.SetPeerID(h.config.HBRP.ID)
+		h.translator.SetPeerID(h.hbrpCfg.ID)
 	}
 
-	slog.Info("Connecting to HBRP server")
+	slog.Info("Connecting to HBRP server", "network", h.hbrpCfg.Name)
 
 	err := h.connect()
 	if err != nil {
@@ -98,7 +171,7 @@ func (h *HBRPClient) Start() error {
 func (h *HBRPClient) connect() error {
 	var err error
 	var d net.Dialer
-	conn, err := d.DialContext(context.Background(), "udp", h.config.HBRP.MasterServer)
+	conn, err := d.DialContext(context.Background(), "udp", h.hbrpCfg.MasterServer)
 	if err != nil {
 		return err
 	}
@@ -167,7 +240,16 @@ func (h *HBRPClient) handler() {
 						slog.Info("Error unpacking packet")
 						continue
 					}
-					slog.Debug("HBRP DMRD received", "packet", packet)
+					slog.Debug("HBRP DMRD received", "network", h.hbrpCfg.Name, "packet", packet)
+
+					// Apply net→RF rewrite rules (inbound from this master)
+					if len(h.netRewrites) > 0 {
+						if !rewrite.Apply(h.netRewrites, &packet, false) {
+							slog.Debug("HBRP DMRD dropped (no rewrite rule matched)", "network", h.hbrpCfg.Name)
+							continue
+						}
+					}
+
 					if h.ipscHandler != nil && h.translator != nil {
 						ipscPackets := h.translator.TranslateToIPSC(packet)
 						for _, ipscData := range ipscPackets {
@@ -264,7 +346,7 @@ func (h *HBRPClient) rx() {
 
 func (h *HBRPClient) Stop() {
 	h.stopOnce.Do(func() {
-		slog.Info("Stopping HBRP client")
+		slog.Info("Stopping HBRP client", "network", h.hbrpCfg.Name)
 
 		// Signal all goroutines to stop.
 		close(h.done)
@@ -288,7 +370,7 @@ func (h *HBRPClient) Stop() {
 // Must be called with connMu held.
 func (h *HBRPClient) sendRPTCLDirect() {
 	hexid := make([]byte, 8)
-	copy(hexid, []byte(fmt.Sprintf("%08x", h.config.HBRP.ID)))
+	copy(hexid, []byte(fmt.Sprintf("%08x", h.hbrpCfg.ID)))
 	data := make([]byte, len("RPTCL")+8)
 	n := copy(data, "RPTCL")
 	copy(data[n:], hexid)
@@ -316,14 +398,23 @@ func (h *HBRPClient) SetIPSCHandler(handler func(data []byte)) {
 // HandleIPSCBurst handles an incoming IPSC burst from the IPSC server.
 // This is called when a connected IPSC peer transmits voice/data.
 // It translates the IPSC packet(s) to HBRP DMRD format and forwards them.
+// If RF rewrite rules are configured, the packet is only forwarded if a rule matches.
 func (h *HBRPClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UDPAddr) {
 	if !h.started.Load() {
 		return
 	}
-	slog.Debug("HandleIPSCBurst: received IPSC burst", "type", packetType, "from", addr, "length", len(data))
+	slog.Debug("HandleIPSCBurst: received IPSC burst", "network", h.hbrpCfg.Name, "type", packetType, "from", addr, "length", len(data))
 
 	packets := h.translator.TranslateToHBRP(packetType, data)
 	for _, pkt := range packets {
+		// Apply RF→Net rewrite rules (outbound to this master)
+		if len(h.rfRewrites) > 0 {
+			if !rewrite.Apply(h.rfRewrites, &pkt, false) {
+				slog.Debug("HandleIPSCBurst: dropped (no RF rewrite rule matched)", "network", h.hbrpCfg.Name)
+				continue
+			}
+		}
+
 		select {
 		case h.tx_chan <- pkt:
 		case <-h.done:

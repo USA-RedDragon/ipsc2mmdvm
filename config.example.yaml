@@ -10,29 +10,78 @@ ipsc:
     key: ""
 
 hbrp:
-  master-server: "3104.master.brandmeister.network:62030"
-  password: "passw0rd"
+  - name: "BrandMeister"
+    master-server: "3104.master.brandmeister.network:62030"
+    password: "passw0rd"
 
-  callsign: KI5VMF
-  radio-id: 319186803
+    callsign: KI5VMF
+    radio-id: 319186803
 
-  # Frequency in Hz:
-  rx-freq: 429075000
-  tx-freq: 424075000
+    # Frequency in Hz:
+    rx-freq: 429075000
+    tx-freq: 424075000
 
-  color-code: 7
-  # Optional latitude and longitude:
-  # latitude: 30.000000
-  # longitude: -97.000000
+    color-code: 7
+    # Optional latitude and longitude:
+    # latitude: 30.000000
+    # longitude: -97.000000
 
-  # Height in meters:
-  height: 3
+    # Height in meters:
+    height: 3
 
-  # Optional location:
-  location: "Moore, OK"
+    # Optional location:
+    location: "Moore, OK"
 
-  # Optional description:
-  # description: ""
+    # Optional description:
+    # description: ""
 
-  # Optional URL:
-  # url: ""
+    # Optional URL:
+    # url: ""
+
+    # DMRGateway-style rewrite rules (optional).
+    # Each rule has: from-slot, from-tg/id, to-slot, to-tg/id, range.
+    # TGRewrite: rewrite group talkgroup calls
+    # tg-rewrite:
+    #   - from-slot: 1
+    #     from-tg: 9
+    #     to-slot: 1
+    #     to-tg: 9
+    #     range: 1
+    # PCRewrite: rewrite private calls by destination ID
+    # pc-rewrite:
+    #   - from-slot: 1
+    #     from-id: 100
+    #     to-slot: 1
+    #     to-id: 200
+    #     range: 1
+    # TypeRewrite: convert group TG calls to private calls
+    # type-rewrite:
+    #   - from-slot: 1
+    #     from-tg: 9
+    #     to-slot: 1
+    #     to-id: 3100
+    #     range: 1
+    # SrcRewrite: match private calls by source ID, rewrite as group TG
+    # src-rewrite:
+    #   - from-slot: 1
+    #     from-id: 1234
+    #     to-slot: 1
+    #     to-tg: 9
+    #     range: 1
+
+  # Additional DMR masters can be added:
+  # - name: "TGIF"
+  #   master-server: "tgif.network:62031"
+  #   password: "anotherpassword"
+  #   callsign: KI5VMF
+  #   radio-id: 319186803
+  #   rx-freq: 429075000
+  #   tx-freq: 424075000
+  #   color-code: 7
+  #   height: 3
+  #   tg-rewrite:
+  #     - from-slot: 2
+  #       from-tg: 31665
+  #       to-slot: 2
+  #       to-tg: 31665
+  #       range: 1

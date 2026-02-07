@@ -16,9 +16,9 @@ import (
 
 func testConfig(authEnabled bool, authKey string) *config.Config {
 	return &config.Config{
-		HBRP: config.HBRP{
+		HBRP: []config.HBRP{{
 			ID: 311860,
-		},
+		}},
 		IPSC: config.IPSC{
 			Auth: config.IPSCAuth{
 				Enabled: authEnabled,
@@ -199,8 +199,8 @@ func TestNewIPSCServerNoAuth(t *testing.T) {
 	if s.authKey != nil {
 		t.Fatal("expected nil auth key when auth disabled")
 	}
-	if s.localID != cfg.HBRP.ID {
-		t.Fatalf("expected localID %d, got %d", cfg.HBRP.ID, s.localID)
+	if s.localID != cfg.HBRP[0].ID {
+		t.Fatalf("expected localID %d, got %d", cfg.HBRP[0].ID, s.localID)
 	}
 }
 
@@ -270,8 +270,8 @@ func TestBuildMasterRegisterReply(t *testing.T) {
 	}
 
 	id := binary.BigEndian.Uint32(reply[1:5])
-	if id != cfg.HBRP.ID {
-		t.Fatalf("expected ID %d, got %d", cfg.HBRP.ID, id)
+	if id != cfg.HBRP[0].ID {
+		t.Fatalf("expected ID %d, got %d", cfg.HBRP[0].ID, id)
 	}
 }
 
