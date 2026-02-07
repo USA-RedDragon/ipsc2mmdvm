@@ -4,18 +4,18 @@
 
 **Connect your Motorola IPSC repeater to HBRP DMR Masters.**
 
-ipsc2hbrp is a protocol bridge that translates between Motorola's IP Site Connect (IPSC) protocol and the Homebrew Repeater Protocol (HBRP). This lets your IPSC-only repeater talk to a DMR master such as BrandMeister.
+ipsc2hbrp is a protocol bridge that translates between Motorola's IP Site Connect (IPSC) protocol and the Homebrew Repeater Protocol (HBRP). This lets your IPSC-only repeater talk to one or more DMR masters such as BrandMeister and TGIF simultaneously, with [DMRGateway](https://github.com/g4klx/DMRGateway)-compatible rewrite rules for routing talkgroups between networks.
 
 ## How It Works
 
 ```mermaid
 flowchart LR
     A["Motorola<br>DMR Repeater"] <-->|"Ethernet<br>IPSC protocol<br>(direct cable)"| B
-    B["ipsc2hbrp<br>(Raspberry Pi <br>or Linux box)"] <-->|"Internet<br>HBRP protocol"| C
-    C[DMR Master Server]
+    B["ipsc2hbrp<br>(Raspberry Pi <br>or Linux box)"] <-->|"Internet<br>HBRP protocol"| C[DMR Master 1<br>e.g. BrandMeister]
+    B <-->|"Internet<br>HBRP protocol"| D[DMR Master 2<br>e.g. TGIF]
 ```
 
-Your repeater connects directly via Ethernet cable to the box running ipsc2hbrp. The software acts as an IPSC master to the repeater and forwards voice and data traffic to and from a DMR master such as BrandMeister over the internet.
+Your repeater connects directly via Ethernet cable to the box running ipsc2hbrp. The software acts as an IPSC master to the repeater and forwards voice and data traffic to and from one or more DMR masters over the internet. DMRGateway-style rewrite rules let you route specific talkgroups to specific masters.
 
 ## Requirements
 
@@ -61,25 +61,51 @@ ipsc:
     key: ""               # Hex string, up to 40 characters (must match CPS)
 
 hbrp:
-  master-server: "3104.master.brandmeister.network:62030"  # BrandMeister master (see below)
-  password: "passw0rd"    # Your BrandMeister hotspot password
+  - name: "BrandMeister"  # Friendly name for logging
+    master-server: "3104.master.brandmeister.network:62030"  # BrandMeister master (see below)
+    password: "passw0rd"  # Your BrandMeister hotspot password
 
-  callsign: N0CALL        # Your callsign
-  radio-id: 123456789     # Your registered repeater DMR ID
+    callsign: N0CALL      # Your callsign
+    radio-id: 123456789   # Your registered repeater DMR ID
 
-  # Frequencies in Hz:
-  rx-freq: 429075000
-  tx-freq: 424075000
+    # Frequencies in Hz:
+    rx-freq: 429075000
+    tx-freq: 424075000
 
-  color-code: 7           # Must match your repeater's color code (0-15)
+    color-code: 7         # Must match your repeater's color code (0-15)
 
-  # Optional, reported to BrandMeister:
-  # latitude: 30.000000
-  # longitude: -97.000000
-  height: 3               # Antenna height in meters
-  location: "My City, ST"
-  # description: ""
-  # url: ""
+    # Optional, reported to BrandMeister:
+    # latitude: 30.000000
+    # longitude: -97.000000
+    height: 3             # Antenna height in meters
+    location: "My City, ST"
+    # description: ""
+    # url: ""
+
+    # Rewrite rules (optional, DMRGateway-compatible)
+    # tg-rewrite:
+    #   - from-slot: 1
+    #     from-tg: 9
+    #     to-slot: 1
+    #     to-tg: 9
+    #     range: 1
+
+  # Add more masters for multi-network support:
+  # - name: "TGIF"
+  #   master-server: "tgif.network:62031"
+  #   password: "secret"
+  #   callsign: N0CALL
+  #   radio-id: 123456789
+  #   rx-freq: 429075000
+  #   tx-freq: 424075000
+  #   color-code: 7
+  #   height: 3
+  #   tg-rewrite:
+  #     - from-slot: 2
+  #       from-tg: 31665
+  #       to-slot: 2
+  #       to-tg: 31665
+  #       range: 1
 ```
 
 **Config notes:**
@@ -87,9 +113,11 @@ hbrp:
 - **`ipsc.interface`** - The name of the network interface physically connected to your repeater. On a Raspberry Pi this is typically `eth0`. Run `ip link` to see your interface names.
 - **`ipsc.ip`** - The IP address ipsc2hbrp assigns to that interface. This becomes the "Master IP" in your repeater's CPS config, and also the gateway for the repeater. Pick any private IP (e.g. `10.10.250.1`).
 - **`ipsc.port`** - The UDP port to listen on. The default `50000` works fine. Must match the "Master UDP Port" in CPS.
-- **`hbrp.master-server`** - Your DMR master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62030`).
-- **`hbrp.password`** - Your BrandMeister hotspot security password, such as the one set in your BrandMeister self-care dashboard.
-- **`hbrp.radio-id`** - Your repeater's DMR ID, registered at [radioid.net](https://radioid.net/).
+- **`hbrp`** - A YAML array of DMR master connections. Each entry is a separate master. You can connect to as many masters as you like.
+- **`hbrp[].name`** - A friendly name for this network, used in log messages (e.g. `"BrandMeister"`, `"TGIF"`).
+- **`hbrp[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62030`).
+- **`hbrp[].password`** - Your hotspot security password, such as the one set in your BrandMeister self-care dashboard.
+- **`hbrp[].radio-id`** - Your repeater's DMR ID, registered at [radioid.net](https://radioid.net/).
 
 ### 3. Configure the Motorola Repeater (CPS)
 
@@ -182,30 +210,83 @@ sudo journalctl -u ipsc2hbrp -f
 
 All settings can also be set via **environment variables** using `_` as a separator (e.g. `IPSC_PORT=50000`, `HBRP_MASTER_SERVER=...`).
 
-|       Setting        |  Type   |    Default    |                   Description                   |
-| -------------------- | ------- | ------------- | ----------------------------------------------- |
-| `log-level`          | string  | `info`        | Log verbosity: `debug`, `info`, `warn`, `error` |
-| `ipsc.interface`     | string  | -             | Network interface connected to the repeater     |
-| `ipsc.port`          | uint16  | -             | UDP listen port                                 |
-| `ipsc.ip`            | string  | `10.10.250.1` | IP address to assign to the interface           |
-| `ipsc.subnet-mask`   | int     | `24`          | CIDR subnet mask (1–32)                         |
-| `ipsc.auth.enabled`  | bool    | `false`       | Enable IPSC authentication                      |
-| `ipsc.auth.key`      | string  | -             | Hex authentication key (up to 40 chars)         |
-| `hbrp.master-server` | string  | -             | BrandMeister master `host:port`                 |
-| `hbrp.password`      | string  | -             | BrandMeister hotspot password                   |
-| `hbrp.callsign`      | string  | -             | Your amateur radio callsign                     |
-| `hbrp.radio-id`      | uint32  | -             | Your registered DMR repeater ID                 |
-| `hbrp.rx-freq`       | uint    | -             | Receive frequency in Hz                         |
-| `hbrp.tx-freq`       | uint    | -             | Transmit frequency in Hz                        |
-| `hbrp.tx-power`      | uint8   | `0`           | Transmit power in dBm                           |
-| `hbrp.color-code`    | uint8   | `0`           | DMR color code (0–15)                           |
-| `hbrp.latitude`      | float64 | `0`           | Latitude (−90 to +90)                           |
-| `hbrp.longitude`     | float64 | `0`           | Longitude (−180 to +180)                        |
-| `hbrp.height`        | uint16  | `0`           | Antenna height in meters                        |
-| `hbrp.location`      | string  | -             | Location description                            |
-| `hbrp.description`   | string  | -             | Repeater description                            |
-| `hbrp.url`           | string  | -             | Repeater URL                                    |
+### General
 
-## License
+|   Setting   |  Type  | Default |                   Description                   |
+| ----------- | ------ | ------- | ----------------------------------------------- |
+| `log-level` | string | `info`  | Log verbosity: `debug`, `info`, `warn`, `error` |
 
-[MIT](LICENSE)
+### IPSC
+
+|       Setting       |  Type  |    Default    |                 Description                 |
+| ------------------- | ------ | ------------- | ------------------------------------------- |
+| `ipsc.interface`    | string | -             | Network interface connected to the repeater |
+| `ipsc.port`         | uint16 | -             | UDP listen port                             |
+| `ipsc.ip`           | string | `10.10.250.1` | IP address to assign to the interface       |
+| `ipsc.subnet-mask`  | int    | `24`          | CIDR subnet mask (1–32)                     |
+| `ipsc.auth.enabled` | bool   | `false`       | Enable IPSC authentication                  |
+| `ipsc.auth.key`     | string | -             | Hex authentication key (up to 40 chars)     |
+
+### HBRP (array — one entry per DMR master)
+
+|        Setting         |  Type   | Default |                   Description                    |
+| ---------------------- | ------- | ------- | ------------------------------------------------ |
+| `hbrp[].name`          | string  | -       | Friendly name for this network (used in logging) |
+| `hbrp[].master-server` | string  | -       | DMR master `host:port`                           |
+| `hbrp[].password`      | string  | -       | Hotspot password                                 |
+| `hbrp[].callsign`      | string  | -       | Your amateur radio callsign                      |
+| `hbrp[].radio-id`      | uint32  | -       | Your registered DMR repeater ID                  |
+| `hbrp[].rx-freq`       | uint    | -       | Receive frequency in Hz                          |
+| `hbrp[].tx-freq`       | uint    | -       | Transmit frequency in Hz                         |
+| `hbrp[].tx-power`      | uint8   | `0`     | Transmit power in dBm                            |
+| `hbrp[].color-code`    | uint8   | `0`     | DMR color code (0–15)                            |
+| `hbrp[].latitude`      | float64 | `0`     | Latitude (−90 to +90)                            |
+| `hbrp[].longitude`     | float64 | `0`     | Longitude (−180 to +180)                         |
+| `hbrp[].height`        | uint16  | `0`     | Antenna height in meters                         |
+| `hbrp[].location`      | string  | -       | Location description                             |
+| `hbrp[].description`   | string  | -       | Repeater description                             |
+| `hbrp[].url`           | string  | -       | Repeater URL                                     |
+
+### Rewrite Rules (per HBRP entry, optional)
+
+Rewrite rules control how DMR traffic is routed between the repeater and each master. They follow the same semantics as [DMRGateway](https://github.com/g4klx/DMRGateway): the first matching rule wins. If no rewrite rules are configured for a master, all traffic passes through unmodified.
+
+#### TGRewrite — remap group talkgroup calls
+
+|             Setting             | Type | Default |           Description           |
+| ------------------------------- | ---- | ------- | ------------------------------- |
+| `hbrp[].tg-rewrite[].from-slot` | uint | -       | Source timeslot (1 or 2)        |
+| `hbrp[].tg-rewrite[].from-tg`   | uint | -       | Source talkgroup start          |
+| `hbrp[].tg-rewrite[].to-slot`   | uint | -       | Destination timeslot (1 or 2)   |
+| `hbrp[].tg-rewrite[].to-tg`     | uint | -       | Destination talkgroup start     |
+| `hbrp[].tg-rewrite[].range`     | uint | `1`     | Number of contiguous TGs to map |
+
+#### PCRewrite — remap private calls by destination ID
+
+| Setting                          | Type | Default | Description                      |
+| -------------------------------- | ---- | ------- | -------------------------------- |
+| `hbrp[].pc-rewrite[].from-slot`  | uint | -       | Source timeslot (1 or 2)         |
+| `hbrp[].pc-rewrite[].from-id`    | uint | -       | Source private call ID start     |
+| `hbrp[].pc-rewrite[].to-slot`    | uint | -       | Destination timeslot (1 or 2)    |
+| `hbrp[].pc-rewrite[].to-id`      | uint | -       | Destination private call ID start|
+| `hbrp[].pc-rewrite[].range`      | uint | `1`     | Number of contiguous IDs to map  |
+
+#### TypeRewrite — convert group TG calls to private calls
+
+|              Setting              | Type | Default |             Description             |
+| --------------------------------- | ---- | ------- | ----------------------------------- |
+| `hbrp[].type-rewrite[].from-slot` | uint | -       | Source timeslot (1 or 2)            |
+| `hbrp[].type-rewrite[].from-tg`   | uint | -       | Source talkgroup start              |
+| `hbrp[].type-rewrite[].to-slot`   | uint | -       | Destination timeslot (1 or 2)       |
+| `hbrp[].type-rewrite[].to-id`     | uint | -       | Destination private call ID start   |
+| `hbrp[].type-rewrite[].range`     | uint | `1`     | Number of contiguous entries to map |
+
+#### SrcRewrite — match private calls by source, rewrite as group TG
+
+|             Setting              | Type | Default |           Description           |
+| -------------------------------- | ---- | ------- | ------------------------------- |
+| `hbrp[].src-rewrite[].from-slot` | uint | -       | Source timeslot (1 or 2)        |
+| `hbrp[].src-rewrite[].from-id`   | uint | -       | Source subscriber ID start      |
+| `hbrp[].src-rewrite[].to-slot`   | uint | -       | Destination timeslot (1 or 2)   |
+| `hbrp[].src-rewrite[].to-tg`     | uint | -       | Destination talkgroup           |
+| `hbrp[].src-rewrite[].range`     | uint | `1`     | Number of contiguous source IDs |

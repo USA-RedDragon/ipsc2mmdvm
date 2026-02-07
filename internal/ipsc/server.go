@@ -90,9 +90,15 @@ func NewIPSCServer(cfg *config.Config) *IPSCServer {
 		}
 	}
 
+	// Use the first HBRP network's ID as the local peer identity.
+	var localID uint32
+	if len(cfg.HBRP) > 0 {
+		localID = cfg.HBRP[0].ID
+	}
+
 	return &IPSCServer{
 		cfg:      cfg,
-		localID:  cfg.HBRP.ID,
+		localID:  localID,
 		authKey:  authKey,
 		peers:    map[uint32]*Peer{},
 		lastSend: map[uint32]time.Time{},

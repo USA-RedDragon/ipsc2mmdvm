@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"syscall"
 
@@ -57,15 +58,34 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	}
 	slog.SetDefault(logger)
 
-	hbrpClient := hbrp.NewHBRPClient(cfg)
-	err = hbrpClient.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start HBRP client: %w", err)
+	// Create one HBRP client per configured network (DMR master).
+	hbrpClients := make([]*hbrp.HBRPClient, 0, len(cfg.HBRP))
+	for i := range cfg.HBRP {
+		client := hbrp.NewHBRPClient(&cfg.HBRP[i])
+		err = client.Start()
+		if err != nil {
+			return fmt.Errorf("failed to start HBRP client %q: %w", cfg.HBRP[i].Name, err)
+		}
+		hbrpClients = append(hbrpClients, client)
 	}
 
 	ipscServer := ipsc.NewIPSCServer(cfg)
-	ipscServer.SetBurstHandler(hbrpClient.HandleIPSCBurst)
-	hbrpClient.SetIPSCHandler(ipscServer.SendUserPacket)
+
+	// Wire IPSC bursts to all HBRP clients.
+	ipscServer.SetBurstHandler(func(packetType byte, data []byte, addr *net.UDPAddr) {
+		for _, client := range hbrpClients {
+			// Each client has its own copy of data and applies its own rewrite rules.
+			dataCopy := make([]byte, len(data))
+			copy(dataCopy, data)
+			client.HandleIPSCBurst(packetType, dataCopy, addr)
+		}
+	})
+
+	// Wire all HBRP clients' inbound data to the IPSC server.
+	for _, client := range hbrpClients {
+		client.SetIPSCHandler(ipscServer.SendUserPacket)
+	}
+
 	err = ipscServer.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start IPSC server: %w", err)
@@ -75,7 +95,9 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		slog.Info("received signal, shutting down...", "signal", sig.String())
 
 		ipscServer.Stop()
-		hbrpClient.Stop()
+		for _, client := range hbrpClients {
+			client.Stop()
+		}
 	}
 
 	shutdown.AddWithParam(stop)
