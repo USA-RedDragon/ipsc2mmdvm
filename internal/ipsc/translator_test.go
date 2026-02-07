@@ -654,7 +654,7 @@ func TestBuildVoiceBurstE(t *testing.T) {
 		if i == 0 {
 			ft = hbrpFrameTypeVoiceSync
 		}
-		pkt := makeTestHBRPPacket(true, false, ft, uint(i))
+		pkt := makeTestHBRPPacket(true, false, ft, uint(i)) //nolint:gosec // G115: i is in [0,3]
 		pkt.StreamID = header.StreamID
 		pkt.DMRData = makeVoiceDMRData(i == 0)
 		tr.TranslateToIPSC(pkt)
@@ -740,7 +740,7 @@ func TestBuildVoiceBurstWrapsAfterF(t *testing.T) {
 		if i == 0 {
 			ft = hbrpFrameTypeVoiceSync
 		}
-		pkt := makeTestHBRPPacket(true, false, ft, uint(i))
+		pkt := makeTestHBRPPacket(true, false, ft, uint(i)) //nolint:gosec // G115: i is in [0,5]
 		pkt.StreamID = header.StreamID
 		pkt.DMRData = makeVoiceDMRData(i == 0)
 		tr.TranslateToIPSC(pkt)
@@ -843,7 +843,7 @@ func TestBuildHBRPVoiceBurstSequencing(t *testing.T) {
 				t.Fatalf("burst %d: expected voice frame type, got %d", i, pkt.FrameType)
 			}
 		}
-		if pkt.Seq != uint(i+1) { // seq starts at 1 after header consumed seq=0
+		if pkt.Seq != uint(i+1) { //nolint:gosec // G115: i is in [0,2]; seq starts at 1 after header consumed seq=0
 			t.Fatalf("burst %d: expected seq %d, got %d", i, i+1, pkt.Seq)
 		}
 	}
@@ -873,6 +873,7 @@ func TestBuildHBRPVoiceBurstWrapsAt6(t *testing.T) {
 
 		pkt := result[0]
 		expectedIdx := i % 6
+		//nolint:gosec // G115: i is in [0,6], expectedIdx fits in uint
 		if pkt.DTypeOrVSeq != uint(expectedIdx) {
 			t.Fatalf("burst %d: expected DTypeOrVSeq %d, got %d", i, expectedIdx, pkt.DTypeOrVSeq)
 		}

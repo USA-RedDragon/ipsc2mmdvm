@@ -485,13 +485,17 @@ func newTestServerWithUDP(t *testing.T, authEnabled bool, authKey string) (*IPSC
 		conn.Close()
 	})
 
-	return s, conn.LocalAddr().(*net.UDPAddr)
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	return s, addr
 }
 
 // readUDP reads one datagram from the given conn with a timeout.
-func readUDP(t *testing.T, conn *net.UDPConn, timeout time.Duration) []byte {
+func readUDP(t *testing.T, conn *net.UDPConn) []byte {
 	t.Helper()
-	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
 	buf := make([]byte, 1500)
@@ -542,7 +546,10 @@ func TestSendPacketNoAuth(t *testing.T) {
 		t.Fatalf("client listen: %v", err)
 	}
 	defer client.Close()
-	clientAddr := client.LocalAddr().(*net.UDPAddr)
+	clientAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	// Send a packet to the client
 	_ = srvAddr // server address, not needed directly
@@ -552,7 +559,7 @@ func TestSendPacketNoAuth(t *testing.T) {
 		t.Fatalf("sendPacket error: %v", err)
 	}
 
-	got := readUDP(t, client, time.Second)
+	got := readUDP(t, client)
 	if string(got) != "hello" {
 		t.Fatalf("expected 'hello', got %q", got)
 	}
@@ -568,7 +575,10 @@ func TestSendPacketWithAuth(t *testing.T) {
 		t.Fatalf("client listen: %v", err)
 	}
 	defer client.Close()
-	clientAddr := client.LocalAddr().(*net.UDPAddr)
+	clientAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	payload := []byte("secure")
 	pkt := &Packet{data: payload}
@@ -576,7 +586,7 @@ func TestSendPacketWithAuth(t *testing.T) {
 		t.Fatalf("sendPacket error: %v", err)
 	}
 
-	got := readUDP(t, client, time.Second)
+	got := readUDP(t, client)
 	// Should be payload + 10-byte HMAC
 	if len(got) != len(payload)+10 {
 		t.Fatalf("expected %d bytes (payload+hash), got %d", len(payload)+10, len(got))
@@ -607,7 +617,11 @@ func TestHandleMasterRegisterRequestFlow(t *testing.T) {
 	// Build a register request with mode and flags
 	peerID := uint32(55555)
 	reqData := makeControlPacketWithModeFlags(PacketType_MasterRegisterRequest, peerID, 0x6A, [4]byte{0, 0, 0, 0x0D})
-	_, err = s.handlePacket(reqData, client.LocalAddr().(*net.UDPAddr))
+	clientUDPAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(reqData, clientUDPAddr)
 	if err != nil {
 		t.Fatalf("handlePacket error: %v", err)
 	}
@@ -627,7 +641,7 @@ func TestHandleMasterRegisterRequestFlow(t *testing.T) {
 	}
 
 	// Verify reply was sent
-	reply := readUDP(t, client, time.Second)
+	reply := readUDP(t, client)
 	if reply[0] != byte(PacketType_MasterRegisterReply) {
 		t.Fatalf("expected register reply type 0x%02X, got 0x%02X", PacketType_MasterRegisterReply, reply[0])
 	}
@@ -645,7 +659,11 @@ func TestHandleMasterRegisterRequestShortPacket(t *testing.T) {
 
 	// Short register request (no mode/flags) — should still work using defaults
 	reqData := makeControlPacket(PacketType_MasterRegisterRequest, 77777)
-	_, err = s.handlePacket(reqData, client.LocalAddr().(*net.UDPAddr))
+	clientUDPAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(reqData, clientUDPAddr)
 	if err != nil {
 		t.Fatalf("handlePacket error: %v", err)
 	}
@@ -674,7 +692,11 @@ func TestHandleMasterAliveRequestFlow(t *testing.T) {
 
 	peerID := uint32(66666)
 	reqData := makeControlPacket(PacketType_MasterAliveRequest, peerID)
-	_, err = s.handlePacket(reqData, client.LocalAddr().(*net.UDPAddr))
+	aliveAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(reqData, aliveAddr)
 	if err != nil {
 		t.Fatalf("handlePacket error: %v", err)
 	}
@@ -691,7 +713,7 @@ func TestHandleMasterAliveRequestFlow(t *testing.T) {
 	}
 
 	// Verify reply was sent
-	reply := readUDP(t, client, time.Second)
+	reply := readUDP(t, client)
 	if reply[0] != byte(PacketType_MasterAliveReply) {
 		t.Fatalf("expected alive reply type 0x%02X, got 0x%02X", PacketType_MasterAliveReply, reply[0])
 	}
@@ -708,12 +730,16 @@ func TestHandlePeerListRequestFlow(t *testing.T) {
 	defer client.Close()
 
 	reqData := makeControlPacket(PacketType_PeerListRequest, 88888)
-	_, err = s.handlePacket(reqData, client.LocalAddr().(*net.UDPAddr))
+	peerListAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(reqData, peerListAddr)
 	if err != nil {
 		t.Fatalf("handlePacket error: %v", err)
 	}
 
-	reply := readUDP(t, client, time.Second)
+	reply := readUDP(t, client)
 	if reply[0] != byte(PacketType_PeerListReply) {
 		t.Fatalf("expected peer list reply type 0x%02X, got 0x%02X", PacketType_PeerListReply, reply[0])
 	}
@@ -731,7 +757,11 @@ func TestHandlePeerListRequestTooShort(t *testing.T) {
 
 	// Packet type + only 2 bytes (too short for peer ID)
 	data := []byte{byte(PacketType_PeerListRequest), 0x00, 0x01}
-	_, err = s.handlePacket(data, client.LocalAddr().(*net.UDPAddr))
+	shortAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(data, shortAddr)
 	if err == nil {
 		t.Fatal("expected error for too-short peer list request")
 	}
@@ -936,7 +966,8 @@ func TestHandlePacketAuthEnabledBadHash(t *testing.T) {
 
 	// Valid-length packet but bad hash
 	payload := makeControlPacket(PacketType_MasterRegisterRequest, 12345)
-	data := append(payload, make([]byte, 10)...) // 10 zero bytes as bad hash
+	payload = append(payload, make([]byte, 10)...) // 10 zero bytes as bad hash
+	data := payload
 	_, err := s.handlePacket(data, addr)
 	if err == nil {
 		t.Fatal("expected auth failure error")
@@ -958,14 +989,18 @@ func TestHandlePacketAuthEnabledSuccess(t *testing.T) {
 	payload := makeControlPacket(PacketType_MasterRegisterRequest, peerID)
 	data := signPacket(t, payload, hexKey)
 
-	_, err = s.handlePacket(data, client.LocalAddr().(*net.UDPAddr))
+	authAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(data, authAddr)
 	if err != nil {
 		t.Fatalf("expected auth success, got error: %v", err)
 	}
 
 	// Verify peer was registered
 	s.mu.RLock()
-	_, ok := s.peers[peerID]
+	_, ok = s.peers[peerID]
 	s.mu.RUnlock()
 	if !ok {
 		t.Fatal("expected peer to be registered after authenticated request")
@@ -1006,14 +1041,22 @@ func TestSendUserPacketToMultiplePeers(t *testing.T) {
 	defer client2.Close()
 
 	// Register two peers
-	s.upsertPeer(1, client1.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
-	s.upsertPeer(2, client2.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
+	client1Addr, ok := client1.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	client2Addr, ok := client2.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	s.upsertPeer(1, client1Addr, 0x6A, [4]byte{})
+	s.upsertPeer(2, client2Addr, 0x6A, [4]byte{})
 
 	payload := []byte("broadcast")
 	s.SendUserPacket(payload)
 
-	got1 := readUDP(t, client1, time.Second)
-	got2 := readUDP(t, client2, time.Second)
+	got1 := readUDP(t, client1)
+	got2 := readUDP(t, client2)
 
 	if string(got1) != "broadcast" {
 		t.Fatalf("client1 expected 'broadcast', got %q", got1)
@@ -1033,7 +1076,11 @@ func TestSendUserPacketWhenStopped(t *testing.T) {
 	}
 	defer client.Close()
 
-	s.upsertPeer(1, client.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
+	stoppedAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	s.upsertPeer(1, stoppedAddr, 0x6A, [4]byte{})
 	s.stopped.Store(true)
 
 	s.SendUserPacket([]byte("should not arrive"))
@@ -1073,11 +1120,15 @@ func TestSendUserPacketSkipsNilAddrPeers(t *testing.T) {
 	s.mu.Unlock()
 
 	// Add a peer with a real addr
-	s.upsertPeer(1, client.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
+	clientAddrSelective, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	s.upsertPeer(1, clientAddrSelective, 0x6A, [4]byte{})
 
 	s.SendUserPacket([]byte("selective"))
 
-	got := readUDP(t, client, time.Second)
+	got := readUDP(t, client)
 	if string(got) != "selective" {
 		t.Fatalf("expected 'selective', got %q", got)
 	}
@@ -1094,12 +1145,16 @@ func TestSendUserPacketWithAuth(t *testing.T) {
 	}
 	defer client.Close()
 
-	s.upsertPeer(1, client.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
+	clientAddrAuth, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	s.upsertPeer(1, clientAddrAuth, 0x6A, [4]byte{})
 
 	payload := []byte("authenticated-broadcast")
 	s.SendUserPacket(payload)
 
-	got := readUDP(t, client, time.Second)
+	got := readUDP(t, client)
 	if len(got) != len(payload)+10 {
 		t.Fatalf("expected %d bytes, got %d", len(payload)+10, len(got))
 	}
@@ -1123,7 +1178,11 @@ func TestSendUserPacketDataIsCopied(t *testing.T) {
 	}
 	defer client.Close()
 
-	s.upsertPeer(1, client.LocalAddr().(*net.UDPAddr), 0x6A, [4]byte{})
+	copyAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	s.upsertPeer(1, copyAddr, 0x6A, [4]byte{})
 
 	payload := []byte("original")
 	s.SendUserPacket(payload)
@@ -1131,7 +1190,7 @@ func TestSendUserPacketDataIsCopied(t *testing.T) {
 	// Mutate original after sending — should not affect what was sent
 	payload[0] = 'X'
 
-	got := readUDP(t, client, time.Second)
+	got := readUDP(t, client)
 	if got[0] != 'o' {
 		t.Fatal("SendUserPacket should copy data, not use original slice")
 	}
@@ -1222,7 +1281,10 @@ func TestHandlerLoopProcessesPackets(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	s.udp = conn
-	srvAddr := conn.LocalAddr().(*net.UDPAddr)
+	srvAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	// Start the handler goroutine
 	s.wg.Add(1)
@@ -1304,7 +1366,10 @@ func TestHandlerLoopWithBurstHandler(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	s.udp = conn
-	srvAddr := conn.LocalAddr().(*net.UDPAddr)
+	srvAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	var received atomic.Bool
 	var wg sync.WaitGroup
@@ -1405,7 +1470,10 @@ func TestFullRegistrationFlow(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer client.Close()
-	clientAddr := client.LocalAddr().(*net.UDPAddr)
+	clientAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	peerID := uint32(44444)
 
@@ -1415,7 +1483,7 @@ func TestFullRegistrationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	regReply := readUDP(t, client, time.Second)
+	regReply := readUDP(t, client)
 	if regReply[0] != byte(PacketType_MasterRegisterReply) {
 		t.Fatal("expected register reply")
 	}
@@ -1426,7 +1494,7 @@ func TestFullRegistrationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("alive: %v", err)
 	}
-	aliveReply := readUDP(t, client, time.Second)
+	aliveReply := readUDP(t, client)
 	if aliveReply[0] != byte(PacketType_MasterAliveReply) {
 		t.Fatal("expected alive reply")
 	}
@@ -1437,7 +1505,7 @@ func TestFullRegistrationFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peer list: %v", err)
 	}
-	peerListReply := readUDP(t, client, time.Second)
+	peerListReply := readUDP(t, client)
 	if peerListReply[0] != byte(PacketType_PeerListReply) {
 		t.Fatal("expected peer list reply")
 	}
@@ -1488,7 +1556,11 @@ func TestHandleMasterAliveRequestTooShort(t *testing.T) {
 	defer client.Close()
 
 	data := []byte{byte(PacketType_MasterAliveRequest), 0x00, 0x01}
-	_, err = s.handlePacket(data, client.LocalAddr().(*net.UDPAddr))
+	aliveShortAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(data, aliveShortAddr)
 	if err == nil {
 		t.Fatal("expected error for too-short alive request")
 	}
@@ -1507,7 +1579,11 @@ func TestHandleMasterRegisterRequestTooShort(t *testing.T) {
 	defer client.Close()
 
 	data := []byte{byte(PacketType_MasterRegisterRequest), 0x00}
-	_, err = s.handlePacket(data, client.LocalAddr().(*net.UDPAddr))
+	regShortAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	_, err = s.handlePacket(data, regShortAddr)
 	if err == nil {
 		t.Fatal("expected error for too-short register request")
 	}

@@ -14,6 +14,16 @@ import (
 	"github.com/USA-RedDragon/ipsc2hbrp/internal/ipsc"
 )
 
+// Test protocol tag constants to avoid goconst warnings.
+const (
+	tagRPTL    = "RPTL"
+	tagRPTCL   = "RPTCL"
+	tagRPTC    = "RPTC"
+	tagRPTK    = "RPTK"
+	tagMSTPING = "MSTPING"
+	tagDMRD    = "DMRD"
+)
+
 func testHBRPConfig() *config.Config {
 	return &config.Config{
 		HBRP: config.HBRP{
@@ -111,7 +121,7 @@ func TestSendLoginPacket(t *testing.T) {
 
 	data := <-client.connTX
 	// Should start with "RPTL"
-	if string(data[:4]) != "RPTL" {
+	if string(data[:4]) != tagRPTL {
 		t.Fatalf("expected RPTL prefix, got %q", string(data[:4]))
 	}
 	// Should contain the hex ID
@@ -131,7 +141,7 @@ func TestSendRPTCLPacket(t *testing.T) {
 	client.sendRPTCL()
 
 	data := <-client.connTX
-	if string(data[:5]) != "RPTCL" {
+	if string(data[:5]) != tagRPTCL {
 		t.Fatalf("expected RPTCL prefix, got %q", string(data[:5]))
 	}
 	hexID := fmt.Sprintf("%08x", client.config.HBRP.ID)
@@ -150,7 +160,7 @@ func TestSendRPTCPacket(t *testing.T) {
 
 	data := <-client.connTX
 	// Should start with "RPTC"
-	if string(data[:4]) != "RPTC" {
+	if string(data[:4]) != tagRPTC {
 		t.Fatalf("expected RPTC prefix, got %q", string(data[:4]))
 	}
 
@@ -199,7 +209,7 @@ func TestSendRPTKPacket(t *testing.T) {
 
 	data := <-client.connTX
 	// Should start with "RPTK"
-	if string(data[:4]) != "RPTK" {
+	if string(data[:4]) != tagRPTK {
 		t.Fatalf("expected RPTK prefix, got %q", string(data[:4]))
 	}
 
@@ -236,7 +246,7 @@ func TestSendPingPacket(t *testing.T) {
 	client.sendPing()
 
 	data := <-client.connTX
-	if string(data[:7]) != "MSTPING" {
+	if string(data[:7]) != tagMSTPING {
 		t.Fatalf("expected MSTPING prefix, got %q", string(data[:7]))
 	}
 	hexID := fmt.Sprintf("%08x", client.config.HBRP.ID)
@@ -252,7 +262,7 @@ func TestSendPacketEncodesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	pkt := proto.Packet{
-		Signature:   "DMRD",
+		Signature:   tagDMRD,
 		Seq:         1,
 		Src:         100,
 		Dst:         200,
@@ -269,7 +279,7 @@ func TestSendPacketEncodesAndSends(t *testing.T) {
 	if len(data) != 53 {
 		t.Fatalf("expected 53 bytes, got %d", len(data))
 	}
-	if string(data[:4]) != "DMRD" {
+	if string(data[:4]) != tagDMRD {
 		t.Fatalf("expected DMRD prefix, got %q", string(data[:4]))
 	}
 }
@@ -346,7 +356,10 @@ func udpPair(t *testing.T) (*net.UDPConn, *HBRPClient) {
 	if err != nil {
 		t.Fatalf("server listen: %v", err)
 	}
-	srvAddr := serverConn.LocalAddr().(*net.UDPAddr)
+	srvAddr, ok := serverConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	cfg := testHBRPConfig()
 	cfg.HBRP.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
@@ -545,13 +558,14 @@ func TestHandlerSentLoginMSTACK(t *testing.T) {
 	// Should transition to SENT_AUTH and send RPTK
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTK" {
+		if string(data[:4]) != tagRPTK {
 			t.Fatalf("expected RPTK, got %q", string(data[:4]))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RPTK")
 	}
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_SENT_AUTH {
 		t.Fatalf("expected STATE_SENT_AUTH, got %d", client.state.Load())
 	}
@@ -574,7 +588,7 @@ func TestHandlerSentLoginRejected(t *testing.T) {
 	// Should retry login
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTL" {
+		if string(data[:4]) != tagRPTL {
 			t.Fatalf("expected RPTL retry, got %q", string(data[:4]))
 		}
 	case <-time.After(3 * time.Second):
@@ -599,13 +613,14 @@ func TestHandlerSentAuthMSTACK(t *testing.T) {
 	// Should send RPTC
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTC" {
+		if string(data[:4]) != tagRPTC {
 			t.Fatalf("expected RPTC, got %q", string(data[:4]))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RPTC")
 	}
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_SENT_RPTC {
 		t.Fatalf("expected STATE_SENT_RPTC, got %d", client.state.Load())
 	}
@@ -628,13 +643,14 @@ func TestHandlerSentAuthMSTNAK(t *testing.T) {
 	// Should fall back to STATE_SENT_LOGIN and retry login
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTL" {
+		if string(data[:4]) != tagRPTL {
 			t.Fatalf("expected RPTL retry after MSTNAK, got %q", string(data[:4]))
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for RPTL retry")
 	}
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN, got %d", client.state.Load())
 	}
@@ -656,7 +672,11 @@ func TestHandlerSentRPTCAccepted(t *testing.T) {
 	defer serverConn.Close()
 
 	cfg := testHBRPConfig()
-	cfg.HBRP.MasterServer = fmt.Sprintf("127.0.0.1:%d", serverConn.LocalAddr().(*net.UDPAddr).Port)
+	srvAddr, ok := serverConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+	cfg.HBRP.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
 	client.config = cfg
 
 	// Give it a real conn for ping
@@ -676,13 +696,14 @@ func TestHandlerSentRPTCAccepted(t *testing.T) {
 	// Should transition to STATE_READY and start ping (which sends MSTPING)
 	select {
 	case data := <-client.connTX:
-		if string(data[:7]) != "MSTPING" {
+		if string(data[:7]) != tagMSTPING {
 			t.Fatalf("expected MSTPING from ping(), got %q", string(data[:min(7, len(data))]))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for MSTPING")
 	}
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_READY {
 		t.Fatalf("expected STATE_READY, got %d", client.state.Load())
 	}
@@ -705,7 +726,7 @@ func TestHandlerSentRPTCRejected(t *testing.T) {
 	// Should retry with RPTC
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTC" {
+		if string(data[:4]) != tagRPTC {
 			t.Fatalf("expected RPTC retry, got %q", string(data[:4]))
 		}
 	case <-time.After(3 * time.Second):
@@ -774,7 +795,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 
 	// Build a valid 53-byte DMRD packet
 	pkt := proto.Packet{
-		Signature:   "DMRD",
+		Signature:   tagDMRD,
 		Seq:         0,
 		Src:         100,
 		Dst:         200,
@@ -814,7 +835,7 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 	go client.handler()
 
 	pkt := proto.Packet{
-		Signature:   "DMRD",
+		Signature:   tagDMRD,
 		Seq:         0,
 		Src:         100,
 		Dst:         200,
@@ -881,6 +902,7 @@ func TestHandlerTimeoutState(t *testing.T) {
 	// Should just log, not crash or transition
 	time.Sleep(50 * time.Millisecond)
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_TIMEOUT {
 		t.Fatalf("expected state to remain TIMEOUT, got %d", client.state.Load())
 	}
@@ -904,7 +926,7 @@ func TestPingSendsInitialPing(t *testing.T) {
 	// Should send an immediate MSTPING
 	select {
 	case data := <-client.connTX:
-		if string(data[:7]) != "MSTPING" {
+		if string(data[:7]) != tagMSTPING {
 			t.Fatalf("expected MSTPING, got %q", string(data[:min(7, len(data))]))
 		}
 	case <-time.After(2 * time.Second):
@@ -934,7 +956,7 @@ func TestPingSendsPeriodicPings(t *testing.T) {
 	// Wait for a periodic ping
 	select {
 	case data := <-client.connTX:
-		if string(data[:7]) != "MSTPING" {
+		if string(data[:7]) != tagMSTPING {
 			t.Fatalf("expected periodic MSTPING, got %q", string(data[:min(7, len(data))]))
 		}
 	case <-time.After(2 * time.Second):
@@ -982,13 +1004,14 @@ func TestPingTimeoutReconnects(t *testing.T) {
 	// Should send RPTL (login) after timeout
 	select {
 	case data := <-client.connTX:
-		if string(data[:4]) != "RPTL" {
+		if string(data[:4]) != tagRPTL {
 			t.Fatalf("expected RPTL after timeout, got %q", string(data[:min(4, len(data))]))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RPTL after ping timeout")
 	}
 
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN after timeout, got %d", client.state.Load())
 	}
@@ -1007,7 +1030,7 @@ func TestForwardTXSendsPackets(t *testing.T) {
 	go client.forwardTX()
 
 	pkt := proto.Packet{
-		Signature: "DMRD",
+		Signature: tagDMRD,
 		Seq:       5,
 		Src:       100,
 		Dst:       200,
@@ -1022,7 +1045,7 @@ func TestForwardTXSendsPackets(t *testing.T) {
 		if len(data) != 53 {
 			t.Fatalf("expected 53 bytes, got %d", len(data))
 		}
-		if string(data[:4]) != "DMRD" {
+		if string(data[:4]) != tagDMRD {
 			t.Fatalf("expected DMRD, got %q", string(data[:4]))
 		}
 	case <-time.After(2 * time.Second):
@@ -1104,7 +1127,7 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	// Should produce at least 1 HBRP packet on tx_chan
 	select {
 	case pkt := <-client.tx_chan:
-		if pkt.Signature != "DMRD" {
+		if pkt.Signature != tagDMRD {
 			t.Fatalf("expected DMRD, got %q", pkt.Signature)
 		}
 		if pkt.Src != 100 {
@@ -1208,7 +1231,7 @@ func TestStopSendsRPTCL(t *testing.T) {
 
 	// Read what was sent to the server
 	got, _ := readFromServer(t, serverConn, time.Second)
-	if string(got[:5]) != "RPTCL" {
+	if string(got[:5]) != tagRPTCL {
 		t.Fatalf("expected RPTCL disconnect, got %q", string(got[:min(5, len(got))]))
 	}
 }
@@ -1247,7 +1270,7 @@ func TestSendRPTCLDirect(t *testing.T) {
 	client.connMu.Unlock()
 
 	got, _ := readFromServer(t, serverConn, time.Second)
-	if string(got[:5]) != "RPTCL" {
+	if string(got[:5]) != tagRPTCL {
 		t.Fatalf("expected RPTCL, got %q", string(got[:min(5, len(got))]))
 	}
 	hexID := fmt.Sprintf("%08x", client.config.HBRP.ID)
@@ -1265,7 +1288,10 @@ func TestStartAndFullHandshake(t *testing.T) {
 		t.Fatalf("server listen: %v", err)
 	}
 	defer serverConn.Close()
-	srvAddr := serverConn.LocalAddr().(*net.UDPAddr)
+	srvAddr, ok := serverConn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 
 	cfg := testHBRPConfig()
 	cfg.HBRP.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
@@ -1291,7 +1317,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	// Read RPTL from server
 	loginData, clientAddr := readFromServer(t, serverConn, 2*time.Second)
-	if string(loginData[:4]) != "RPTL" {
+	if string(loginData[:4]) != tagRPTL {
 		t.Fatalf("expected RPTL, got %q", string(loginData[:4]))
 	}
 
@@ -1303,7 +1329,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	// Step 3: Client sends RPTK
 	rptkData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(rptkData[:4]) != "RPTK" {
+	if string(rptkData[:4]) != tagRPTK {
 		t.Fatalf("expected RPTK, got %q", string(rptkData[:4]))
 	}
 
@@ -1314,7 +1340,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	// Step 5: Client sends RPTC
 	rptcData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(rptcData[:4]) != "RPTC" {
+	if string(rptcData[:4]) != tagRPTC {
 		t.Fatalf("expected RPTC, got %q", string(rptcData[:4]))
 	}
 
@@ -1325,18 +1351,20 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	// Step 7: Client should now be in READY state and send MSTPING
 	pingData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(pingData[:7]) != "MSTPING" {
+	if string(pingData[:7]) != tagMSTPING {
 		t.Fatalf("expected MSTPING, got %q", string(pingData[:min(7, len(pingData))]))
 	}
 
 	// Wait for state to reach READY
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		//nolint:gosec // G115: test-only, state values fit in uint8
 		if state(client.state.Load()) == STATE_READY {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	//nolint:gosec // G115: test-only, state values fit in uint8
 	if state(client.state.Load()) != STATE_READY {
 		t.Fatalf("expected STATE_READY, got %d", client.state.Load())
 	}
@@ -1457,7 +1485,7 @@ func TestSendPacketFieldsEncoded(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	pkt := proto.Packet{
-		Signature:   "DMRD",
+		Signature:   tagDMRD,
 		Seq:         42,
 		Src:         0x123456,
 		Dst:         0xABCDEF,
