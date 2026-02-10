@@ -11,15 +11,18 @@ ipsc:
 
 mmdvm:
   - name: "BrandMeister"
-    master-server: "3104.master.brandmeister.network:62030"
+    master-server: "3104.master.brandmeister.network:62031"
     password: "passw0rd"
 
-    callsign: KI5VMF
-    radio-id: 319186803
+    callsign: N0CALL
+    radio-id: 185925701
 
     # Frequency in Hz:
     rx-freq: 429075000
     tx-freq: 424075000
+
+    # TX power in dBm (optional):
+    # tx-power: 30
 
     color-code: 7
     # Optional latitude and longitude:
