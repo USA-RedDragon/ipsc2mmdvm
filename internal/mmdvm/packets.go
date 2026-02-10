@@ -19,13 +19,11 @@ func (h *MMDVMClient) sendLogin() {
 }
 
 func (h *MMDVMClient) sendRPTCL() {
-	hexid := make([]byte, 8)
-	copy(hexid, []byte(fmt.Sprintf("%08x", h.cfg.ID)))
 	var (
-		data = make([]byte, len("RPTCL")+8)
+		data = make([]byte, len("RPTCL")+4)
 		n    = copy(data, "RPTCL")
 	)
-	copy(data[n:], hexid)
+	binary.BigEndian.PutUint32(data[n:], h.cfg.ID)
 	h.connTX <- data
 }
 
@@ -73,13 +71,11 @@ func (h *MMDVMClient) sendRPTK(random []byte) {
 }
 
 func (h *MMDVMClient) sendPing() {
-	hexid := make([]byte, 8)
-	copy(hexid, []byte(fmt.Sprintf("%08x", h.cfg.ID)))
 	var (
-		data = make([]byte, len("MSTPING")+8)
-		n    = copy(data, "MSTPING")
+		data = make([]byte, len("RPTPING")+4)
+		n    = copy(data, "RPTPING")
 	)
-	copy(data[n:], hexid)
+	binary.BigEndian.PutUint32(data[n:], h.cfg.ID)
 	h.connTX <- data
 }
 

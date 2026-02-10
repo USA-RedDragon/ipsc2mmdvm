@@ -236,7 +236,7 @@ func (h *MMDVMClient) handler() {
 				}
 			case uint32(STATE_READY):
 				switch string(data[:4]) {
-				case "RPTP":
+				case "MSTP":
 					if len(data) >= 7 && string(data[:7]) == "RPTPONG" {
 						h.lastPing.Store(time.Now().UnixNano())
 					}
