@@ -28,9 +28,9 @@ func (h *MMDVMClient) sendRPTCL() {
 }
 
 func (h *MMDVMClient) sendRPTC() {
-	str := []byte("RPTC")
+	str := []byte("RPTC") // 0:4
 	str = append(str, make([]byte, 4)...)
-	binary.BigEndian.PutUint32(str[4:], h.cfg.ID)
+	binary.BigEndian.PutUint32(str[4:], h.cfg.ID) // 4:8
 
 	// Apply defaults for fields the config library may not handle.
 	slots := h.cfg.Slots
@@ -38,20 +38,20 @@ func (h *MMDVMClient) sendRPTC() {
 		slots = 3
 	}
 
-	str = append(str, []byte(fmt.Sprintf("%-8s", h.cfg.Callsign))...)
-	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.RXFreq))...)
-	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.TXFreq))...)
-	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.TXPower))...)
-	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.ColorCode))...)
-	str = append(str, []byte(fmt.Sprintf("%+08.4f", h.cfg.Latitude))...)
-	str = append(str, []byte(fmt.Sprintf("%+09.4f", h.cfg.Longitude))...)
-	str = append(str, []byte(fmt.Sprintf("%03d", h.cfg.Height))...)
-	str = append(str, []byte(fmt.Sprintf("%-20s", h.cfg.Location))...)
-	str = append(str, []byte(fmt.Sprintf("%-19s", h.cfg.Description))...)
-	str = append(str, []byte(fmt.Sprintf("%d", slots))...)
-	str = append(str, []byte(fmt.Sprintf("%-124s", h.cfg.URL))...)
-	str = append(str, []byte(fmt.Sprintf("%-40s", "20210921"))...)
-	str = append(str, []byte(fmt.Sprintf("%-40s", "MMDVM_MMDVM_HS_Dual_Hat"))...)
+	str = append(str, []byte(fmt.Sprintf("%-8s", h.cfg.Callsign))...)             // 8:16
+	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.RXFreq))...)               // 16:25
+	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.TXFreq))...)               // 25:34
+	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.TXPower))...)              // 34:36
+	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.ColorCode))...)            // 36:38
+	str = append(str, []byte(fmt.Sprintf("%+08.4f", h.cfg.Latitude))...)          // 38:46
+	str = append(str, []byte(fmt.Sprintf("%+09.4f", h.cfg.Longitude))...)         // 46:55
+	str = append(str, []byte(fmt.Sprintf("%03d", h.cfg.Height))...)               // 55:58
+	str = append(str, []byte(fmt.Sprintf("%-20s", h.cfg.Location))...)            // 58:78
+	str = append(str, []byte(fmt.Sprintf("%-19s", h.cfg.Description))...)         // 78:97
+	str = append(str, []byte(fmt.Sprintf("%d", slots))...)                        // 97:98
+	str = append(str, []byte(fmt.Sprintf("%-124s", h.cfg.URL))...)                // 98:222
+	str = append(str, []byte(fmt.Sprintf("%-40s", "20210921"))...)                // 222:262
+	str = append(str, []byte(fmt.Sprintf("%-40s", "MMDVM_MMDVM_HS_Dual_Hat"))...) // 262:302
 
 	h.connTX <- str
 }
