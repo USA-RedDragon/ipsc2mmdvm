@@ -11,6 +11,7 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
 	"github.com/ztrue/shutdown"
@@ -59,9 +60,13 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	slog.SetDefault(logger)
 
 	// Create one MMDVM client per configured network (DMR master).
+	// All clients share a single outbound timeslot manager so that
+	// only one master can feed a given timeslot toward IPSC at a time.
+	outboundTSMgr := timeslot.NewManager()
 	mmdvmClients := make([]*mmdvm.MMDVMClient, 0, len(cfg.MMDVM))
 	for i := range cfg.MMDVM {
 		client := mmdvm.NewMMDVMClient(&cfg.MMDVM[i])
+		client.SetOutboundTSManager(outboundTSMgr)
 		err = client.Start()
 		if err != nil {
 			return fmt.Errorf("failed to start MMDVM client %q: %w", cfg.MMDVM[i].Name, err)

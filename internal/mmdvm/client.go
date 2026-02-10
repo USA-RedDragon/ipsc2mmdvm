@@ -14,6 +14,7 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
 
 type MMDVMClient struct {
@@ -39,6 +40,12 @@ type MMDVMClient struct {
 	rfRewrites      []rewrite.Rule // RF→Net (outbound to this master)
 	netRewrites     []rewrite.Rule // Net→RF (inbound from this master)
 	passallRewrites []rewrite.Rule // PassAll fallback for RF→Net
+
+	// Timeslot managers prevent interleaved calls on the same slot.
+	// outboundTSMgr is shared across all clients for the MMDVM→IPSC
+	// direction. inboundTSMgr is per-client for the IPSC→MMDVM direction.
+	outboundTSMgr *timeslot.Manager
+	inboundTSMgr  *timeslot.Manager
 }
 
 type state uint8
@@ -56,6 +63,12 @@ const (
 	packetTypeMstack = "MSTACK"
 )
 
+// DMR frame type and data type constants for call termination detection.
+const (
+	frameTypeDataSync     uint = 2 // FrameType value for data sync (header/terminator)
+	dtypeTerminatorWithLC uint = 2 // DataType value for Terminator with Link Control
+)
+
 func NewMMDVMClient(cfg *config.MMDVM) *MMDVMClient {
 	tx_chan := make(chan proto.Packet, 256)
 	translator, err := ipsc.NewIPSCTranslator()
@@ -63,14 +76,15 @@ func NewMMDVMClient(cfg *config.MMDVM) *MMDVMClient {
 		slog.Warn("failed to load IPSC translator", "error", err)
 	}
 	c := &MMDVMClient{
-		cfg:        cfg,
-		done:       make(chan struct{}),
-		tx_chan:    tx_chan,
-		connRX:     make(chan []byte, 16),
-		connTX:     make(chan []byte, 16),
-		keepAlive:  5 * time.Second,
-		timeout:    15 * time.Second,
-		translator: translator,
+		cfg:          cfg,
+		done:         make(chan struct{}),
+		tx_chan:      tx_chan,
+		connRX:       make(chan []byte, 16),
+		connTX:       make(chan []byte, 16),
+		keepAlive:    5 * time.Second,
+		timeout:      15 * time.Second,
+		translator:   translator,
+		inboundTSMgr: timeslot.NewManager(),
 	}
 	c.state.Store(uint32(STATE_IDLE))
 	c.buildRewriteRules()
@@ -307,11 +321,20 @@ func (h *MMDVMClient) handleReady(data []byte) {
 
 		slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
 
-		if h.ipscHandler != nil && h.translator != nil {
-			ipscPackets := h.translator.TranslateToIPSC(packet)
-			for _, ipscData := range ipscPackets {
-				h.ipscHandler(ipscData)
+		// Timeslot arbitration: buffer competing calls, deliver FIFO.
+		isTerminator := packet.FrameType == frameTypeDataSync && packet.DTypeOrVSeq == dtypeTerminatorWithLC
+		if h.outboundTSMgr != nil {
+			if !h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet) {
+				slog.Debug("MMDVM DMRD buffered (timeslot busy)",
+					"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
+				return
 			}
+		}
+
+		h.translateAndForwardToIPSC(packet)
+
+		if isTerminator && h.outboundTSMgr != nil {
+			h.drainPendingOutbound(packet.Slot, packet.StreamID)
 		}
 	default:
 		slog.Info("Got unknown packet from MMDVM server", "network", h.cfg.Name, "data", data)
@@ -501,8 +524,89 @@ func (h *MMDVMClient) forwardTX() {
 	}
 }
 
+// translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
+func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
+	if h.ipscHandler != nil && h.translator != nil {
+		ipscPackets := h.translator.TranslateToIPSC(packet)
+		for _, ipscData := range ipscPackets {
+			h.ipscHandler(ipscData)
+		}
+	}
+}
+
+// drainPendingOutbound delivers buffered pending calls on the given slot
+// after the active stream terminates (MMDVM→IPSC direction). If a pending
+// call's packets include a terminator, it chains to the next pending call.
+func (h *MMDVMClient) drainPendingOutbound(slot bool, streamID uint) {
+	currentStreamID := streamID
+	for {
+		buffered := h.outboundTSMgr.Release(slot, currentStreamID)
+		if len(buffered) == 0 {
+			return
+		}
+		var nextStreamID uint
+		hasTerminator := false
+		for _, item := range buffered {
+			pkt, ok := item.(proto.Packet)
+			if !ok {
+				continue
+			}
+			h.translateAndForwardToIPSC(pkt)
+			if pkt.FrameType == frameTypeDataSync && pkt.DTypeOrVSeq == dtypeTerminatorWithLC {
+				hasTerminator = true
+				nextStreamID = pkt.StreamID
+			}
+		}
+		if !hasTerminator {
+			return
+		}
+		currentStreamID = nextStreamID
+	}
+}
+
+// drainPendingInbound delivers buffered pending calls on the given slot
+// after the active stream terminates (IPSC→MMDVM direction). Returns
+// false if the done channel was signaled.
+func (h *MMDVMClient) drainPendingInbound(slot bool, streamID uint) bool {
+	currentStreamID := streamID
+	for {
+		buffered := h.inboundTSMgr.Release(slot, currentStreamID)
+		if len(buffered) == 0 {
+			return true
+		}
+		var nextStreamID uint
+		hasTerminator := false
+		for _, item := range buffered {
+			pkt, ok := item.(proto.Packet)
+			if !ok {
+				continue
+			}
+			select {
+			case h.tx_chan <- pkt:
+			case <-h.done:
+				return false
+			}
+			if pkt.FrameType == frameTypeDataSync && pkt.DTypeOrVSeq == dtypeTerminatorWithLC {
+				hasTerminator = true
+				nextStreamID = pkt.StreamID
+			}
+		}
+		if !hasTerminator {
+			return true
+		}
+		currentStreamID = nextStreamID
+	}
+}
+
 func (h *MMDVMClient) SetIPSCHandler(handler func(data []byte)) {
 	h.ipscHandler = handler
+}
+
+// SetOutboundTSManager sets the shared timeslot manager used for the
+// MMDVM→IPSC direction. This manager is shared across all clients so
+// that only one MMDVM master can feed a given timeslot at a time.
+func (h *MMDVMClient) SetOutboundTSManager(mgr *timeslot.Manager) {
+	h.outboundTSMgr = mgr
 }
 
 // MatchesRules checks whether the given IPSC data would match this client's
@@ -551,12 +655,29 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			}
 		}
 		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
+
+		// Timeslot arbitration: buffer competing calls, deliver FIFO.
+		isTerminator := pkt.FrameType == frameTypeDataSync && pkt.DTypeOrVSeq == dtypeTerminatorWithLC
+		if h.inboundTSMgr != nil {
+			if !h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt) {
+				slog.Debug("HandleIPSCBurst: buffered (timeslot busy)",
+					"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
+				continue
+			}
+		}
+
 		matched = true
 
 		select {
 		case h.tx_chan <- pkt:
 		case <-h.done:
 			return matched
+		}
+
+		if isTerminator && h.inboundTSMgr != nil {
+			if !h.drainPendingInbound(pkt.Slot, pkt.StreamID) {
+				return matched
+			}
 		}
 	}
 	return matched
