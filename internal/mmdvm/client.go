@@ -226,9 +226,9 @@ func (h *MMDVMClient) handler() {
 				// The data starts with either MSTACK or MSTNAK
 				if len(data) >= 6 && string(data[:6]) == "RPTACK" {
 					slog.Info("Config accepted, starting ping routine", "network", h.cfg.Name)
+					h.state.Store(uint32(STATE_READY))
 					h.wg.Add(1)
 					go h.ping()
-					h.state.Store(uint32(STATE_READY))
 				} else if len(data) >= 6 && string(data[:6]) == "MSTNAK" {
 					slog.Info("Configuration rejected", "network", h.cfg.Name)
 					time.Sleep(1 * time.Second)
@@ -237,7 +237,7 @@ func (h *MMDVMClient) handler() {
 			case uint32(STATE_READY):
 				switch string(data[:4]) {
 				case "MSTP":
-					if len(data) >= 7 && string(data[:7]) == "RPTPONG" {
+					if len(data) >= 7 && string(data[:7]) == "MSTPONG" {
 						h.lastPing.Store(time.Now().UnixNano())
 					}
 				case "RPTS":
@@ -351,7 +351,7 @@ func (h *MMDVMClient) tx() {
 			return
 		case data := <-h.connTX:
 			h.connMu.Lock()
-			slog.Debug("sending packet", "data", fmt.Sprintf("%4X", data), "strdata", string(data), "network", h.cfg.Name)
+			slog.Debug("sending packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
 			_, err := h.conn.Write(data)
 			h.connMu.Unlock()
 			if err != nil {
