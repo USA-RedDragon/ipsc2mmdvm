@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	github.com/USA-RedDragon/configulator v0.0.4
 	github.com/USA-RedDragon/dmrgo v0.0.1
-	github.com/lmittmann/tint v1.1.3
+	github.com/lmittmann/tint v1.2.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/cobra v1.10.2
 	github.com/vishvananda/netlink v1.3.1
