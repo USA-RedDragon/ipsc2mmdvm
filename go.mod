@@ -1,6 +1,6 @@
 module github.com/USA-RedDragon/ipsc2mmdvm
 
-go 1.25.7
+go 1.27.0
 
 require (
 	github.com/USA-RedDragon/configulator v0.0.4
