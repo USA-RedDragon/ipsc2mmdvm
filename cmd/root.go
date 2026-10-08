@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/USA-RedDragon/configulator"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
@@ -70,8 +71,9 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", m.Handler())
 		metricsSrv = &http.Server{
-			Addr:    cfg.Metrics.Address,
-			Handler: mux,
+			Addr:              cfg.Metrics.Address,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {
 			slog.Info("Starting metrics server", "address", cfg.Metrics.Address)

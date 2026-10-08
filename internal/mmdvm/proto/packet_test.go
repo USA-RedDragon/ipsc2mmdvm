@@ -11,7 +11,7 @@ func samplePacket() Packet {
 		dmr[i] = byte(i)
 	}
 	return Packet{
-		Signature:   "DMRD",
+		Signature:   DMRDSignature,
 		Seq:         42,
 		Src:         123456,
 		Dst:         654321,
@@ -52,7 +52,7 @@ func TestDecodeSignature(t *testing.T) {
 	if !ok {
 		t.Fatal("Decode returned false")
 	}
-	if decoded.Signature != "DMRD" {
+	if decoded.Signature != DMRDSignature {
 		t.Fatalf("expected signature DMRD, got %q", decoded.Signature)
 	}
 }
@@ -248,7 +248,7 @@ func TestDecodeTooLong(t *testing.T) {
 func TestDecodeExact53(t *testing.T) {
 	t.Parallel()
 	data := make([]byte, 53)
-	copy(data[:4], "DMRD")
+	copy(data[:4], DMRDSignature)
 	_, ok := Decode(data)
 	if !ok {
 		t.Fatal("expected Decode to succeed on 53-byte packet")
@@ -259,7 +259,7 @@ func TestDecodeAccepts54And55(t *testing.T) {
 	t.Parallel()
 	for size := 54; size <= 55; size++ {
 		data := make([]byte, size)
-		copy(data[:4], "DMRD")
+		copy(data[:4], DMRDSignature)
 		_, ok := Decode(data)
 		if !ok {
 			t.Fatalf("expected Decode to succeed on %d-byte packet", size)
@@ -325,7 +325,7 @@ func TestString(t *testing.T) {
 func TestEncodeBitFields(t *testing.T) {
 	t.Parallel()
 	p := Packet{
-		Signature:   "DMRD",
+		Signature:   DMRDSignature,
 		Slot:        true,
 		GroupCall:   false,
 		FrameType:   2,

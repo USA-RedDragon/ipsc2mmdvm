@@ -229,58 +229,42 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 
 	switch PacketType(packetType) {
 	case PacketType_GroupVoice:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("group_voice").Inc()
-		}
+		s.countReceived("group_voice")
 		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_PrivateVoice:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("private_voice").Inc()
-		}
+		s.countReceived("private_voice")
 		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_GroupData:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("group_data").Inc()
-		}
+		s.countReceived("group_data")
 		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_PrivateData:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("private_data").Inc()
-		}
+		s.countReceived("private_data")
 		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_RepeaterWakeUp:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("wake_up").Inc()
-		}
+		s.countReceived("wake_up")
 		if err := s.handleRepeaterWakeUp(data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_MasterRegisterRequest:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("register").Inc()
-		}
+		s.countReceived("register")
 		if err := s.handleMasterRegisterRequest(data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_MasterAliveRequest:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("alive").Inc()
-		}
+		s.countReceived("alive")
 		if err := s.handleMasterAliveRequest(data, addr); err != nil {
 			return nil, err
 		}
 	case PacketType_PeerListRequest:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("peer_list").Inc()
-		}
+		s.countReceived("peer_list")
 		if err := s.handlePeerListRequest(data, addr); err != nil {
 			return nil, err
 		}
@@ -288,13 +272,18 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 		// These are reply packets, we shouldn't receive them as a server, keeping quiet.
 		return nil, ErrPacketIgnored
 	default:
-		if s.metrics != nil {
-			s.metrics.IPSCPacketsReceived.WithLabelValues("other").Inc()
-		}
+		s.countReceived("other")
 		return nil, fmt.Errorf("unknown packet type: %d", packetType)
 	}
 
 	return &Packet{data: data}, nil
+}
+
+// countReceived increments the received packet counter for packetType.
+func (s *IPSCServer) countReceived(packetType string) {
+	if s.metrics != nil {
+		s.metrics.IPSCPacketsReceived.WithLabelValues(packetType).Inc()
+	}
 }
 
 func (s *IPSCServer) handleMasterRegisterRequest(data []byte, addr *net.UDPAddr) error {

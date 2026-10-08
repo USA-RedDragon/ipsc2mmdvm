@@ -6,6 +6,8 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
+const testRuleName = "test"
+
 // helper to create a basic group-call packet
 func groupPkt(slot uint, dst uint) *proto.Packet {
 	return &proto.Packet{
@@ -32,7 +34,7 @@ func privatePkt(slot uint, dst uint, src uint) *proto.Packet {
 
 func TestTGRewrite_Match_Single(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
 	pkt := groupPkt(1, 9)
 
 	res := r.Process(pkt)
@@ -49,7 +51,7 @@ func TestTGRewrite_Match_Single(t *testing.T) {
 
 func TestTGRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10}
 
 	pkt := groupPkt(1, 105)
 	res := r.Process(pkt)
@@ -64,7 +66,7 @@ func TestTGRewrite_Match_Range(t *testing.T) {
 
 func TestTGRewrite_NoMatch_WrongSlot(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
 	pkt := groupPkt(2, 9) // wrong slot
 
 	res := r.Process(pkt)
@@ -75,7 +77,7 @@ func TestTGRewrite_NoMatch_WrongSlot(t *testing.T) {
 
 func TestTGRewrite_NoMatch_PrivateCall(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 2, ToTG: 100, Range: 1}
 	pkt := privatePkt(1, 9, 1234) // private call
 
 	res := r.Process(pkt)
@@ -86,7 +88,7 @@ func TestTGRewrite_NoMatch_PrivateCall(t *testing.T) {
 
 func TestTGRewrite_NoMatch_OutOfRange(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 5}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 5}
 	pkt := groupPkt(1, 106) // just outside range (100-104)
 
 	res := r.Process(pkt)
@@ -97,7 +99,7 @@ func TestTGRewrite_NoMatch_OutOfRange(t *testing.T) {
 
 func TestTGRewrite_SameSlot_SameTG(t *testing.T) {
 	t.Parallel()
-	r := &TGRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 1, ToTG: 9, Range: 1}
+	r := &TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 1, ToTG: 9, Range: 1}
 	pkt := groupPkt(1, 9)
 
 	res := r.Process(pkt)
@@ -124,7 +126,7 @@ func TestTGRewrite_Trace(t *testing.T) {
 
 func TestPCRewrite_Match_Single(t *testing.T) {
 	t.Parallel()
-	r := &PCRewrite{Name: "test", FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
+	r := &PCRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
 	pkt := privatePkt(1, 100, 1234)
 
 	res := r.Process(pkt)
@@ -141,7 +143,7 @@ func TestPCRewrite_Match_Single(t *testing.T) {
 
 func TestPCRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
-	r := &PCRewrite{Name: "test", FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 2000, Range: 100}
+	r := &PCRewrite{Name: testRuleName, FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 2000, Range: 100}
 	pkt := privatePkt(1, 1050, 5678)
 
 	res := r.Process(pkt)
@@ -156,7 +158,7 @@ func TestPCRewrite_Match_Range(t *testing.T) {
 
 func TestPCRewrite_NoMatch_GroupCall(t *testing.T) {
 	t.Parallel()
-	r := &PCRewrite{Name: "test", FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
+	r := &PCRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
 	pkt := groupPkt(1, 100) // group call won't match PC
 
 	res := r.Process(pkt)
@@ -167,7 +169,7 @@ func TestPCRewrite_NoMatch_GroupCall(t *testing.T) {
 
 func TestPCRewrite_NoMatch_WrongSlot(t *testing.T) {
 	t.Parallel()
-	r := &PCRewrite{Name: "test", FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
+	r := &PCRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 200, Range: 1}
 	pkt := privatePkt(2, 100, 1234) // wrong slot
 
 	res := r.Process(pkt)
@@ -180,7 +182,7 @@ func TestPCRewrite_NoMatch_WrongSlot(t *testing.T) {
 
 func TestTypeRewrite_Match(t *testing.T) {
 	t.Parallel()
-	r := &TypeRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 2, ToID: 3100, Range: 1}
+	r := &TypeRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 2, ToID: 3100, Range: 1}
 	pkt := groupPkt(1, 9)
 
 	res := r.Process(pkt)
@@ -200,7 +202,7 @@ func TestTypeRewrite_Match(t *testing.T) {
 
 func TestTypeRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
-	r := &TypeRewrite{Name: "test", FromSlot: 1, FromTG: 100, ToSlot: 1, ToID: 5000, Range: 10}
+	r := &TypeRewrite{Name: testRuleName, FromSlot: 1, FromTG: 100, ToSlot: 1, ToID: 5000, Range: 10}
 	pkt := groupPkt(1, 107)
 
 	res := r.Process(pkt)
@@ -218,7 +220,7 @@ func TestTypeRewrite_Match_Range(t *testing.T) {
 
 func TestTypeRewrite_NoMatch_PrivateCall(t *testing.T) {
 	t.Parallel()
-	r := &TypeRewrite{Name: "test", FromSlot: 1, FromTG: 9, ToSlot: 2, ToID: 3100, Range: 1}
+	r := &TypeRewrite{Name: testRuleName, FromSlot: 1, FromTG: 9, ToSlot: 2, ToID: 3100, Range: 1}
 	pkt := privatePkt(1, 9, 1234) // private call
 
 	res := r.Process(pkt)
@@ -231,7 +233,7 @@ func TestTypeRewrite_NoMatch_PrivateCall(t *testing.T) {
 
 func TestSrcRewrite_Match(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: "test", FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
 	pkt := privatePkt(1, 999, 1234) // private call from source 1234
 
 	res := r.Process(pkt)
@@ -254,7 +256,7 @@ func TestSrcRewrite_Match(t *testing.T) {
 
 func TestSrcRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: "test", FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 5000, Range: 100}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 5000, Range: 100}
 	pkt := privatePkt(1, 999, 1050) // source in range
 
 	res := r.Process(pkt)
@@ -274,7 +276,7 @@ func TestSrcRewrite_Match_Range(t *testing.T) {
 
 func TestSrcRewrite_Match_GroupCall(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: "test", FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 9, Range: 1}
 	pkt := groupPkt(1, 9)
 	pkt.Src = 100 // source matches
 
@@ -292,7 +294,7 @@ func TestSrcRewrite_Match_GroupCall(t *testing.T) {
 
 func TestSrcRewrite_NoMatch_WrongSource(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: "test", FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
 	pkt := privatePkt(1, 999, 5678) // wrong source
 
 	res := r.Process(pkt)
@@ -392,7 +394,7 @@ func TestSetPktSlot(t *testing.T) {
 
 func TestPassAllTG_Match(t *testing.T) {
 	t.Parallel()
-	r := &PassAllTG{Name: "test", Slot: 1}
+	r := &PassAllTG{Name: testRuleName, Slot: 1}
 	pkt := groupPkt(1, 12345)
 
 	res := r.Process(pkt)
@@ -407,7 +409,7 @@ func TestPassAllTG_Match(t *testing.T) {
 
 func TestPassAllTG_NoMatch_WrongSlot(t *testing.T) {
 	t.Parallel()
-	r := &PassAllTG{Name: "test", Slot: 1}
+	r := &PassAllTG{Name: testRuleName, Slot: 1}
 	pkt := groupPkt(2, 12345)
 
 	res := r.Process(pkt)
@@ -418,7 +420,7 @@ func TestPassAllTG_NoMatch_WrongSlot(t *testing.T) {
 
 func TestPassAllTG_NoMatch_PrivateCall(t *testing.T) {
 	t.Parallel()
-	r := &PassAllTG{Name: "test", Slot: 1}
+	r := &PassAllTG{Name: testRuleName, Slot: 1}
 	pkt := privatePkt(1, 9990, 1234)
 
 	res := r.Process(pkt)
@@ -431,7 +433,7 @@ func TestPassAllTG_NoMatch_PrivateCall(t *testing.T) {
 
 func TestPassAllPC_Match(t *testing.T) {
 	t.Parallel()
-	r := &PassAllPC{Name: "test", Slot: 2}
+	r := &PassAllPC{Name: testRuleName, Slot: 2}
 	pkt := privatePkt(2, 9990, 1234)
 
 	res := r.Process(pkt)
@@ -449,7 +451,7 @@ func TestPassAllPC_Match(t *testing.T) {
 
 func TestPassAllPC_NoMatch_WrongSlot(t *testing.T) {
 	t.Parallel()
-	r := &PassAllPC{Name: "test", Slot: 2}
+	r := &PassAllPC{Name: testRuleName, Slot: 2}
 	pkt := privatePkt(1, 9990, 1234)
 
 	res := r.Process(pkt)
@@ -460,7 +462,7 @@ func TestPassAllPC_NoMatch_WrongSlot(t *testing.T) {
 
 func TestPassAllPC_NoMatch_GroupCall(t *testing.T) {
 	t.Parallel()
-	r := &PassAllPC{Name: "test", Slot: 1}
+	r := &PassAllPC{Name: testRuleName, Slot: 1}
 	pkt := groupPkt(1, 9)
 
 	res := r.Process(pkt)
@@ -475,11 +477,11 @@ func TestApply_PassAllFallback(t *testing.T) {
 	t.Parallel()
 	// Specific rewrite only matches TG 100-109
 	specificRules := []Rule{
-		&TGRewrite{Name: "test", FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10},
+		&TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10},
 	}
 	passallRules := []Rule{
-		&PassAllTG{Name: "test", Slot: 1},
-		&PassAllPC{Name: "test", Slot: 1},
+		&PassAllTG{Name: testRuleName, Slot: 1},
+		&PassAllPC{Name: testRuleName, Slot: 1},
 	}
 
 	// TG 9 doesn't match specific rules
@@ -512,8 +514,8 @@ func TestApply_SpecificTakesPriorityOverPassAll(t *testing.T) {
 	t.Parallel()
 	// When specific rules match, passall should not be needed
 	rules := []Rule{
-		&TGRewrite{Name: "test", FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10},
-		&PassAllTG{Name: "test", Slot: 1}, // appended after specific
+		&TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 100, ToSlot: 1, ToTG: 200, Range: 10},
+		&PassAllTG{Name: testRuleName, Slot: 1}, // appended after specific
 	}
 
 	pkt := groupPkt(1, 105)

@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+const validZero = "valid 0"
+
 // validConfig returns a minimal Config that passes all validation checks
 // that don't depend on OS state (netlink). Because Validate() calls
 // netlink.LinkByName we can only exercise the checks that run *before*
@@ -91,7 +93,7 @@ func TestValidateMMDVMColorCode(t *testing.T) {
 		cc      uint8
 		wantErr bool
 	}{
-		{"valid 0", 0, false},
+		{validZero, 0, false},
 		{"valid 15", 15, false},
 		{"invalid 16", 16, true},
 		{"invalid 255", 255, true},
@@ -119,7 +121,7 @@ func TestValidateMMDVMLatitude(t *testing.T) {
 		lat     float64
 		wantErr bool
 	}{
-		{"valid 0", 0, false},
+		{validZero, 0, false},
 		{"valid -90", -90, false},
 		{"valid 90", 90, false},
 		{"invalid -91", -91, true},
@@ -148,7 +150,7 @@ func TestValidateMMDVMLongitude(t *testing.T) {
 		lng     float64
 		wantErr bool
 	}{
-		{"valid 0", 0, false},
+		{validZero, 0, false},
 		{"valid -180", -180, false},
 		{"valid 180", 180, false},
 		{"invalid -181", -181, true},
@@ -298,6 +300,7 @@ func TestValidateMetricsAddress(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := validConfig()
+			c.Metrics.Enabled = true
 			c.Metrics.Address = tt.addr
 			err := c.Validate()
 			if tt.wantErr && !errors.Is(err, ErrInvalidMetricsAddress) {

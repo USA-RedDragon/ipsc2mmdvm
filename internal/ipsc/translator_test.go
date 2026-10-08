@@ -80,7 +80,7 @@ func TestCleanupStream(t *testing.T) {
 
 func makeTestMMDVMPacket(groupCall, slot bool, frameType, dtypeOrVSeq uint) mmdvm.Packet {
 	return mmdvm.Packet{
-		Signature:   "DMRD",
+		Signature:   mmdvm.DMRDSignature,
 		Seq:         0,
 		Src:         100,
 		Dst:         200,
@@ -293,7 +293,7 @@ func TestTranslateToMMDVMVoiceHeader(t *testing.T) {
 		t.Fatalf("expected 1 packet for voice header, got %d", len(result))
 	}
 	pkt := result[0]
-	if pkt.Signature != "DMRD" {
+	if pkt.Signature != mmdvm.DMRDSignature {
 		t.Fatalf("expected DMRD signature, got %q", pkt.Signature)
 	}
 	if pkt.FrameType != mmdvmFrameTypeDataSync {
@@ -782,7 +782,7 @@ func TestBuildMMDVMVoiceBurstFromSlot1(t *testing.T) {
 	}
 
 	pkt := result[0]
-	if pkt.Signature != "DMRD" {
+	if pkt.Signature != mmdvm.DMRDSignature {
 		t.Fatalf("expected DMRD signature, got %q", pkt.Signature)
 	}
 	if pkt.Src != 100 {

@@ -211,14 +211,14 @@ func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt mmdvm.Packet, ss *strea
 	buf[5] = ss.ipscSeq
 
 	// Bytes 6-8: Source subscriber (24-bit)
-	buf[6] = byte(pkt.Src >> 16)
-	buf[7] = byte(pkt.Src >> 8)
-	buf[8] = byte(pkt.Src)
+	buf[6] = byte((pkt.Src >> 16) & 0xFF)
+	buf[7] = byte((pkt.Src >> 8) & 0xFF)
+	buf[8] = byte(pkt.Src & 0xFF)
 
 	// Bytes 9-11: Destination (24-bit)
-	buf[9] = byte(pkt.Dst >> 16)
-	buf[10] = byte(pkt.Dst >> 8)
-	buf[11] = byte(pkt.Dst)
+	buf[9] = byte((pkt.Dst >> 16) & 0xFF)
+	buf[10] = byte((pkt.Dst >> 8) & 0xFF)
+	buf[11] = byte(pkt.Dst & 0xFF)
 
 	// Byte 12: Call type (0x02 = group call)
 	if pkt.GroupCall {
@@ -420,13 +420,13 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		}
 
 		// Bytes 56-58 or 59-61: Destination repeated
-		buf[59] = byte(pkt.Dst >> 16)
-		buf[60] = byte(pkt.Dst >> 8)
-		buf[61] = byte(pkt.Dst)
+		buf[59] = byte((pkt.Dst >> 16) & 0xFF)
+		buf[60] = byte((pkt.Dst >> 8) & 0xFF)
+		buf[61] = byte(pkt.Dst & 0xFF)
 		// Bytes 62-64: Source repeated
-		buf[62] = byte(pkt.Src >> 16)
-		buf[63] = byte(pkt.Src >> 8)
-		buf[64] = byte(pkt.Src)
+		buf[62] = byte((pkt.Src >> 16) & 0xFF)
+		buf[63] = byte((pkt.Src >> 8) & 0xFF)
+		buf[64] = byte(pkt.Src & 0xFF)
 		buf[65] = 0x14 // Unknown trailer
 
 	default: // Bursts B, C, D, F — 57 bytes with embedded signalling
@@ -627,7 +627,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	ipscData []byte,
 ) mmdvm.Packet {
 	pkt := mmdvm.Packet{
-		Signature:   "DMRD",
+		Signature:   mmdvm.DMRDSignature,
 		Seq:         uint(rss.seq),
 		Src:         src,
 		Dst:         dst,
@@ -648,12 +648,12 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 		// Construct from packet fields
 		lcBytes[1] = 0x00
 		lcBytes[2] = 0x20
-		lcBytes[3] = byte(dst >> 16)
-		lcBytes[4] = byte(dst >> 8)
-		lcBytes[5] = byte(dst)
-		lcBytes[6] = byte(src >> 16)
-		lcBytes[7] = byte(src >> 8)
-		lcBytes[8] = byte(src)
+		lcBytes[3] = byte((dst >> 16) & 0xFF)
+		lcBytes[4] = byte((dst >> 8) & 0xFF)
+		lcBytes[5] = byte(dst & 0xFF)
+		lcBytes[6] = byte((src >> 16) & 0xFF)
+		lcBytes[7] = byte((src >> 8) & 0xFF)
+		lcBytes[8] = byte(src & 0xFF)
 	}
 
 	// For voice LC headers and terminators, override the FLCO byte to match
@@ -744,7 +744,7 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	}
 
 	pkt := mmdvm.Packet{
-		Signature:   "DMRD",
+		Signature:   mmdvm.DMRDSignature,
 		Seq:         uint(rss.seq),
 		Src:         src,
 		Dst:         dst,
@@ -787,9 +787,9 @@ func (t *IPSCTranslator) populateEmbeddedSignalling(burst *layer2.Burst, burstId
 	var embBytes []byte
 	switch len(ipscData) {
 	case 57: // Bursts B, C, D, F — 5 bytes of embedded data at [52:57]
-		embBytes = ipscData[52:57]
+		embBytes = ipscData[52:57] //nolint:gosec
 	case 66: // Burst E — embedded data at [52:59]
-		embBytes = ipscData[52:59]
+		embBytes = ipscData[52:59] //nolint:gosec
 	default:
 		// No embedded data available
 		return

@@ -8,7 +8,6 @@
 package timeslot
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -83,11 +82,6 @@ func slotLabel(slot bool) string {
 		return "2"
 	}
 	return "1"
-}
-
-// slotLabelFromIndex returns a string label for metrics from an int index.
-func slotLabelFromIndex(idx int) string {
-	return fmt.Sprintf("%d", idx+1)
 }
 
 // getOrCreateSlot returns the slotState for idx, creating it if needed.

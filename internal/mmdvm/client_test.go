@@ -25,6 +25,8 @@ const (
 	tagRPTK    = "RPTK"
 	tagRPTPING = "RPTPING"
 	tagDMRD    = "DMRD"
+
+	testRuleName = "test"
 )
 
 func testMMDVMConfig() *config.MMDVM {
@@ -783,7 +785,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 
 	// Add a passthrough net rewrite rule so inbound packets aren't dropped.
 	client.netRewrites = []rewrite.Rule{
-		&rewrite.TGRewrite{Name: "test", FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
 
 	var receivedPackets [][]byte
@@ -837,7 +839,7 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 
 	// Add a passthrough net rewrite rule so the packet passes the filter.
 	client.netRewrites = []rewrite.Rule{
-		&rewrite.TGRewrite{Name: "test", FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
 
 	client.wg.Add(1)
@@ -1107,7 +1109,7 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	// Add a passthrough RF rewrite rule so the packet isn't dropped.
 	// The IPSC packet below is a group call to dst 200 on slot 1.
 	client.rfRewrites = []rewrite.Rule{
-		&rewrite.TGRewrite{Name: "test", FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
 
 	// Build an IPSC voice header packet
@@ -1165,7 +1167,7 @@ func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 
 	// Add a passthrough RF rewrite rule so the packet isn't dropped.
 	client.rfRewrites = []rewrite.Rule{
-		&rewrite.TGRewrite{Name: "test", FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
 
 	// Close done channel before handling burst
@@ -1546,7 +1548,7 @@ func TestHandleIPSCBurstMultiple(t *testing.T) {
 
 	// Add a passthrough RF rewrite rule so packets aren't dropped.
 	client.rfRewrites = []rewrite.Rule{
-		&rewrite.TGRewrite{Name: "test", FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
 
 	// Send multiple voice headers with different call controls

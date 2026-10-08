@@ -1,6 +1,7 @@
 package timeslot
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -69,7 +70,7 @@ func TestRelease_ReturnsBufferedPackets(t *testing.T) {
 	if len(buffered) != 2 {
 		t.Fatalf("expected 2 buffered packets, got %d", len(buffered))
 	}
-	if buffered[0].(string) != "buffered1" || buffered[1].(string) != "buffered2" {
+	if buffered[0] != "buffered1" || buffered[1] != "buffered2" {
 		t.Fatalf("unexpected packet contents: %v", buffered)
 	}
 }
@@ -109,7 +110,7 @@ func TestRelease_FIFO_MultiplePending(t *testing.T) {
 	if len(buffered) != 1 {
 		t.Fatalf("expected 1 packet from stream 300, got %d", len(buffered))
 	}
-	if buffered[0].(string) != "c1" {
+	if buffered[0] != "c1" {
 		t.Fatalf("expected 'c1', got %v", buffered[0])
 	}
 }
@@ -236,15 +237,16 @@ func TestConcurrentSubmit(t *testing.T) {
 	const goroutines = 50
 	delivered := make(chan uint, goroutines)
 
-	for i := range goroutines {
-		go func(id uint) {
-			if m.Submit(false, id, "goroutine", "pkt") {
-				delivered <- id
+	var wg sync.WaitGroup
+	for i := range uint(goroutines) {
+		wg.Go(func() {
+			if m.Submit(false, i, "goroutine", "pkt") {
+				delivered <- i
 			}
-		}(uint(i))
+		})
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	wg.Wait()
 	close(delivered)
 
 	// Exactly one goroutine should have delivered immediately.
@@ -274,10 +276,10 @@ func TestRelease_Chain_CompletePendingCall(t *testing.T) {
 	if len(buffered) != 3 {
 		t.Fatalf("expected 3 packets from stream 200, got %d", len(buffered))
 	}
-	if buffered[0].(string) != "b-header" {
+	if buffered[0] != "b-header" {
 		t.Fatalf("expected b-header, got %v", buffered[0])
 	}
-	if buffered[2].(string) != "b-terminator" {
+	if buffered[2] != "b-terminator" {
 		t.Fatalf("expected b-terminator, got %v", buffered[2])
 	}
 
@@ -286,7 +288,7 @@ func TestRelease_Chain_CompletePendingCall(t *testing.T) {
 	if len(buffered) != 1 {
 		t.Fatalf("expected 1 packet from stream 300, got %d", len(buffered))
 	}
-	if buffered[0].(string) != "c-header" {
+	if buffered[0] != "c-header" {
 		t.Fatalf("expected c-header, got %v", buffered[0])
 	}
 }

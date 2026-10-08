@@ -4,6 +4,9 @@ import (
 	"fmt"
 )
 
+// DMRDSignature is the signature of an MMDVM DMR data packet.
+const DMRDSignature = "DMRD"
+
 type Packet struct {
 	Signature   string
 	Seq         uint
@@ -69,10 +72,10 @@ func Decode(data []byte) (Packet, bool) {
 	packet.Dst = uint(data[8])<<16 | uint(data[9])<<8 | uint(data[10])
 	packet.Repeater = uint(data[11])<<24 | uint(data[12])<<16 | uint(data[13])<<8 | uint(data[14])
 	bits := data[15]
-	packet.Slot = (bits & 0x80) != 0            //nolint:golint,gomnd
-	packet.GroupCall = (bits & 0x40) == 0       //nolint:golint,gomnd
-	packet.FrameType = uint((bits & 0x30) >> 4) //nolint:golint,gomnd
-	packet.DTypeOrVSeq = uint(bits & 0x0F)      //nolint:golint,gomnd
+	packet.Slot = (bits & 0x80) != 0
+	packet.GroupCall = (bits & 0x40) == 0
+	packet.FrameType = uint((bits & 0x30) >> 4)
+	packet.DTypeOrVSeq = uint(bits & 0x0F)
 	packet.StreamID = uint(data[16])<<24 | uint(data[17])<<16 | uint(data[18])<<8 | uint(data[19])
 	copy(packet.DMRData[:], data[20:53])
 	return packet, true
@@ -89,31 +92,31 @@ func (p *Packet) Encode() []byte {
 	// Encode the packet as we decoded
 	data := make([]byte, 53)
 	copy(data[:4], []byte(p.Signature))
-	data[4] = byte(p.Seq)
-	data[5] = byte(p.Src >> 16) //nolint:golint,gomnd
-	data[6] = byte(p.Src >> 8)  //nolint:golint,gomnd
-	data[7] = byte(p.Src)
-	data[8] = byte(p.Dst >> 16) //nolint:golint,gomnd
-	data[9] = byte(p.Dst >> 8)  //nolint:golint,gomnd
-	data[10] = byte(p.Dst)
-	data[11] = byte(p.Repeater >> 24) //nolint:golint,gomnd
-	data[12] = byte(p.Repeater >> 16) //nolint:golint,gomnd
-	data[13] = byte(p.Repeater >> 8)  //nolint:golint,gomnd
-	data[14] = byte(p.Repeater)
+	data[4] = byte(p.Seq & 0xFF)
+	data[5] = byte((p.Src >> 16) & 0xFF)
+	data[6] = byte((p.Src >> 8) & 0xFF)
+	data[7] = byte(p.Src & 0xFF)
+	data[8] = byte((p.Dst >> 16) & 0xFF)
+	data[9] = byte((p.Dst >> 8) & 0xFF)
+	data[10] = byte(p.Dst & 0xFF)
+	data[11] = byte((p.Repeater >> 24) & 0xFF)
+	data[12] = byte((p.Repeater >> 16) & 0xFF)
+	data[13] = byte((p.Repeater >> 8) & 0xFF)
+	data[14] = byte(p.Repeater & 0xFF)
 	bits := byte(0)
 	if p.Slot {
-		bits |= 0x80 //nolint:golint,gomnd
+		bits |= 0x80
 	}
 	if !p.GroupCall {
-		bits |= 0x40 //nolint:golint,gomnd
+		bits |= 0x40
 	}
-	bits |= byte((p.FrameType & 0x3) << 4) //nolint:golint,gomnd
-	bits |= byte(p.DTypeOrVSeq & 0xF)      //nolint:golint,gomnd
+	bits |= byte((p.FrameType & 0x3) << 4)
+	bits |= byte(p.DTypeOrVSeq & 0xF)
 	data[15] = bits
-	data[16] = byte(p.StreamID >> 24) //nolint:golint,gomnd
-	data[17] = byte(p.StreamID >> 16) //nolint:golint,gomnd
-	data[18] = byte(p.StreamID >> 8)  //nolint:golint,gomnd
-	data[19] = byte(p.StreamID)
+	data[16] = byte((p.StreamID >> 24) & 0xFF)
+	data[17] = byte((p.StreamID >> 16) & 0xFF)
+	data[18] = byte((p.StreamID >> 8) & 0xFF)
+	data[19] = byte(p.StreamID & 0xFF)
 	copy(data[20:53], p.DMRData[:])
 	return data
 }

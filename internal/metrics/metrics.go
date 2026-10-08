@@ -8,6 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const (
+	labelDirection = "direction"
+	labelNetwork   = "network"
+	labelSlot      = "slot"
+)
+
 // Metrics holds all Prometheus collectors for the application.
 // Pass a non-nil *Metrics to components that should be instrumented;
 // nil is safe and acts as a no-op (callers must nil-check).
@@ -74,68 +80,68 @@ func NewMetrics() *Metrics {
 		IPSCUDPErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ipsc_udp_errors_total",
 			Help: "Total IPSC UDP errors by direction.",
-		}, []string{"direction"}),
+		}, []string{labelDirection}),
 
 		// MMDVM Client
 		MMDVMConnectionState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mmdvm_connection_state",
 			Help: "MMDVM connection state (0=disconnected, 1=connecting, 2=ready).",
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMReconnects: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_reconnects_total",
 			Help: "Total MMDVM reconnections.",
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMAuthFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_auth_failures_total",
 			Help: "Total MMDVM authentication failures.",
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMPingRTT: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "mmdvm_ping_rtt_seconds",
 			Help:    "MMDVM ping round-trip time in seconds.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0},
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMPacketsReceived: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_packets_received_total",
 			Help: "Total MMDVM DMRD packets received.",
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMPacketsSent: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_packets_sent_total",
 			Help: "Total MMDVM DMRD packets sent.",
-		}, []string{"network"}),
+		}, []string{labelNetwork}),
 		MMDVMPacketsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_packets_dropped_total",
 			Help: "Total MMDVM packets dropped by reason.",
-		}, []string{"network", "reason"}),
+		}, []string{labelNetwork, "reason"}),
 
 		// Rewrite
 		MMDVMRewriteMatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_rewrite_matches_total",
 			Help: "Total rewrite rule matches.",
-		}, []string{"network", "direction", "type"}),
+		}, []string{labelNetwork, labelDirection, "type"}),
 
 		// Timeslot Manager
 		TimeslotActiveCalls: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "timeslot_active_calls",
 			Help: "Number of active calls per timeslot.",
-		}, []string{"slot", "direction"}),
+		}, []string{labelSlot, labelDirection}),
 		TimeslotPacketsBuffered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_packets_buffered_total",
 			Help: "Total packets buffered due to timeslot contention.",
-		}, []string{"slot", "direction"}),
+		}, []string{labelSlot, labelDirection}),
 		TimeslotTimeouts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_timeouts_total",
 			Help: "Total timeslot call timeouts.",
-		}, []string{"slot", "direction"}),
+		}, []string{labelSlot, labelDirection}),
 
 		// Translator
 		TranslatorActiveStreams: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "translator_active_streams",
 			Help: "Number of active translator streams by direction.",
-		}, []string{"direction"}),
+		}, []string{labelDirection}),
 		TranslatorPackets: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "translator_packets_total",
 			Help: "Total packets translated by direction.",
-		}, []string{"direction"}),
+		}, []string{labelDirection}),
 	}
 
 	reg.MustRegister(
