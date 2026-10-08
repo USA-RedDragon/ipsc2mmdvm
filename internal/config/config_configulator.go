@@ -5,90 +5,101 @@
 package config
 
 import (
-	jsontext "encoding/json/jsontext"
-	v2 "encoding/json/v2"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"errors"
 	"fmt"
-	configulator "github.com/USA-RedDragon/configulator/v2"
-	cpflag "github.com/USA-RedDragon/configulator/v2/flags/pflag"
-	"github.com/spf13/pflag"
 	"math"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/USA-RedDragon/configulator/v2"
+	cpflag "github.com/USA-RedDragon/configulator/v2/flags/pflag"
+	"github.com/USA-RedDragon/configulator/v2/impl"
+	"github.com/spf13/pflag"
 )
 
 type metricsShadow struct {
 	Enabled *bool   `json:"enabled" toml:"enabled" yaml:"enabled"`
 	Address *string `json:"address" toml:"address" yaml:"address"`
 }
+
 type tGRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
-	FromTG   *uint `json:"from-tg" toml:"from-tg" yaml:"from-tg"`
-	ToSlot   *uint `json:"to-slot" toml:"to-slot" yaml:"to-slot"`
-	ToTG     *uint `json:"to-tg" toml:"to-tg" yaml:"to-tg"`
-	Range    *uint `json:"range" toml:"range" yaml:"range"`
+	FromTG   *uint `json:"from-tg"   toml:"from-tg"   yaml:"from-tg"`
+	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
+	ToTG     *uint `json:"to-tg"     toml:"to-tg"     yaml:"to-tg"`
+	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
+
 type pCRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
-	FromID   *uint `json:"from-id" toml:"from-id" yaml:"from-id"`
-	ToSlot   *uint `json:"to-slot" toml:"to-slot" yaml:"to-slot"`
-	ToID     *uint `json:"to-id" toml:"to-id" yaml:"to-id"`
-	Range    *uint `json:"range" toml:"range" yaml:"range"`
+	FromID   *uint `json:"from-id"   toml:"from-id"   yaml:"from-id"`
+	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
+	ToID     *uint `json:"to-id"     toml:"to-id"     yaml:"to-id"`
+	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
+
 type typeRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
-	FromTG   *uint `json:"from-tg" toml:"from-tg" yaml:"from-tg"`
-	ToSlot   *uint `json:"to-slot" toml:"to-slot" yaml:"to-slot"`
-	ToID     *uint `json:"to-id" toml:"to-id" yaml:"to-id"`
-	Range    *uint `json:"range" toml:"range" yaml:"range"`
+	FromTG   *uint `json:"from-tg"   toml:"from-tg"   yaml:"from-tg"`
+	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
+	ToID     *uint `json:"to-id"     toml:"to-id"     yaml:"to-id"`
+	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
+
 type srcRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
-	FromID   *uint `json:"from-id" toml:"from-id" yaml:"from-id"`
-	ToSlot   *uint `json:"to-slot" toml:"to-slot" yaml:"to-slot"`
-	ToID     *uint `json:"to-id" toml:"to-id" yaml:"to-id"`
-	Range    *uint `json:"range" toml:"range" yaml:"range"`
+	FromID   *uint `json:"from-id"   toml:"from-id"   yaml:"from-id"`
+	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
+	ToID     *uint `json:"to-id"     toml:"to-id"     yaml:"to-id"`
+	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
+
 type mMDVMShadow struct {
-	Name         *string                    `json:"name" toml:"name" yaml:"name"`
-	Callsign     *string                    `json:"callsign" toml:"callsign" yaml:"callsign"`
-	ID           *uint32                    `json:"radio-id" toml:"radio-id" yaml:"radio-id"`
-	RXFreq       *uint                      `json:"rx-freq" toml:"rx-freq" yaml:"rx-freq"`
-	TXFreq       *uint                      `json:"tx-freq" toml:"tx-freq" yaml:"tx-freq"`
-	TXPower      *uint8                     `json:"tx-power" toml:"tx-power" yaml:"tx-power"`
-	ColorCode    *uint8                     `json:"color-code" toml:"color-code" yaml:"color-code"`
-	Latitude     *float64                   `json:"latitude" toml:"latitude" yaml:"latitude"`
-	Longitude    *float64                   `json:"longitude" toml:"longitude" yaml:"longitude"`
-	Height       *uint16                    `json:"height" toml:"height" yaml:"height"`
-	Location     *string                    `json:"location" toml:"location" yaml:"location"`
-	Description  *string                    `json:"description" toml:"description" yaml:"description"`
-	URL          *string                    `json:"url" toml:"url" yaml:"url"`
-	Slots        *byte                      `json:"slots" toml:"slots" yaml:"slots"`
+	Name         *string                    `json:"name"          toml:"name"          yaml:"name"`
+	Callsign     *string                    `json:"callsign"      toml:"callsign"      yaml:"callsign"`
+	ID           *uint32                    `json:"radio-id"      toml:"radio-id"      yaml:"radio-id"`
+	RXFreq       *uint                      `json:"rx-freq"       toml:"rx-freq"       yaml:"rx-freq"`
+	TXFreq       *uint                      `json:"tx-freq"       toml:"tx-freq"       yaml:"tx-freq"`
+	TXPower      *uint8                     `json:"tx-power"      toml:"tx-power"      yaml:"tx-power"`
+	ColorCode    *uint8                     `json:"color-code"    toml:"color-code"    yaml:"color-code"`
+	Latitude     *float64                   `json:"latitude"      toml:"latitude"      yaml:"latitude"`
+	Longitude    *float64                   `json:"longitude"     toml:"longitude"     yaml:"longitude"`
+	Height       *uint16                    `json:"height"        toml:"height"        yaml:"height"`
+	Location     *string                    `json:"location"      toml:"location"      yaml:"location"`
+	Description  *string                    `json:"description"   toml:"description"   yaml:"description"`
+	URL          *string                    `json:"url"           toml:"url"           yaml:"url"`
+	Slots        *byte                      `json:"slots"         toml:"slots"         yaml:"slots"`
 	MasterServer *string                    `json:"master-server" toml:"master-server" yaml:"master-server"`
-	Password     *string                    `json:"password" toml:"password" yaml:"password"`
-	TGRewrites   *[]tGRewriteConfigShadow   `json:"tg-rewrite" toml:"tg-rewrite" yaml:"tg-rewrite"`
-	PCRewrites   *[]pCRewriteConfigShadow   `json:"pc-rewrite" toml:"pc-rewrite" yaml:"pc-rewrite"`
-	TypeRewrites *[]typeRewriteConfigShadow `json:"type-rewrite" toml:"type-rewrite" yaml:"type-rewrite"`
-	SrcRewrites  *[]srcRewriteConfigShadow  `json:"src-rewrite" toml:"src-rewrite" yaml:"src-rewrite"`
-	PassAllPC    *[]int                     `json:"pass-all-pc" toml:"pass-all-pc" yaml:"pass-all-pc"`
-	PassAllTG    *[]int                     `json:"pass-all-tg" toml:"pass-all-tg" yaml:"pass-all-tg"`
+	Password     *string                    `json:"password"      toml:"password"      yaml:"password"`
+	TGRewrites   *[]tGRewriteConfigShadow   `json:"tg-rewrite"    toml:"tg-rewrite"    yaml:"tg-rewrite"`
+	PCRewrites   *[]pCRewriteConfigShadow   `json:"pc-rewrite"    toml:"pc-rewrite"    yaml:"pc-rewrite"`
+	TypeRewrites *[]typeRewriteConfigShadow `json:"type-rewrite"  toml:"type-rewrite"  yaml:"type-rewrite"`
+	SrcRewrites  *[]srcRewriteConfigShadow  `json:"src-rewrite"   toml:"src-rewrite"   yaml:"src-rewrite"`
+	PassAllPC    *[]int                     `json:"pass-all-pc"   toml:"pass-all-pc"   yaml:"pass-all-pc"`
+	PassAllTG    *[]int                     `json:"pass-all-tg"   toml:"pass-all-tg"   yaml:"pass-all-tg"`
 }
+
 type iPSCAuthShadow struct {
 	Enabled *bool   `json:"enabled" toml:"enabled" yaml:"enabled"`
-	Key     *string `json:"key" toml:"key" yaml:"key"`
+	Key     *string `json:"key"     toml:"key"     yaml:"key"`
 }
+
 type iPSCShadow struct {
-	Interface  *string         `json:"interface" toml:"interface" yaml:"interface"`
-	Port       *uint16         `json:"port" toml:"port" yaml:"port"`
-	IP         *string         `json:"ip" toml:"ip" yaml:"ip"`
+	Interface  *string         `json:"interface"   toml:"interface"   yaml:"interface"`
+	Port       *uint16         `json:"port"        toml:"port"        yaml:"port"`
+	IP         *string         `json:"ip"          toml:"ip"          yaml:"ip"`
 	SubnetMask *int            `json:"subnet-mask" toml:"subnet-mask" yaml:"subnet-mask"`
-	Auth       *iPSCAuthShadow `json:"auth" toml:"auth" yaml:"auth"`
+	Auth       *iPSCAuthShadow `json:"auth"        toml:"auth"        yaml:"auth"`
 }
+
 type configShadow struct {
 	LogLevel *string        `json:"log-level" toml:"log-level" yaml:"log-level"`
-	Metrics  *metricsShadow `json:"metrics" toml:"metrics" yaml:"metrics"`
-	MMDVM    *[]mMDVMShadow `json:"mmdvm" toml:"mmdvm" yaml:"mmdvm"`
-	IPSC     *iPSCShadow    `json:"ipsc" toml:"ipsc" yaml:"ipsc"`
+	Metrics  *metricsShadow `json:"metrics"   toml:"metrics"   yaml:"metrics"`
+	MMDVM    *[]mMDVMShadow `json:"mmdvm"     toml:"mmdvm"     yaml:"mmdvm"`
+	IPSC     *iPSCShadow    `json:"ipsc"      toml:"ipsc"      yaml:"ipsc"`
 }
 
 // ConfigSchema returns the generated schema for Config.
@@ -99,7 +110,8 @@ func ConfigSchema() *configulator.Schema[Config] {
 		DecodeFile:    configDecodeFile,
 	}
 }
-func configApplyDefaults(cfg *Config, sep string, set configulator.SetOrigin) error {
+
+func configApplyDefaults(cfg *Config, _ string, set configulator.SetOrigin) error {
 	cfg.LogLevel = LogLevel("info")
 	set("log-level", configulator.LayerDefault, "default tag")
 	cfg.Metrics.Address = ":9100"
@@ -110,6 +122,7 @@ func configApplyDefaults(cfg *Config, sep string, set configulator.SetOrigin) er
 	set("ipsc.subnet-mask", configulator.LayerDefault, "default tag")
 	return nil
 }
+
 func configDecodeFile(data []byte, u configulator.Unmarshal, cfg *Config, sep string, set configulator.SetOrigin, file string) error {
 	var sh configShadow
 	if err := u(data, &sh); err != nil {
@@ -120,7 +133,8 @@ func configDecodeFile(data []byte, u configulator.Unmarshal, cfg *Config, sep st
 	}
 	return sh.applyTo(cfg, sep, set, file)
 }
-func (s *configShadow) applyTo(cfg *Config, sep string, set configulator.SetOrigin, file string) error {
+
+func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin, file string) error {
 	if s.LogLevel != nil {
 		cfg.LogLevel = LogLevel(*s.LogLevel)
 		set("log-level", configulator.LayerFile, file)
@@ -377,96 +391,79 @@ func (s *configShadow) applyTo(cfg *Config, sep string, set configulator.SetOrig
 	}
 	return nil
 }
+
 func configApplyEnv(cfg *Config, ec configulator.EnvContext, set configulator.SetOrigin) error {
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "log-level"); true {
-		if v, ok := ec.Getenv(n); ok {
-			cfg.LogLevel = LogLevel(v)
-			set("log-level", configulator.LayerEnv, n)
-		}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "log-level"); ok {
+		cfg.LogLevel = LogLevel(v)
+		set("log-level", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "metrics", "enabled"); true {
-		if v, ok := ec.Getenv(n); ok {
-			p, err := strconv.ParseBool(v)
-			if err != nil {
-				return &configulator.ParseError{
-					Err:    err,
-					Path:   "metrics.enabled",
-					Source: n,
-					Value:  v,
-				}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "metrics", "enabled"); ok {
+		p, err := strconv.ParseBool(v)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "metrics.enabled",
+				Source: n,
+				Value:  v,
 			}
-			cfg.Metrics.Enabled = p
-			set("metrics.enabled", configulator.LayerEnv, n)
 		}
+		cfg.Metrics.Enabled = p
+		set("metrics.enabled", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "metrics", "address"); true {
-		if v, ok := ec.Getenv(n); ok {
-			cfg.Metrics.Address = v
-			set("metrics.address", configulator.LayerEnv, n)
-		}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "metrics", "address"); ok {
+		cfg.Metrics.Address = v
+		set("metrics.address", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "interface"); true {
-		if v, ok := ec.Getenv(n); ok {
-			cfg.IPSC.Interface = v
-			set("ipsc.interface", configulator.LayerEnv, n)
-		}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "interface"); ok {
+		cfg.IPSC.Interface = v
+		set("ipsc.interface", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "port"); true {
-		if v, ok := ec.Getenv(n); ok {
-			p, err := strconv.ParseUint(v, 10, 16)
-			if err != nil {
-				return &configulator.ParseError{
-					Err:    err,
-					Path:   "ipsc.port",
-					Source: n,
-					Value:  v,
-				}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "port"); ok {
+		p, err := strconv.ParseUint(v, 10, 16)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.port",
+				Source: n,
+				Value:  v,
 			}
-			cfg.IPSC.Port = uint16(p)
-			set("ipsc.port", configulator.LayerEnv, n)
 		}
+		cfg.IPSC.Port = uint16(p)
+		set("ipsc.port", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "ip"); true {
-		if v, ok := ec.Getenv(n); ok {
-			cfg.IPSC.IP = v
-			set("ipsc.ip", configulator.LayerEnv, n)
-		}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "ip"); ok {
+		cfg.IPSC.IP = v
+		set("ipsc.ip", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "subnet-mask"); true {
-		if v, ok := ec.Getenv(n); ok {
-			p, err := strconv.ParseInt(v, 10, 64)
-			if err != nil {
-				return &configulator.ParseError{
-					Err:    err,
-					Path:   "ipsc.subnet-mask",
-					Source: n,
-					Value:  v,
-				}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "subnet-mask"); ok {
+		p, err := strconv.ParseInt(v, 10, strconv.IntSize)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.subnet-mask",
+				Source: n,
+				Value:  v,
 			}
-			cfg.IPSC.SubnetMask = int(p)
-			set("ipsc.subnet-mask", configulator.LayerEnv, n)
 		}
+		cfg.IPSC.SubnetMask = int(p)
+		set("ipsc.subnet-mask", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "auth", "enabled"); true {
-		if v, ok := ec.Getenv(n); ok {
-			p, err := strconv.ParseBool(v)
-			if err != nil {
-				return &configulator.ParseError{
-					Err:    err,
-					Path:   "ipsc.auth.enabled",
-					Source: n,
-					Value:  v,
-				}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "auth", "enabled"); ok {
+		p, err := strconv.ParseBool(v)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.auth.enabled",
+				Source: n,
+				Value:  v,
 			}
-			cfg.IPSC.Auth.Enabled = p
-			set("ipsc.auth.enabled", configulator.LayerEnv, n)
 		}
+		cfg.IPSC.Auth.Enabled = p
+		set("ipsc.auth.enabled", configulator.LayerEnv, n)
 	}
-	if n := configulator.EnvName(ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "auth", "key"); true {
-		if v, ok := ec.Getenv(n); ok {
-			cfg.IPSC.Auth.Key = v
-			set("ipsc.auth.key", configulator.LayerEnv, n)
-		}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "auth", "key"); ok {
+		cfg.IPSC.Auth.Key = v
+		set("ipsc.auth.key", configulator.LayerEnv, n)
 	}
 	return nil
 }
@@ -478,10 +475,27 @@ func ConfigPFlagHooks() cpflag.Hooks[Config] {
 		Register: configRegisterPFlags,
 	}
 }
+
 func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
-	names := []string{strings.Join([]string{"log-level"}, o.Separator), strings.Join([]string{"metrics", "enabled"}, o.Separator), strings.Join([]string{"metrics", "address"}, o.Separator), strings.Join([]string{"ipsc", "interface"}, o.Separator), strings.Join([]string{"ipsc", "port"}, o.Separator), strings.Join([]string{"ipsc", "ip"}, o.Separator), strings.Join([]string{"ipsc", "subnet-mask"}, o.Separator), strings.Join([]string{"ipsc", "auth", "enabled"}, o.Separator), strings.Join([]string{"ipsc", "auth", "key"}, o.Separator)}
+	names := []string{
+		"log-level",
+		"metrics" + o.Separator + "enabled",
+		"metrics" + o.Separator + "address",
+		"ipsc" + o.Separator + "interface",
+		"ipsc" + o.Separator + "port",
+		"ipsc" + o.Separator + "ip",
+		"ipsc" + o.Separator + "subnet-mask",
+		"ipsc" + o.Separator + "auth" + o.Separator + "enabled",
+		"ipsc" + o.Separator + "auth" + o.Separator + "key",
+	}
 	for i, name := range names {
-		if fs.Lookup(name) != nil || slices.Contains(names[:i], name) {
+		if f := fs.Lookup(name); f != nil {
+			return &configulator.FlagConflictError{
+				Existing: f.Name,
+				Flag:     name,
+			}
+		}
+		if slices.Contains(names[:i], name) {
 			return &configulator.FlagConflictError{
 				Existing: name,
 				Flag:     name,
@@ -492,15 +506,16 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.Bool(names[1], false, "Whether to enable Prometheus metrics endpoint")
 	fs.String(names[2], ":9100", "Address to serve Prometheus metrics on")
 	fs.String(names[3], "", "Interface to listen for IPSC packets on")
-	fs.Uint16(names[4], uint16(0), "Port to listen for IPSC packets on")
+	fs.Uint16(names[4], 0, "Port to listen for IPSC packets on")
 	fs.String(names[5], "10.10.250.1", "IP address to listen for IPSC packets on")
-	fs.Int(names[6], 24, "Subnet mask for the virtual network interface created for IPSC packets")
+	fs.Var(impl.NewInt(24), names[6], "Subnet mask for the virtual network interface created for IPSC packets")
 	fs.Bool(names[7], false, "Whether to require authentication for IPSC clients")
 	fs.String(names[8], "", "Authentication key for IPSC clients. Required if auth is enabled")
 	return nil
 }
-func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep string, set configulator.SetOrigin) error {
-	if n := strings.Join([]string{"log-level"}, o.Separator); fs.Changed(n) {
+
+func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, _ string, set configulator.SetOrigin) error {
+	if n := "log-level"; fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -512,7 +527,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.LogLevel = LogLevel(v)
 		set("log-level", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"metrics", "enabled"}, o.Separator); fs.Changed(n) {
+	if n := "metrics" + o.Separator + "enabled"; fs.Changed(n) {
 		v, err := fs.GetBool(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -524,7 +539,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.Metrics.Enabled = v
 		set("metrics.enabled", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"metrics", "address"}, o.Separator); fs.Changed(n) {
+	if n := "metrics" + o.Separator + "address"; fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -536,7 +551,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.Metrics.Address = v
 		set("metrics.address", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "interface"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "interface"; fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -548,7 +563,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.IPSC.Interface = v
 		set("ipsc.interface", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "port"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "port"; fs.Changed(n) {
 		v, err := fs.GetUint16(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -560,7 +575,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.IPSC.Port = v
 		set("ipsc.port", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "ip"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "ip"; fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -572,7 +587,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.IPSC.IP = v
 		set("ipsc.ip", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "subnet-mask"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "subnet-mask"; fs.Changed(n) {
 		v, err := fs.GetInt(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -584,7 +599,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.IPSC.SubnetMask = v
 		set("ipsc.subnet-mask", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "auth", "enabled"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "auth" + o.Separator + "enabled"; fs.Changed(n) {
 		v, err := fs.GetBool(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -596,7 +611,7 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 		cfg.IPSC.Auth.Enabled = v
 		set("ipsc.auth.enabled", configulator.LayerCLI, "--"+n)
 	}
-	if n := strings.Join([]string{"ipsc", "auth", "key"}, o.Separator); fs.Changed(n) {
+	if n := "ipsc" + o.Separator + "auth" + o.Separator + "key"; fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
 			return &configulator.ParseError{
@@ -610,65 +625,81 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep st
 	}
 	return nil
 }
+
 func (s *configShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	tok, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
+	if tok.Kind() != jsontext.KindBeginObject {
+		return fmt.Errorf("expected an object, got %v", tok.Kind())
 	}
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "log-level":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.LogLevel = &str
 			default:
-				return fmt.Errorf("log-level: expected a string, got %v", v.Kind())
+				return configJSONError("log-level", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "metrics":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
+				open, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				if open.Kind() != jsontext.KindBeginObject {
+					return configJSONError("metrics", open, fmt.Errorf("expected an object, got %v", open.Kind()))
+				}
 				var sub metricsShadow
-				if err := sub.UnmarshalJSONFrom(dec); err != nil {
+				if err := sub.decodeJSON(dec, "metrics"); err != nil {
 					return err
 				}
 				s.Metrics = &sub
 			}
 		case "mmdvm":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("mmdvm: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError("mmdvm", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []mMDVMShadow{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
+					ep := "mmdvm" + "[" + strconv.Itoa(len(out)) + "]"
+					et, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if et.Kind() != jsontext.KindBeginObject {
+						return configJSONError(ep, et, fmt.Errorf("expected an object, got %v", et.Kind()))
+					}
 					var el mMDVMShadow
-					if err := el.UnmarshalJSONFrom(dec); err != nil {
+					if err := el.decodeJSON(dec, ep); err != nil {
 						return err
 					}
 					out = append(out, el)
@@ -679,54 +710,61 @@ func (s *configShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.MMDVM = &out
 			}
 		case "ipsc":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
+				open, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				if open.Kind() != jsontext.KindBeginObject {
+					return configJSONError("ipsc", open, fmt.Errorf("expected an object, got %v", open.Kind()))
+				}
 				var sub iPSCShadow
-				if err := sub.UnmarshalJSONFrom(dec); err != nil {
+				if err := sub.decodeJSON(dec, "ipsc"); err != nil {
 					return err
 				}
 				s.IPSC = &sub
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*configShadow)(nil)
+var _ json.UnmarshalerFrom = (*configShadow)(nil)
 
-func (s *metricsShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *metricsShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "enabled":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case 't', 'f':
+			case jsontext.KindNull:
+			case jsontext.KindTrue, jsontext.KindFalse:
 				b := v.Bool()
 				s.Enabled = &b
 			default:
-				return fmt.Errorf("enabled: expected a bool, got %v", v.Kind())
+				return configJSONError(path+".enabled", v, fmt.Errorf("expected a bool, got %v", v.Kind()))
 			}
 		case "address":
 			v, err := dec.ReadToken()
@@ -734,50 +772,48 @@ func (s *metricsShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Address = &str
 			default:
-				return fmt.Errorf("address: expected a string, got %v", v.Kind())
+				return configJSONError(path+".address", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*metricsShadow)(nil)
-
-func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *mMDVMShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "name":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Name = &str
 			default:
-				return fmt.Errorf("name: expected a string, got %v", v.Kind())
+				return configJSONError(path+".name", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "callsign":
 			v, err := dec.ReadToken()
@@ -785,12 +821,12 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Callsign = &str
 			default:
-				return fmt.Errorf("callsign: expected a string, got %v", v.Kind())
+				return configJSONError(path+".callsign", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "radio-id":
 			v, err := dec.ReadToken()
@@ -798,19 +834,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".radio-id", v, err)
 				}
-				if num > math.MaxUint32 {
-					return fmt.Errorf("radio-id: %d overflows uint32", num)
+				if raw > math.MaxUint32 {
+					return configJSONError(path+".radio-id", v, fmt.Errorf("%d overflows uint32", raw))
 				}
-				val := uint32(num)
-				s.ID = &val
+				num := uint32(raw)
+				s.ID = &num
 			default:
-				return fmt.Errorf("radio-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".radio-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "rx-freq":
 			v, err := dec.ReadToken()
@@ -818,16 +854,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".rx-freq", v, err)
 				}
-				val := uint(num)
-				s.RXFreq = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".rx-freq", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.RXFreq = &num
 			default:
-				return fmt.Errorf("rx-freq: expected a number, got %v", v.Kind())
+				return configJSONError(path+".rx-freq", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "tx-freq":
 			v, err := dec.ReadToken()
@@ -835,16 +874,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".tx-freq", v, err)
 				}
-				val := uint(num)
-				s.TXFreq = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".tx-freq", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.TXFreq = &num
 			default:
-				return fmt.Errorf("tx-freq: expected a number, got %v", v.Kind())
+				return configJSONError(path+".tx-freq", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "tx-power":
 			v, err := dec.ReadToken()
@@ -852,19 +894,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".tx-power", v, err)
 				}
-				if num > math.MaxUint8 {
-					return fmt.Errorf("tx-power: %d overflows uint8", num)
+				if raw > math.MaxUint8 {
+					return configJSONError(path+".tx-power", v, fmt.Errorf("%d overflows uint8", raw))
 				}
-				val := uint8(num)
-				s.TXPower = &val
+				num := uint8(raw)
+				s.TXPower = &num
 			default:
-				return fmt.Errorf("tx-power: expected a number, got %v", v.Kind())
+				return configJSONError(path+".tx-power", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "color-code":
 			v, err := dec.ReadToken()
@@ -872,19 +914,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".color-code", v, err)
 				}
-				if num > math.MaxUint8 {
-					return fmt.Errorf("color-code: %d overflows uint8", num)
+				if raw > math.MaxUint8 {
+					return configJSONError(path+".color-code", v, fmt.Errorf("%d overflows uint8", raw))
 				}
-				val := uint8(num)
-				s.ColorCode = &val
+				num := uint8(raw)
+				s.ColorCode = &num
 			default:
-				return fmt.Errorf("color-code: expected a number, got %v", v.Kind())
+				return configJSONError(path+".color-code", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "latitude":
 			v, err := dec.ReadToken()
@@ -892,16 +934,15 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
 				num, err := v.Float()
 				if err != nil {
-					return err
+					return configJSONError(path+".latitude", v, err)
 				}
-				val := num
-				s.Latitude = &val
+				s.Latitude = &num
 			default:
-				return fmt.Errorf("latitude: expected a number, got %v", v.Kind())
+				return configJSONError(path+".latitude", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "longitude":
 			v, err := dec.ReadToken()
@@ -909,16 +950,15 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
 				num, err := v.Float()
 				if err != nil {
-					return err
+					return configJSONError(path+".longitude", v, err)
 				}
-				val := num
-				s.Longitude = &val
+				s.Longitude = &num
 			default:
-				return fmt.Errorf("longitude: expected a number, got %v", v.Kind())
+				return configJSONError(path+".longitude", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "height":
 			v, err := dec.ReadToken()
@@ -926,19 +966,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".height", v, err)
 				}
-				if num > math.MaxUint16 {
-					return fmt.Errorf("height: %d overflows uint16", num)
+				if raw > math.MaxUint16 {
+					return configJSONError(path+".height", v, fmt.Errorf("%d overflows uint16", raw))
 				}
-				val := uint16(num)
-				s.Height = &val
+				num := uint16(raw)
+				s.Height = &num
 			default:
-				return fmt.Errorf("height: expected a number, got %v", v.Kind())
+				return configJSONError(path+".height", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "location":
 			v, err := dec.ReadToken()
@@ -946,12 +986,12 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Location = &str
 			default:
-				return fmt.Errorf("location: expected a string, got %v", v.Kind())
+				return configJSONError(path+".location", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "description":
 			v, err := dec.ReadToken()
@@ -959,12 +999,12 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Description = &str
 			default:
-				return fmt.Errorf("description: expected a string, got %v", v.Kind())
+				return configJSONError(path+".description", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "url":
 			v, err := dec.ReadToken()
@@ -972,12 +1012,12 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.URL = &str
 			default:
-				return fmt.Errorf("url: expected a string, got %v", v.Kind())
+				return configJSONError(path+".url", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "slots":
 			v, err := dec.ReadToken()
@@ -985,19 +1025,19 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".slots", v, err)
 				}
-				if num > math.MaxUint8 {
-					return fmt.Errorf("slots: %d overflows byte", num)
+				if raw > math.MaxUint8 {
+					return configJSONError(path+".slots", v, fmt.Errorf("%d overflows byte", raw))
 				}
-				val := byte(num)
-				s.Slots = &val
+				num := byte(raw)
+				s.Slots = &num
 			default:
-				return fmt.Errorf("slots: expected a number, got %v", v.Kind())
+				return configJSONError(path+".slots", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "master-server":
 			v, err := dec.ReadToken()
@@ -1005,43 +1045,60 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.MasterServer = &str
 			default:
-				return fmt.Errorf("master-server: expected a string, got %v", v.Kind())
+				return configJSONError(path+".master-server", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "password":
-			v, err := dec.ReadToken()
-			if err != nil {
-				return err
-			}
-			switch v.Kind() {
-			case 'n':
-			case '"':
-				str := v.String()
-				s.Password = &str
-			default:
-				return fmt.Errorf("password: expected a string, got %v", v.Kind())
+			if err := func() error {
+				v, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				switch v.Kind() {
+				case jsontext.KindNull:
+				case jsontext.KindString:
+					str := v.String()
+					s.Password = &str
+				default:
+					return configJSONError(path+".password", v, fmt.Errorf("expected a string, got %v", v.Kind()))
+				}
+				return nil
+			}(); err != nil {
+				return &configulator.ParseError{
+					Err:   errors.New("invalid value"),
+					Path:  path + ".password",
+					Value: "(redacted)",
+				}
 			}
 		case "tg-rewrite":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("tg-rewrite: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".tg-rewrite", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []tGRewriteConfigShadow{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
+					ep := path + ".tg-rewrite" + "[" + strconv.Itoa(len(out)) + "]"
+					et, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if et.Kind() != jsontext.KindBeginObject {
+						return configJSONError(ep, et, fmt.Errorf("expected an object, got %v", et.Kind()))
+					}
 					var el tGRewriteConfigShadow
-					if err := el.UnmarshalJSONFrom(dec); err != nil {
+					if err := el.decodeJSON(dec, ep); err != nil {
 						return err
 					}
 					out = append(out, el)
@@ -1052,22 +1109,30 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.TGRewrites = &out
 			}
 		case "pc-rewrite":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("pc-rewrite: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".pc-rewrite", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []pCRewriteConfigShadow{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
+					ep := path + ".pc-rewrite" + "[" + strconv.Itoa(len(out)) + "]"
+					et, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if et.Kind() != jsontext.KindBeginObject {
+						return configJSONError(ep, et, fmt.Errorf("expected an object, got %v", et.Kind()))
+					}
 					var el pCRewriteConfigShadow
-					if err := el.UnmarshalJSONFrom(dec); err != nil {
+					if err := el.decodeJSON(dec, ep); err != nil {
 						return err
 					}
 					out = append(out, el)
@@ -1078,22 +1143,30 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.PCRewrites = &out
 			}
 		case "type-rewrite":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("type-rewrite: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".type-rewrite", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []typeRewriteConfigShadow{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
+					ep := path + ".type-rewrite" + "[" + strconv.Itoa(len(out)) + "]"
+					et, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if et.Kind() != jsontext.KindBeginObject {
+						return configJSONError(ep, et, fmt.Errorf("expected an object, got %v", et.Kind()))
+					}
 					var el typeRewriteConfigShadow
-					if err := el.UnmarshalJSONFrom(dec); err != nil {
+					if err := el.decodeJSON(dec, ep); err != nil {
 						return err
 					}
 					out = append(out, el)
@@ -1104,22 +1177,30 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.TypeRewrites = &out
 			}
 		case "src-rewrite":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("src-rewrite: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".src-rewrite", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []srcRewriteConfigShadow{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
+					ep := path + ".src-rewrite" + "[" + strconv.Itoa(len(out)) + "]"
+					et, err := dec.ReadToken()
+					if err != nil {
+						return err
+					}
+					if et.Kind() != jsontext.KindBeginObject {
+						return configJSONError(ep, et, fmt.Errorf("expected an object, got %v", et.Kind()))
+					}
 					var el srcRewriteConfigShadow
-					if err := el.UnmarshalJSONFrom(dec); err != nil {
+					if err := el.decodeJSON(dec, ep); err != nil {
 						return err
 					}
 					out = append(out, el)
@@ -1130,30 +1211,33 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.SrcRewrites = &out
 			}
 		case "pass-all-pc":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("pass-all-pc: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".pass-all-pc", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []int{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
 					v, err := dec.ReadToken()
 					if err != nil {
 						return err
 					}
-					if v.Kind() != '0' {
-						return fmt.Errorf("pass-all-pc: expected a number element, got %v", v.Kind())
+					if v.Kind() != jsontext.KindNumber {
+						return configJSONError(path+".pass-all-pc"+"["+strconv.Itoa(len(out))+"]", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 					}
 					raw, err := v.Int()
 					if err != nil {
-						return err
+						return configJSONError(path+".pass-all-pc"+"["+strconv.Itoa(len(out))+"]", v, err)
+					}
+					if raw < math.MinInt || raw > math.MaxInt {
+						return configJSONError(path+".pass-all-pc"+"["+strconv.Itoa(len(out))+"]", v, fmt.Errorf("%d overflows int", raw))
 					}
 					el := int(raw)
 					out = append(out, el)
@@ -1164,30 +1248,33 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.PassAllPC = &out
 			}
 		case "pass-all-tg":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
-				tok, err := dec.ReadToken()
+				open, err := dec.ReadToken()
 				if err != nil {
 					return err
 				}
-				if tok.Kind() != '[' {
-					return fmt.Errorf("pass-all-tg: expected an array, got %v", tok.Kind())
+				if open.Kind() != jsontext.KindBeginArray {
+					return configJSONError(path+".pass-all-tg", open, fmt.Errorf("expected an array, got %v", open.Kind()))
 				}
 				out := []int{}
-				for dec.PeekKind() != ']' {
+				for dec.PeekKind() != jsontext.KindEndArray {
 					v, err := dec.ReadToken()
 					if err != nil {
 						return err
 					}
-					if v.Kind() != '0' {
-						return fmt.Errorf("pass-all-tg: expected a number element, got %v", v.Kind())
+					if v.Kind() != jsontext.KindNumber {
+						return configJSONError(path+".pass-all-tg"+"["+strconv.Itoa(len(out))+"]", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 					}
 					raw, err := v.Int()
 					if err != nil {
-						return err
+						return configJSONError(path+".pass-all-tg"+"["+strconv.Itoa(len(out))+"]", v, err)
+					}
+					if raw < math.MinInt || raw > math.MaxInt {
+						return configJSONError(path+".pass-all-tg"+"["+strconv.Itoa(len(out))+"]", v, fmt.Errorf("%d overflows int", raw))
 					}
 					el := int(raw)
 					out = append(out, el)
@@ -1198,46 +1285,47 @@ func (s *mMDVMShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				s.PassAllTG = &out
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*mMDVMShadow)(nil)
-
-func (s *tGRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *tGRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "from-slot":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-slot", v, err)
 				}
-				val := uint(num)
-				s.FromSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromSlot = &num
 			default:
-				return fmt.Errorf("from-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "from-tg":
 			v, err := dec.ReadToken()
@@ -1245,16 +1333,19 @@ func (s *tGRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-tg", v, err)
 				}
-				val := uint(num)
-				s.FromTG = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-tg", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromTG = &num
 			default:
-				return fmt.Errorf("from-tg: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-tg", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-slot":
 			v, err := dec.ReadToken()
@@ -1262,16 +1353,19 @@ func (s *tGRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-slot", v, err)
 				}
-				val := uint(num)
-				s.ToSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToSlot = &num
 			default:
-				return fmt.Errorf("to-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-tg":
 			v, err := dec.ReadToken()
@@ -1279,16 +1373,19 @@ func (s *tGRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-tg", v, err)
 				}
-				val := uint(num)
-				s.ToTG = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-tg", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToTG = &num
 			default:
-				return fmt.Errorf("to-tg: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-tg", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "range":
 			v, err := dec.ReadToken()
@@ -1296,58 +1393,62 @@ func (s *tGRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".range", v, err)
 				}
-				val := uint(num)
-				s.Range = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".range", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.Range = &num
 			default:
-				return fmt.Errorf("range: expected a number, got %v", v.Kind())
+				return configJSONError(path+".range", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*tGRewriteConfigShadow)(nil)
-
-func (s *pCRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *pCRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "from-slot":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-slot", v, err)
 				}
-				val := uint(num)
-				s.FromSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromSlot = &num
 			default:
-				return fmt.Errorf("from-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "from-id":
 			v, err := dec.ReadToken()
@@ -1355,16 +1456,19 @@ func (s *pCRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-id", v, err)
 				}
-				val := uint(num)
-				s.FromID = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-id", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromID = &num
 			default:
-				return fmt.Errorf("from-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-slot":
 			v, err := dec.ReadToken()
@@ -1372,16 +1476,19 @@ func (s *pCRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-slot", v, err)
 				}
-				val := uint(num)
-				s.ToSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToSlot = &num
 			default:
-				return fmt.Errorf("to-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-id":
 			v, err := dec.ReadToken()
@@ -1389,16 +1496,19 @@ func (s *pCRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-id", v, err)
 				}
-				val := uint(num)
-				s.ToID = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-id", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToID = &num
 			default:
-				return fmt.Errorf("to-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "range":
 			v, err := dec.ReadToken()
@@ -1406,58 +1516,62 @@ func (s *pCRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".range", v, err)
 				}
-				val := uint(num)
-				s.Range = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".range", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.Range = &num
 			default:
-				return fmt.Errorf("range: expected a number, got %v", v.Kind())
+				return configJSONError(path+".range", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*pCRewriteConfigShadow)(nil)
-
-func (s *typeRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *typeRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "from-slot":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-slot", v, err)
 				}
-				val := uint(num)
-				s.FromSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromSlot = &num
 			default:
-				return fmt.Errorf("from-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "from-tg":
 			v, err := dec.ReadToken()
@@ -1465,16 +1579,19 @@ func (s *typeRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-tg", v, err)
 				}
-				val := uint(num)
-				s.FromTG = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-tg", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromTG = &num
 			default:
-				return fmt.Errorf("from-tg: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-tg", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-slot":
 			v, err := dec.ReadToken()
@@ -1482,16 +1599,19 @@ func (s *typeRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-slot", v, err)
 				}
-				val := uint(num)
-				s.ToSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToSlot = &num
 			default:
-				return fmt.Errorf("to-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-id":
 			v, err := dec.ReadToken()
@@ -1499,16 +1619,19 @@ func (s *typeRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-id", v, err)
 				}
-				val := uint(num)
-				s.ToID = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-id", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToID = &num
 			default:
-				return fmt.Errorf("to-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "range":
 			v, err := dec.ReadToken()
@@ -1516,58 +1639,62 @@ func (s *typeRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".range", v, err)
 				}
-				val := uint(num)
-				s.Range = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".range", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.Range = &num
 			default:
-				return fmt.Errorf("range: expected a number, got %v", v.Kind())
+				return configJSONError(path+".range", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*typeRewriteConfigShadow)(nil)
-
-func (s *srcRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *srcRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "from-slot":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-slot", v, err)
 				}
-				val := uint(num)
-				s.FromSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromSlot = &num
 			default:
-				return fmt.Errorf("from-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "from-id":
 			v, err := dec.ReadToken()
@@ -1575,16 +1702,19 @@ func (s *srcRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error 
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".from-id", v, err)
 				}
-				val := uint(num)
-				s.FromID = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".from-id", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.FromID = &num
 			default:
-				return fmt.Errorf("from-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".from-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-slot":
 			v, err := dec.ReadToken()
@@ -1592,16 +1722,19 @@ func (s *srcRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error 
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-slot", v, err)
 				}
-				val := uint(num)
-				s.ToSlot = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-slot", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToSlot = &num
 			default:
-				return fmt.Errorf("to-slot: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "to-id":
 			v, err := dec.ReadToken()
@@ -1609,16 +1742,19 @@ func (s *srcRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error 
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".to-id", v, err)
 				}
-				val := uint(num)
-				s.ToID = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".to-id", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.ToID = &num
 			default:
-				return fmt.Errorf("to-id: expected a number, got %v", v.Kind())
+				return configJSONError(path+".to-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "range":
 			v, err := dec.ReadToken()
@@ -1626,54 +1762,55 @@ func (s *srcRewriteConfigShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error 
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".range", v, err)
 				}
-				val := uint(num)
-				s.Range = &val
+				if raw > math.MaxUint {
+					return configJSONError(path+".range", v, fmt.Errorf("%d overflows uint", raw))
+				}
+				num := uint(raw)
+				s.Range = &num
 			default:
-				return fmt.Errorf("range: expected a number, got %v", v.Kind())
+				return configJSONError(path+".range", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*srcRewriteConfigShadow)(nil)
-
-func (s *iPSCShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *iPSCShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "interface":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.Interface = &str
 			default:
-				return fmt.Errorf("interface: expected a string, got %v", v.Kind())
+				return configJSONError(path+".interface", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "port":
 			v, err := dec.ReadToken()
@@ -1681,19 +1818,19 @@ func (s *iPSCShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Uint()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Uint()
 				if err != nil {
-					return err
+					return configJSONError(path+".port", v, err)
 				}
-				if num > math.MaxUint16 {
-					return fmt.Errorf("port: %d overflows uint16", num)
+				if raw > math.MaxUint16 {
+					return configJSONError(path+".port", v, fmt.Errorf("%d overflows uint16", raw))
 				}
-				val := uint16(num)
-				s.Port = &val
+				num := uint16(raw)
+				s.Port = &num
 			default:
-				return fmt.Errorf("port: expected a number, got %v", v.Kind())
+				return configJSONError(path+".port", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "ip":
 			v, err := dec.ReadToken()
@@ -1701,12 +1838,12 @@ func (s *iPSCShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '"':
+			case jsontext.KindNull:
+			case jsontext.KindString:
 				str := v.String()
 				s.IP = &str
 			default:
-				return fmt.Errorf("ip: expected a string, got %v", v.Kind())
+				return configJSONError(path+".ip", v, fmt.Errorf("expected a string, got %v", v.Kind()))
 			}
 		case "subnet-mask":
 			v, err := dec.ReadToken()
@@ -1714,102 +1851,138 @@ func (s *iPSCShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case '0':
-				num, err := v.Int()
+			case jsontext.KindNull:
+			case jsontext.KindNumber:
+				raw, err := v.Int()
 				if err != nil {
-					return err
+					return configJSONError(path+".subnet-mask", v, err)
 				}
-				val := int(num)
-				s.SubnetMask = &val
+				if raw < math.MinInt || raw > math.MaxInt {
+					return configJSONError(path+".subnet-mask", v, fmt.Errorf("%d overflows int", raw))
+				}
+				num := int(raw)
+				s.SubnetMask = &num
 			default:
-				return fmt.Errorf("subnet-mask: expected a number, got %v", v.Kind())
+				return configJSONError(path+".subnet-mask", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "auth":
-			if dec.PeekKind() == 'n' {
+			if dec.PeekKind() == jsontext.KindNull {
 				if _, err := dec.ReadToken(); err != nil {
 					return err
 				}
 			} else {
+				open, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				if open.Kind() != jsontext.KindBeginObject {
+					return configJSONError(path+".auth", open, fmt.Errorf("expected an object, got %v", open.Kind()))
+				}
 				var sub iPSCAuthShadow
-				if err := sub.UnmarshalJSONFrom(dec); err != nil {
+				if err := sub.decodeJSON(dec, path+".auth"); err != nil {
 					return err
 				}
 				s.Auth = &sub
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*iPSCShadow)(nil)
-
-func (s *iPSCAuthShadow) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
-	tok, err := dec.ReadToken()
-	if err != nil {
-		return err
-	}
-	if tok.Kind() != '{' {
-		return fmt.Errorf("expected object, got %v", tok.Kind())
-	}
+// decodeJSON decodes the members of an object whose opening brace has
+// been read. path is the object's dotted path.
+func (s *iPSCAuthShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
-		if tok.Kind() == '}' {
+		if tok.Kind() == jsontext.KindEndObject {
 			return nil
 		}
-		switch tok.String() {
+		switch key := tok.String(); key {
 		case "enabled":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
 			}
 			switch v.Kind() {
-			case 'n':
-			case 't', 'f':
+			case jsontext.KindNull:
+			case jsontext.KindTrue, jsontext.KindFalse:
 				b := v.Bool()
 				s.Enabled = &b
 			default:
-				return fmt.Errorf("enabled: expected a bool, got %v", v.Kind())
+				return configJSONError(path+".enabled", v, fmt.Errorf("expected a bool, got %v", v.Kind()))
 			}
 		case "key":
-			v, err := dec.ReadToken()
-			if err != nil {
-				return err
-			}
-			switch v.Kind() {
-			case 'n':
-			case '"':
-				str := v.String()
-				s.Key = &str
-			default:
-				return fmt.Errorf("key: expected a string, got %v", v.Kind())
+			if err := func() error {
+				v, err := dec.ReadToken()
+				if err != nil {
+					return err
+				}
+				switch v.Kind() {
+				case jsontext.KindNull:
+				case jsontext.KindString:
+					str := v.String()
+					s.Key = &str
+				default:
+					return configJSONError(path+".key", v, fmt.Errorf("expected a string, got %v", v.Kind()))
+				}
+				return nil
+			}(); err != nil {
+				return &configulator.ParseError{
+					Err:   errors.New("invalid value"),
+					Path:  path + ".key",
+					Value: "(redacted)",
+				}
 			}
 		default:
-			return fmt.Errorf("unknown key %q", tok.String())
+			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
+				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
+			}
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-var _ v2.UnmarshalerFrom = (*iPSCAuthShadow)(nil)
+// configJSONError returns a ParseError for the JSON token v at path.
+func configJSONError(path string, v jsontext.Token, err error) error {
+	return &configulator.ParseError{
+		Err:   err,
+		Path:  path,
+		Value: v.String(),
+	}
+}
 
 // PrintConfig renders every field as "path = value" lines, redacting
 // fields tagged secret:"true". The origin Report holds no values,
 // so this is the only place redaction happens.
-func (c *Config) PrintConfig() string {
+func (c Config) PrintConfig() string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("log-level = %v\n", c.LogLevel))
-	b.WriteString(fmt.Sprintf("metrics.enabled = %v\n", c.Metrics.Enabled))
-	b.WriteString(fmt.Sprintf("metrics.address = %v\n", c.Metrics.Address))
+	fmt.Fprintf(&b, "log-level = %v\n", c.LogLevel)
+	fmt.Fprintf(&b, "metrics.enabled = %v\n", c.Metrics.Enabled)
+	fmt.Fprintf(&b, "metrics.address = %v\n", c.Metrics.Address)
 	b.WriteString("mmdvm = (redacted)\n")
-	b.WriteString(fmt.Sprintf("ipsc.interface = %v\n", c.IPSC.Interface))
-	b.WriteString(fmt.Sprintf("ipsc.port = %v\n", c.IPSC.Port))
-	b.WriteString(fmt.Sprintf("ipsc.ip = %v\n", c.IPSC.IP))
-	b.WriteString(fmt.Sprintf("ipsc.subnet-mask = %v\n", c.IPSC.SubnetMask))
-	b.WriteString(fmt.Sprintf("ipsc.auth.enabled = %v\n", c.IPSC.Auth.Enabled))
+	fmt.Fprintf(&b, "ipsc.interface = %v\n", c.IPSC.Interface)
+	fmt.Fprintf(&b, "ipsc.port = %v\n", c.IPSC.Port)
+	fmt.Fprintf(&b, "ipsc.ip = %v\n", c.IPSC.IP)
+	fmt.Fprintf(&b, "ipsc.subnet-mask = %v\n", c.IPSC.SubnetMask)
+	fmt.Fprintf(&b, "ipsc.auth.enabled = %v\n", c.IPSC.Auth.Enabled)
 	b.WriteString("ipsc.auth.key = (redacted)\n")
 	return b.String()
+}
+
+func configQuoteKey(k string) string {
+	if strings.ContainsAny(k, ".[") {
+		return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(k) + "\""
+	}
+	return k
 }
