@@ -49,9 +49,13 @@ jobs:
       token: ${{ secrets.GITHUB_TOKEN }}
 
   unit-tests-coverage:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
     uses: ./.github/workflows/unit-test.yaml
     with:
       coverage: true
     secrets:
-      codecov_token: ${{ secrets.CODECOV_TOKEN }}
+      auto_commit_app_key: ${{ secrets.AUTO_COMMIT_APP_KEY }}
       token: ${{ secrets.GITHUB_TOKEN }}
