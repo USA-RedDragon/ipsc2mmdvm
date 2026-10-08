@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/USA-RedDragon/configulator"
+	"github.com/USA-RedDragon/configulator/v2"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"

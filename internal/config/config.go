@@ -8,6 +8,8 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+//go:generate go tool configulator -type Config
+
 type LogLevel string
 
 const (
