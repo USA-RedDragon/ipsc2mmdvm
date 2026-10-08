@@ -8,9 +8,49 @@ metrics:
   # Address to serve Prometheus metrics on
   address: ":9100"
 # Configuration for MMDVM clients (multiple DMR masters)
-# mmdvm: []  # list of objects:
 # mmdvm:
 #   - name: ""
+#     callsign: ""
+#     radio-id: 0
+#     rx-freq: 0
+#     tx-freq: 0
+#     tx-power: 0
+#     color-code: 0
+#     latitude: 0.0
+#     longitude: 0.0
+#     height: 0
+#     location: ""
+#     description: ""
+#     url: ""
+#     slots: 3
+#     master-server: ""
+#     password: "(secret)"
+#     tg-rewrite:
+#       - from-slot: 0
+#         from-tg: 0
+#         to-slot: 0
+#         to-tg: 0
+#         range: 1
+#     pc-rewrite:
+#       - from-slot: 0
+#         from-id: 0
+#         to-slot: 0
+#         to-id: 0
+#         range: 1
+#     type-rewrite:
+#       - from-slot: 0
+#         from-tg: 0
+#         to-slot: 0
+#         to-id: 0
+#         range: 1
+#     src-rewrite:
+#       - from-slot: 0
+#         from-id: 0
+#         to-slot: 0
+#         to-id: 0
+#         range: 1
+#     pass-all-pc: []
+#     pass-all-tg: []
 # Configuration for the IPSC server
 ipsc:
   # Interface to listen for IPSC packets on
@@ -26,4 +66,4 @@ ipsc:
     # Whether to require authentication for IPSC clients
     enabled: false
     # Authentication key for IPSC clients. Required if auth is enabled
-    # key: ""
+    # key: "(secret)"

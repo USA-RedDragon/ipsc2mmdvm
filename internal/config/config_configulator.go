@@ -12,6 +12,7 @@ import (
 	cpflag "github.com/USA-RedDragon/configulator/v2/flags/pflag"
 	"github.com/spf13/pflag"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -98,7 +99,7 @@ func ConfigSchema() *configulator.Schema[Config] {
 		DecodeFile:    configDecodeFile,
 	}
 }
-func configApplyDefaults(cfg *Config, set configulator.SetOrigin) error {
+func configApplyDefaults(cfg *Config, sep string, set configulator.SetOrigin) error {
 	cfg.LogLevel = LogLevel("info")
 	set("log-level", configulator.LayerDefault, "default tag")
 	cfg.Metrics.Address = ":9100"
@@ -109,7 +110,7 @@ func configApplyDefaults(cfg *Config, set configulator.SetOrigin) error {
 	set("ipsc.subnet-mask", configulator.LayerDefault, "default tag")
 	return nil
 }
-func configDecodeFile(data []byte, u configulator.Unmarshal, cfg *Config, set configulator.SetOrigin, file string) error {
+func configDecodeFile(data []byte, u configulator.Unmarshal, cfg *Config, sep string, set configulator.SetOrigin, file string) error {
 	var sh configShadow
 	if err := u(data, &sh); err != nil {
 		return &configulator.DecodeError{
@@ -117,9 +118,9 @@ func configDecodeFile(data []byte, u configulator.Unmarshal, cfg *Config, set co
 			Path: file,
 		}
 	}
-	return sh.applyTo(cfg, set, file)
+	return sh.applyTo(cfg, sep, set, file)
 }
-func (s *configShadow) applyTo(cfg *Config, set configulator.SetOrigin, file string) error {
+func (s *configShadow) applyTo(cfg *Config, sep string, set configulator.SetOrigin, file string) error {
 	if s.LogLevel != nil {
 		cfg.LogLevel = LogLevel(*s.LogLevel)
 		set("log-level", configulator.LayerFile, file)
@@ -478,23 +479,27 @@ func ConfigPFlagHooks() cpflag.Hooks[Config] {
 	}
 }
 func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
-	for _, name := range []string{strings.Join([]string{"log-level"}, o.Separator), strings.Join([]string{"metrics", "enabled"}, o.Separator), strings.Join([]string{"metrics", "address"}, o.Separator), strings.Join([]string{"ipsc", "interface"}, o.Separator), strings.Join([]string{"ipsc", "port"}, o.Separator), strings.Join([]string{"ipsc", "ip"}, o.Separator), strings.Join([]string{"ipsc", "subnet-mask"}, o.Separator), strings.Join([]string{"ipsc", "auth", "enabled"}, o.Separator), strings.Join([]string{"ipsc", "auth", "key"}, o.Separator)} {
-		if fs.Lookup(name) != nil {
-			return fmt.Errorf("flag --%s already registered on this FlagSet", name)
+	names := []string{strings.Join([]string{"log-level"}, o.Separator), strings.Join([]string{"metrics", "enabled"}, o.Separator), strings.Join([]string{"metrics", "address"}, o.Separator), strings.Join([]string{"ipsc", "interface"}, o.Separator), strings.Join([]string{"ipsc", "port"}, o.Separator), strings.Join([]string{"ipsc", "ip"}, o.Separator), strings.Join([]string{"ipsc", "subnet-mask"}, o.Separator), strings.Join([]string{"ipsc", "auth", "enabled"}, o.Separator), strings.Join([]string{"ipsc", "auth", "key"}, o.Separator)}
+	for i, name := range names {
+		if fs.Lookup(name) != nil || slices.Contains(names[:i], name) {
+			return &configulator.FlagConflictError{
+				Existing: name,
+				Flag:     name,
+			}
 		}
 	}
-	fs.String(strings.Join([]string{"log-level"}, o.Separator), "info", "Logging level for the application. One of debug, info, warn, or error")
-	fs.Bool(strings.Join([]string{"metrics", "enabled"}, o.Separator), false, "Whether to enable Prometheus metrics endpoint")
-	fs.String(strings.Join([]string{"metrics", "address"}, o.Separator), ":9100", "Address to serve Prometheus metrics on")
-	fs.String(strings.Join([]string{"ipsc", "interface"}, o.Separator), "", "Interface to listen for IPSC packets on")
-	fs.Uint16(strings.Join([]string{"ipsc", "port"}, o.Separator), uint16(0), "Port to listen for IPSC packets on")
-	fs.String(strings.Join([]string{"ipsc", "ip"}, o.Separator), "10.10.250.1", "IP address to listen for IPSC packets on")
-	fs.Int(strings.Join([]string{"ipsc", "subnet-mask"}, o.Separator), 24, "Subnet mask for the virtual network interface created for IPSC packets")
-	fs.Bool(strings.Join([]string{"ipsc", "auth", "enabled"}, o.Separator), false, "Whether to require authentication for IPSC clients")
-	fs.String(strings.Join([]string{"ipsc", "auth", "key"}, o.Separator), "", "Authentication key for IPSC clients. Required if auth is enabled")
+	fs.String(names[0], "info", "Logging level for the application. One of debug, info, warn, or error")
+	fs.Bool(names[1], false, "Whether to enable Prometheus metrics endpoint")
+	fs.String(names[2], ":9100", "Address to serve Prometheus metrics on")
+	fs.String(names[3], "", "Interface to listen for IPSC packets on")
+	fs.Uint16(names[4], uint16(0), "Port to listen for IPSC packets on")
+	fs.String(names[5], "10.10.250.1", "IP address to listen for IPSC packets on")
+	fs.Int(names[6], 24, "Subnet mask for the virtual network interface created for IPSC packets")
+	fs.Bool(names[7], false, "Whether to require authentication for IPSC clients")
+	fs.String(names[8], "", "Authentication key for IPSC clients. Required if auth is enabled")
 	return nil
 }
-func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, set configulator.SetOrigin) error {
+func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, sep string, set configulator.SetOrigin) error {
 	if n := strings.Join([]string{"log-level"}, o.Separator); fs.Changed(n) {
 		v, err := fs.GetString(n)
 		if err != nil {
@@ -1799,12 +1804,12 @@ func (c *Config) PrintConfig() string {
 	b.WriteString(fmt.Sprintf("log-level = %v\n", c.LogLevel))
 	b.WriteString(fmt.Sprintf("metrics.enabled = %v\n", c.Metrics.Enabled))
 	b.WriteString(fmt.Sprintf("metrics.address = %v\n", c.Metrics.Address))
-	b.WriteString(fmt.Sprintf("mmdvm = %v\n", c.MMDVM))
+	b.WriteString("mmdvm = (redacted)\n")
 	b.WriteString(fmt.Sprintf("ipsc.interface = %v\n", c.IPSC.Interface))
 	b.WriteString(fmt.Sprintf("ipsc.port = %v\n", c.IPSC.Port))
 	b.WriteString(fmt.Sprintf("ipsc.ip = %v\n", c.IPSC.IP))
 	b.WriteString(fmt.Sprintf("ipsc.subnet-mask = %v\n", c.IPSC.SubnetMask))
 	b.WriteString(fmt.Sprintf("ipsc.auth.enabled = %v\n", c.IPSC.Auth.Enabled))
-	b.WriteString(fmt.Sprintf("ipsc.auth.key = %v\n", c.IPSC.Auth.Key))
+	b.WriteString("ipsc.auth.key = (redacted)\n")
 	return b.String()
 }

@@ -237,7 +237,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `mmdvm[].url`                      | string          |               | —                   | —                     | URL for the MMDVM connection                                              |
 | `mmdvm[].slots`                    | integer         | `3`           | —                   | —                     | Active timeslots bitmask (1=TS1, 2=TS2, 3=both)                           |
 | `mmdvm[].master-server`            | string          |               | —                   | —                     | Master server for the MMDVM connection                                    |
-| `mmdvm[].password`                 | string          |               | —                   | —                     | Password for the MMDVM connection                                         |
+| `mmdvm[].password`                 | string          |               | —                   | —                     | Password for the MMDVM connection (secret)                                |
 | `mmdvm[].tg-rewrite`               | list of objects |               | —                   | —                     | Talkgroup rewrite rules                                                   |
 | `mmdvm[].tg-rewrite[].from-slot`   | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
 | `mmdvm[].tg-rewrite[].from-tg`     | integer         |               | —                   | —                     | Source talkgroup start                                                    |
@@ -269,7 +269,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `ipsc.ip`                          | string          | `10.10.250.1` | `IPSC_IP`           | `--ipsc.ip`           | IP address to listen for IPSC packets on                                  |
 | `ipsc.subnet-mask`                 | integer         | `24`          | `IPSC_SUBNET_MASK`  | `--ipsc.subnet-mask`  | Subnet mask for the virtual network interface created for IPSC packets    |
 | `ipsc.auth.enabled`                | boolean         |               | `IPSC_AUTH_ENABLED` | `--ipsc.auth.enabled` | Whether to require authentication for IPSC clients                        |
-| `ipsc.auth.key`                    | string          |               | `IPSC_AUTH_KEY`     | `--ipsc.auth.key`     | Authentication key for IPSC clients. Required if auth is enabled          |
+| `ipsc.auth.key`                    | string          |               | `IPSC_AUTH_KEY`     | `--ipsc.auth.key`     | Authentication key for IPSC clients. Required if auth is enabled (secret) |
 
 <!-- configulator:end -->
 

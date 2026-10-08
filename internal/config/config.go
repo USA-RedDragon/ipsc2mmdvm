@@ -42,7 +42,7 @@ type IPSC struct {
 
 type IPSCAuth struct {
 	Enabled bool   `name:"enabled" description:"Whether to require authentication for IPSC clients"`
-	Key     string `name:"key" description:"Authentication key for IPSC clients. Required if auth is enabled"`
+	Key     string `name:"key" description:"Authentication key for IPSC clients. Required if auth is enabled" secret:"true"`
 }
 
 type MMDVM struct {
@@ -68,7 +68,7 @@ type MMDVM struct {
 	URL          string `name:"url" description:"URL for the MMDVM connection"`
 	Slots        byte   `name:"slots" description:"Active timeslots bitmask (1=TS1, 2=TS2, 3=both)" default:"3"`
 	MasterServer string `name:"master-server" description:"Master server for the MMDVM connection"`
-	Password     string `name:"password" description:"Password for the MMDVM connection"`
+	Password     string `name:"password" description:"Password for the MMDVM connection" secret:"true"`
 
 	// Rewrite rules for routing DMR data to/from this network.
 	TGRewrites   []TGRewriteConfig   `name:"tg-rewrite" description:"Talkgroup rewrite rules"`
