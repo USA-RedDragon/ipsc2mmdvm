@@ -1986,12 +1986,14 @@ func TestStartSucceedsWhileMasterUnresolvable(t *testing.T) {
 
 func TestStartRejectsMalformedMasterAddress(t *testing.T) {
 	t.Parallel()
-	cfg := testMMDVMConfig()
-	cfg.MasterServer = "missing-port"
-	c := NewMMDVMClient(cfg, nil)
-	if err := c.Start(); err == nil {
-		c.Stop()
-		t.Fatal("expected an error for a master address without a port")
+	for _, addr := range []string{"missing-port", "127.0.0.1:99999", "127.0.0.1:abc", "127.0.0.1:", "127.0.0.1:0"} {
+		cfg := testMMDVMConfig()
+		cfg.MasterServer = addr
+		c := NewMMDVMClient(cfg, nil)
+		if err := c.Start(); err == nil {
+			c.Stop()
+			t.Errorf("expected an error for master address %q", addr)
+		}
 	}
 }
 

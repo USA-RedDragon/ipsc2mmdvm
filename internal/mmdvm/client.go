@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -200,8 +201,12 @@ func (h *MMDVMClient) buildRewriteRules() {
 // The master is dialed and logged into in the background, and retried
 // until it answers. Start fails only if the master address is malformed.
 func (h *MMDVMClient) Start() error {
-	if _, _, err := net.SplitHostPort(h.cfg.MasterServer); err != nil {
+	_, port, err := net.SplitHostPort(h.cfg.MasterServer)
+	if err != nil {
 		return fmt.Errorf("invalid master server address %q: %w", h.cfg.MasterServer, err)
+	}
+	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
+		return fmt.Errorf("invalid master server port in %q", h.cfg.MasterServer)
 	}
 
 	if h.translator != nil {
