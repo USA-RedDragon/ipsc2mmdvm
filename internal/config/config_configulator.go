@@ -53,7 +53,7 @@ type srcRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
 	FromID   *uint `json:"from-id"   toml:"from-id"   yaml:"from-id"`
 	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
-	ToID     *uint `json:"to-tg"     toml:"to-tg"     yaml:"to-tg"`
+	ToTG     *uint `json:"to-tg"     toml:"to-tg"     yaml:"to-tg"`
 	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
 
@@ -337,8 +337,8 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 						e1.ToSlot = *esh1.ToSlot
 						set(idx1+".to-slot", configulator.LayerFile, file)
 					}
-					if esh1.ToID != nil {
-						e1.ToID = *esh1.ToID
+					if esh1.ToTG != nil {
+						e1.ToTG = *esh1.ToTG
 						set(idx1+".to-tg", configulator.LayerFile, file)
 					}
 					if esh1.Range != nil {
@@ -1754,7 +1754,7 @@ func (s *srcRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) 
 					return configJSONError(path+".to-tg", v, fmt.Errorf("%d overflows uint", raw))
 				}
 				num := uint(raw)
-				s.ToID = &num
+				s.ToTG = &num
 			default:
 				return configJSONError(path+".to-tg", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}

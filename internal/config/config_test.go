@@ -389,11 +389,11 @@ func TestValidateFieldLimits(t *testing.T) {
 func TestValidateSrcRewriteRequiresTG(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
-	c.MMDVM[0].SrcRewrites = []SrcRewriteConfig{{FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 0, Range: 1}}
+	c.MMDVM[0].SrcRewrites = []SrcRewriteConfig{{FromSlot: 1, FromID: 1234, ToSlot: 2, ToTG: 0, Range: 1}}
 	if err := c.Validate(); !errors.Is(err, ErrInvalidRewriteTG) {
 		t.Fatalf("expected %v, got %v", ErrInvalidRewriteTG, err)
 	}
-	c.MMDVM[0].SrcRewrites[0].ToID = 9
+	c.MMDVM[0].SrcRewrites[0].ToTG = 9
 	if err := c.Validate(); err != nil {
 		t.Fatalf("expected valid config, got %v", err)
 	}

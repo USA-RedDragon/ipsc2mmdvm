@@ -122,9 +122,8 @@ type SrcRewriteConfig struct {
 	FromSlot uint `name:"from-slot" description:"Source timeslot (1 or 2)"`
 	FromID   uint `name:"from-id" description:"Source ID start"`
 	ToSlot   uint `name:"to-slot" description:"Destination timeslot (1 or 2)"`
-	// ToID is the destination talkgroup.
-	ToID  uint `name:"to-tg" description:"Destination talkgroup for the converted group call"`
-	Range uint `name:"range" description:"Number of contiguous source IDs to match" default:"1"`
+	ToTG     uint `name:"to-tg" description:"Destination talkgroup for the converted group call"`
+	Range    uint `name:"range" description:"Number of contiguous source IDs to match" default:"1"`
 }
 
 var (
@@ -370,7 +369,7 @@ func validateRewrites(h *MMDVM) error {
 		if r.Range < 1 {
 			return ErrInvalidRewriteRange
 		}
-		if r.ToID < 1 {
+		if r.ToTG < 1 {
 			return ErrInvalidRewriteTG
 		}
 	}

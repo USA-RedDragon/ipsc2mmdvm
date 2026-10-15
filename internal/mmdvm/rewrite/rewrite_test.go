@@ -233,7 +233,7 @@ func TestTypeRewrite_NoMatch_PrivateCall(t *testing.T) {
 
 func TestSrcRewrite_Match(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToTG: 9, Range: 1}
 	pkt := privatePkt(1, 999, 1234)
 
 	res := r.Process(pkt)
@@ -256,7 +256,7 @@ func TestSrcRewrite_Match(t *testing.T) {
 
 func TestSrcRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 5000, Range: 100}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1000, ToSlot: 1, ToTG: 5000, Range: 100}
 	pkt := privatePkt(1, 999, 1050)
 
 	res := r.Process(pkt)
@@ -279,7 +279,7 @@ func TestSrcRewrite_Match_Range(t *testing.T) {
 
 func TestSrcRewrite_NoMatch_GroupCall(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToTG: 9, Range: 1}
 	pkt := groupPkt(1, 91)
 	pkt.Src = 100
 
@@ -294,7 +294,7 @@ func TestSrcRewrite_NoMatch_GroupCall(t *testing.T) {
 
 func TestSrcRewrite_NoMatch_WrongSlot(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 2, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 2, FromID: 1234, ToSlot: 2, ToTG: 9, Range: 1}
 	pkt := privatePkt(1, 999, 1234)
 
 	if r.Process(pkt) != Unmatched {
@@ -304,7 +304,7 @@ func TestSrcRewrite_NoMatch_WrongSlot(t *testing.T) {
 
 func TestSrcRewrite_NoMatch_WrongSource(t *testing.T) {
 	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToTG: 9, Range: 1}
 	pkt := privatePkt(1, 999, 5678) // wrong source
 
 	res := r.Process(pkt)

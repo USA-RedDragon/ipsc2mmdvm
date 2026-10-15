@@ -155,7 +155,7 @@ type SrcRewrite struct {
 	FromSlot uint
 	FromID   uint // start of source ID range
 	ToSlot   uint
-	ToID     uint // destination talkgroup (DMRGateway's toTG)
+	ToTG     uint // destination talkgroup
 	Range    uint
 }
 
@@ -171,7 +171,7 @@ func (r *SrcRewrite) Process(pkt *proto.Packet) Result {
 		setPktSlot(pkt, r.ToSlot)
 	}
 
-	pkt.Dst = r.ToID
+	pkt.Dst = r.ToTG
 	pkt.GroupCall = true
 
 	return Matched

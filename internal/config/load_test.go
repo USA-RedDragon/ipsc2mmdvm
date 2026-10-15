@@ -68,7 +68,7 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	if len(m.TypeRewrites) != 1 || m.TypeRewrites[0].Range != 1 || m.TypeRewrites[0].ToID != 3100 {
 		t.Errorf("unexpected type-rewrite: %+v", m.TypeRewrites)
 	}
-	if len(m.SrcRewrites) != 1 || m.SrcRewrites[0].Range != 1 || m.SrcRewrites[0].FromID != 1234 || m.SrcRewrites[0].ToID != 9 {
+	if len(m.SrcRewrites) != 1 || m.SrcRewrites[0].Range != 1 || m.SrcRewrites[0].FromID != 1234 || m.SrcRewrites[0].ToTG != 9 {
 		t.Errorf("unexpected src-rewrite: %+v", m.SrcRewrites)
 	}
 }

@@ -175,7 +175,7 @@ func (h *MMDVMClient) buildRewriteRules() {
 		}
 		h.netRewrites = append(h.netRewrites, &rewrite.SrcRewrite{
 			Name: name, FromSlot: cfg.FromSlot, FromID: cfg.FromID,
-			ToSlot: cfg.ToSlot, ToID: cfg.ToID, Range: rng,
+			ToSlot: cfg.ToSlot, ToTG: cfg.ToTG, Range: rng,
 		})
 	}
 
