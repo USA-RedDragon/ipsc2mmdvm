@@ -62,6 +62,8 @@ type streamState struct {
 	hasLC        bool             // lc holds the full LC from the voice header
 	privacy      bool             // the call is encrypted: privacy LC or a PI header
 	data         packet.Assembler // the data packet of the call so far
+	embedded     [4][4]byte       // embedded LC fragments of bursts B-E
+	embeddedSeen uint8            // bit n set: embedded[n] is from this superframe
 	firstPacket  bool             // true for the very first packet
 }
 
@@ -655,6 +657,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		return nil
 	}
 	emb := embByte(&t.burst, burstIdx)
+	ss.collectEmbedded(&t.burst, pkt.DMRData, burstIdx)
 
 	var buf []byte
 	switch burstIdx {
@@ -687,7 +690,11 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		}
 
 		// Bytes 56-64: the call's full LC with the destination and source
-		// of the packet
+		// of the packet. A call that started without a voice header uses
+		// the LC of its embedded signalling.
+		if !ss.hasLC {
+			ss.learnEmbeddedLC(pkt.GroupCall)
+		}
 		lc := pdu.LCBytes(ss.lc)
 		if !ss.hasLC {
 			lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
@@ -716,6 +723,37 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 	}
 
 	return buf
+}
+
+// collectEmbedded keeps the embedded signalling fragment of voice burst
+// burstIdx (B-E) of an MMDVM voice burst, so the full LC can be decoded at
+// burst E. Burst A starts a new superframe.
+func (ss *streamState) collectEmbedded(burst *layer2.Burst, data [33]byte, burstIdx int) {
+	switch {
+	case burstIdx == burstA:
+		ss.embeddedSeen = 0
+	case burstIdx >= burstB && burstIdx <= burstE && burst.HasEmbeddedSignalling():
+		ss.embedded[burstIdx-burstB] = layer2.RawBurst(data).EmbeddedData()
+		ss.embeddedSeen |= 1 << (burstIdx - burstB)
+	}
+}
+
+// learnEmbeddedLC sets the LC of a call that has none from the embedded LC
+// of the superframe that burst E completes, when it is a voice LC of the
+// call's type. An XPR 8400 builds the voice header of such a late-entry
+// call from the LC that burst E carries in bytes 56-64.
+func (ss *streamState) learnEmbeddedLC(groupCall bool) {
+	if ss.embeddedSeen != 0x0F {
+		return
+	}
+	lc, res := layer2.DecodeEmbeddedLC(ss.embedded, true)
+	flco := pdu.LCBytes(lc).FLCO()
+	if res.Uncorrectable || (groupCall && flco != enums.FLCOGroupVoiceChannelUser) ||
+		(!groupCall && flco != enums.FLCOUnitToUnitVoiceChannelUser) {
+		return
+	}
+	ss.lc, ss.hasLC = lc, true
+	ss.privacy = ss.privacy || lcPrivacy(lc)
 }
 
 // decodeBPTCPayload returns the 12-byte BPTC(196,96) payload of a 33-byte

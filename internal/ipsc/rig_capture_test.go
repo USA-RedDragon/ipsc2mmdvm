@@ -35,7 +35,7 @@ func rigPICallBursts() []string {
 	return []string{
 		"00954a5e05c80e003f504540dc4dff57d75df5d361841570380037642389b60041",
 		"147c924d38a402b9736085831c2dff57d75df5d0cd3f7018e1204ca60f58001603",
-		"6f7d2c51611e1813bb0927dee94755fd7df75f71bbfd6724638188a7a161c49575",
+		rigBurstA,
 		"8a3e8c022d191619eeaa053b03c73000009003849ea5bcfdf812bca894359e323a",
 		"4922df4c3e3bd60c0f3432b218977060a4706dd16e595bc6c5fc8e707c1726043d",
 		"62b67b404c70f4053a0dca5bf7077090c280cddf8428b241d17b05dd18bf1b0b70",
@@ -130,6 +130,11 @@ func TestPIHeaderSetsPrivacy(t *testing.T) {
 		}
 	}
 }
+
+// rigBurstA is burst A of the first superframe of dmrrf's AMBE test
+// pattern, BS-sourced, color code 7. Burst A carries no LC, so it is the
+// same in every test call.
+const rigBurstA = "6f7d2c51611e1813bb0927dee94755fd7df75f71bbfd6724638188a7a161c49575"
 
 // rigDataCall is a data packet "DMRGO TEST" that the XPR 8400 relayed on
 // TS2 from 3191868, the bursts dmrgo encodes for it, and their data types.
@@ -338,7 +343,7 @@ func rigVoiceCall() []string {
 func rigVoiceCallBursts() []string {
 	return []string{
 		"00d40ada05cc0e703f004d80dc4dff57d75df5d36194140039c03be02f01b20054",
-		"6f7d2c51611e1813bb0927dee94755fd7df75f71bbfd6724638188a7a161c49575",
+		rigBurstA,
 		"8a3e8c022d191619eeaa053b03c73000009003849ea5bcfdf812bca894359e323a",
 		"4922df4c3e3bd60c0f3432b218977060a0606dd16e595bc6c5fc8e707c1726043d",
 		"62b67b404c70f4053a0dca5bf7077090c240cddf8428b241d17b05dd18bf1b0b70",
@@ -592,6 +597,105 @@ func TestMBCContinuationPassesWithoutCRC(t *testing.T) {
 	}
 	if p, _ := layer2.RawBurst(got[0].DMRData).BPTCPayload(); p != [12]byte(d[38:50]) {
 		t.Errorf("payload %x, want %x", p, d[38:50])
+	}
+}
+
+// rigLateEntryBursts are bursts A to E of the first superframe of a TS2
+// group call from 3191868 to 91 that starts without a voice header.
+func rigLateEntryBursts() []string {
+	return []string{
+		rigBurstA,
+		"8a3e8c022d191619eeaa053b03c73000909003849ea5bcfdf812bca894359e323a",
+		"4922df4c3e3bd60c0f3432b2189770f0a0606dd16e595bc6c5fc8e707c1726043d",
+		"62b67b404c70f4053a0dca5bf7077091d0f05ddf8428b241d17b05dd18bf1b0b70",
+		"9d3b07147149793a31b2bcd2f0c751d18001eae3805c3f7964072cffc3606f58eb",
+	}
+}
+
+// TestRigLateEntryToIPSCCarriesEmbeddedLC sends the first superframe of a
+// TS2 group call from 3191868 to 91 that starts without a voice header. The
+// XPR 8400 builds the voice header of such a call from the LC in bytes 56-64
+// of burst E, so burst E must carry the embedded LC of the call, as the
+// repeater itself sent it for the same call ("1d18001e", the LC, EMB 0x74),
+// not one built with other service options.
+func TestRigLateEntryToIPSCCarriesEmbeddedLC(t *testing.T) {
+	t.Parallel()
+	tr, err := NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.SetPeerID(3149999)
+	tr.SetColorCode(7)
+	bursts := rigLateEntryBursts()
+	var e []byte
+	for i, h := range bursts {
+		w, _ := hex.DecodeString(h)
+		ft := mmdvmFrameTypeVoice
+		if i == burstA {
+			ft = mmdvmFrameTypeVoiceSync
+		}
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 91, GroupCall: true, Slot: true,
+			FrameType: ft, DTypeOrVSeq: uint(i), StreamID: 79, DMRData: [33]byte(w),
+		})
+		if len(out) != 1 {
+			t.Fatalf("burst %d: got %d packets", i, len(out))
+		}
+		e = out[0]
+	}
+	if got, want := hex.EncodeToString(e[52:]), "1d18001e00000000005b30b43c74"; got != want {
+		t.Fatalf("burst E bytes 52-65: got %s, want %s", got, want)
+	}
+}
+
+// lateEntryToIPSC sends bursts, hex-encoded MMDVM voice bursts of one
+// superframe from burst A on, to IPSC as a TS2 call from 3191868 to dst
+// with no voice header, and returns the packet built for each.
+func lateEntryToIPSC(t *testing.T, bursts []string, dst uint, group bool) [][]byte {
+	t.Helper()
+	tr := newTestTranslator(t)
+	tr.SetColorCode(7)
+	got := make([][]byte, 0, len(bursts))
+	for i, h := range bursts {
+		w, _ := hex.DecodeString(h)
+		ft := mmdvmFrameTypeVoice
+		if i == burstA {
+			ft = mmdvmFrameTypeVoiceSync
+		}
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: dst, GroupCall: group, Slot: true,
+			FrameType: ft, DTypeOrVSeq: uint(i), StreamID: 83, DMRData: [33]byte(w),
+		})
+		if len(out) != 1 {
+			t.Fatalf("burst %d: got %d packets", i, len(out))
+		}
+		got = append(got, out[0])
+	}
+	return got
+}
+
+// TestLateEntryIgnoresLCOfOtherCallType sends rigLateEntryBursts, whose
+// embedded LC is a group voice LC, as a private call. The LC does not match
+// the call, so burst E carries the unit-to-unit LC built from the packet
+// fields.
+func TestLateEntryIgnoresLCOfOtherCallType(t *testing.T) {
+	t.Parallel()
+	got := lateEntryToIPSC(t, rigLateEntryBursts(), 91, false)
+	if lc, want := hex.EncodeToString(got[burstE][56:65]), "03002000005b30b43c"; lc != want {
+		t.Fatalf("burst E LC %s, want %s", lc, want)
+	}
+}
+
+// TestLateEntryLearnsPrivacy joins rigPICall at burst A. Its embedded LC
+// has the privacy service option, so the call is encrypted from the burst
+// after E, which completes the LC.
+func TestLateEntryLearnsPrivacy(t *testing.T) {
+	t.Parallel()
+	got := lateEntryToIPSC(t, rigPICallBursts()[2:8], 9, true)
+	for i, p := range got {
+		if want := i == burstF; (p[17]&ipscCallInfoPrivacy != 0) != want {
+			t.Errorf("burst %d: call info %02x, want privacy %v", i, p[17], want)
+		}
 	}
 }
 
