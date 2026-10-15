@@ -142,6 +142,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		for _, client := range mmdvmClients {
 			client.Stop()
 		}
+		outboundTSMgr.Stop()
 		ipscServer.Stop()
 	})
 }
