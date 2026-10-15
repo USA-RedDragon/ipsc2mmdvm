@@ -1,6 +1,7 @@
 package ipsc
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec
 	"encoding/binary"
@@ -1110,7 +1111,7 @@ func TestSendUserPacketToMultiplePeers(t *testing.T) {
 	}
 
 	payload := []byte("broadcast")
-	s.SendUserPacket(payload)
+	s.SendUserPacket(t.Context(), payload)
 
 	got1 := readUDP(t, client1)
 	got2 := readUDP(t, client2)
@@ -1142,7 +1143,7 @@ func TestSendUserPacketWhenStopped(t *testing.T) {
 	}
 	s.stopped.Store(true)
 
-	s.SendUserPacket([]byte("should not arrive"))
+	s.SendUserPacket(t.Context(), []byte("should not arrive"))
 
 	// Try reading with a short timeout — should get nothing
 	if err := client.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
@@ -1160,7 +1161,7 @@ func TestSendUserPacketNoPeers(t *testing.T) {
 	s, _ := newTestServerWithUDP(t, false, "")
 
 	// Should not panic with no peers
-	s.SendUserPacket([]byte("no peers"))
+	s.SendUserPacket(t.Context(), []byte("no peers"))
 }
 
 func TestSendUserPacketSkipsNilAddrPeers(t *testing.T) {
@@ -1187,7 +1188,7 @@ func TestSendUserPacketSkipsNilAddrPeers(t *testing.T) {
 		t.Fatalf("upsertPeer: %v", err)
 	}
 
-	s.SendUserPacket([]byte("selective"))
+	s.SendUserPacket(t.Context(), []byte("selective"))
 
 	got := readUDP(t, client)
 	if string(got) != "selective" {
@@ -1215,7 +1216,7 @@ func TestSendUserPacketWithAuth(t *testing.T) {
 	}
 
 	payload := []byte("authenticated-broadcast")
-	s.SendUserPacket(payload)
+	s.SendUserPacket(t.Context(), payload)
 
 	got := readUDP(t, client)
 	if len(got) != len(payload)+10 {
@@ -1250,7 +1251,7 @@ func TestSendUserPacketDataIsCopied(t *testing.T) {
 	}
 
 	payload := []byte("original")
-	s.SendUserPacket(payload)
+	s.SendUserPacket(t.Context(), payload)
 
 	// Mutate original after sending — should not affect what was sent
 	payload[0] = 'X'
@@ -1269,7 +1270,7 @@ func TestPacePeerFirstCallNoDelay(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	start := time.Now()
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 	elapsed := time.Since(start)
 
 	// First call should not sleep
@@ -1284,11 +1285,11 @@ func TestPacePeerEnforcesInterval(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	// First call establishes the timestamp
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 
 	// Second call immediately after should sleep ~30ms
 	start := time.Now()
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 	elapsed := time.Since(start)
 
 	if elapsed < 20*time.Millisecond {
@@ -1302,11 +1303,11 @@ func TestPacePeerSeparatePeersIndependent(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	// Pace peer 1
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 
 	// Pace peer 2 immediately — should not be delayed by peer 1
 	start := time.Now()
-	s.pacePeer(2)
+	s.pacePeer(t.Context(), 2)
 	elapsed := time.Since(start)
 
 	if elapsed > 10*time.Millisecond {
@@ -1319,12 +1320,12 @@ func TestPacePeerAfterInterval(t *testing.T) {
 	cfg := testConfig(false, "")
 	s := NewIPSCServer(cfg, nil)
 
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 	// Wait longer than the burst interval (30ms)
 	time.Sleep(40 * time.Millisecond)
 
 	start := time.Now()
-	s.pacePeer(1)
+	s.pacePeer(t.Context(), 1)
 	elapsed := time.Since(start)
 
 	// Should not need to sleep since interval has passed
@@ -1934,7 +1935,7 @@ func TestUnregisteredPeerCreatesNoPeerAndGetsNoTraffic(t *testing.T) {
 		t.Fatalf("expected no peers from unregistered packets, got %d", n)
 	}
 
-	s.SendUserPacket([]byte("voice"))
+	s.SendUserPacket(t.Context(), []byte("voice"))
 	expectNoUDP(t, victim)
 }
 
@@ -1956,7 +1957,7 @@ func TestSendUserPacketSkipsUnregisteredPeers(t *testing.T) {
 	s.peers[42] = &Peer{ID: 42, Addr: victimAddr}
 	s.mu.Unlock()
 
-	s.SendUserPacket([]byte("voice"))
+	s.SendUserPacket(t.Context(), []byte("voice"))
 	expectNoUDP(t, victim)
 }
 
@@ -2094,7 +2095,7 @@ func TestSilentPeerStopsGettingTraffic(t *testing.T) {
 	s.peers[42].LastSeen = time.Now().Add(-peerTimeout - time.Second)
 	s.mu.Unlock()
 
-	s.SendUserPacket([]byte("voice"))
+	s.SendUserPacket(t.Context(), []byte("voice"))
 	expectNoUDP(t, victim)
 }
 
@@ -2131,7 +2132,7 @@ func TestExpirePeersRemovesSilentPeers(t *testing.T) {
 		t.Fatalf("upsertPeer: %v", err)
 	}
 	registerPeer(t, s, 2)
-	s.pacePeer(2)
+	s.pacePeer(t.Context(), 2)
 
 	now := time.Now()
 	s.mu.Lock()
@@ -2201,4 +2202,47 @@ func TestStopEndsMaintenance(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop did not end the maintenance goroutine")
 	}
+}
+
+// pacedServer returns a server with one active peer that may not be sent
+// to for an hour.
+func pacedServer(t *testing.T) *IPSCServer {
+	t.Helper()
+	s, _ := newTestServerWithUDP(t, false, "")
+	s.pace = time.Hour
+	registerPeer(t, s, 1)
+	s.mu.Lock()
+	s.lastSend[1] = time.Now()
+	s.mu.Unlock()
+	return s
+}
+
+func requireReturns(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		f()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s did not return", what)
+	}
+}
+
+func TestSendUserPacketGivesUpWhenContextIsDone(t *testing.T) {
+	t.Parallel()
+	s := pacedServer(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	time.AfterFunc(20*time.Millisecond, cancel)
+	requireReturns(t, "SendUserPacket", func() { s.SendUserPacket(ctx, []byte("x")) })
+	requireReturns(t, "SendUserPacket", func() { s.SendUserPacket(ctx, []byte("x")) })
+}
+
+func TestSendUserPacketGivesUpWhenServerStops(t *testing.T) {
+	t.Parallel()
+	s := pacedServer(t)
+	time.AfterFunc(20*time.Millisecond, s.Stop)
+	requireReturns(t, "SendUserPacket", func() { s.SendUserPacket(t.Context(), []byte("x")) })
 }

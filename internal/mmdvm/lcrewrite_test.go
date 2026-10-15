@@ -1,6 +1,7 @@
 package mmdvm
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"net"
@@ -85,7 +86,7 @@ func TestSrcRewriteRewritesLinkControlToIPSC(t *testing.T) {
 	c.netRewrites = []rewrite.Rule{&rewrite.SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 1, ToTG: 9, Range: 1}}
 	var mu sync.Mutex
 	var got [][]byte
-	c.SetIPSCHandler(func(d []byte) {
+	c.SetIPSCHandler(func(_ context.Context, d []byte) {
 		mu.Lock()
 		got = append(got, d)
 		mu.Unlock()

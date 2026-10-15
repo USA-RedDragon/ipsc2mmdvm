@@ -1,6 +1,7 @@
 package ipsc
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec
 	"encoding/binary"
@@ -29,6 +30,7 @@ type IPSCServer struct {
 	authKey  []byte // 20-byte HMAC key decoded from hex
 	peers    map[uint32]*Peer
 	lastSend map[uint32]time.Time
+	pace     time.Duration // minimum gap between packets to one peer
 
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
 	bursts       chan burst
@@ -101,6 +103,8 @@ const (
 	// peerTimeout is how long a registered peer may stay silent before it is
 	// removed. It matches the 120 second timeout DMRlink uses as a master.
 	peerTimeout = 24 * peerKeepAliveInterval
+	// defaultPace is the minimum gap between user packets sent to one peer.
+	defaultPace = 30 * time.Millisecond
 )
 
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
@@ -134,6 +138,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		authKey:  authKey,
 		peers:    map[uint32]*Peer{},
 		lastSend: map[uint32]time.Time{},
+		pace:     defaultPace,
 		bursts:   make(chan burst, burstQueueSize),
 		done:     make(chan struct{}),
 	}
@@ -730,12 +735,17 @@ func (s *IPSCServer) sendPacket(packet *Packet, addr *net.UDPAddr) error {
 	return nil
 }
 
-func (s *IPSCServer) SendUserPacket(data []byte) {
-	if s.stopped.Load() {
+// SendUserPacket sends data to every active peer, pacing each peer. It
+// gives up, possibly after some peers got the packet, once ctx is done or
+// the server stops.
+func (s *IPSCServer) SendUserPacket(ctx context.Context, data []byte) {
+	if s.stopped.Load() || ctx.Err() != nil {
 		return
 	}
 	for _, peer := range s.activePeers(time.Now()) {
-		s.pacePeer(peer.id)
+		if !s.pacePeer(ctx, peer.id) {
+			return
+		}
 		packetData := make([]byte, len(data))
 		copy(packetData, data)
 		packet := &Packet{data: packetData}
@@ -748,20 +758,26 @@ func (s *IPSCServer) SendUserPacket(data []byte) {
 	}
 }
 
-func (s *IPSCServer) pacePeer(peerID uint32) {
-	const burstInterval = 30 * time.Millisecond
-
+// pacePeer waits until a packet may be sent to peerID. It returns false if
+// ctx is done or the server stops first.
+func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 	s.mu.Lock()
 	last := s.lastSend[peerID]
-	now := time.Now()
-	if !last.IsZero() {
-		elapsed := now.Sub(last)
-		if elapsed < burstInterval {
-			s.mu.Unlock()
-			time.Sleep(burstInterval - elapsed)
-			s.mu.Lock()
+	if wait := s.pace - time.Since(last); !last.IsZero() && wait > 0 {
+		s.mu.Unlock()
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-s.done:
+			timer.Stop()
+			return false
 		}
+		s.mu.Lock()
 	}
 	s.lastSend[peerID] = time.Now()
 	s.mu.Unlock()
+	return true
 }

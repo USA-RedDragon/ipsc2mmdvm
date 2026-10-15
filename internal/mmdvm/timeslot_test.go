@@ -1,6 +1,7 @@
 package mmdvm
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -71,8 +72,8 @@ type ipscRecorder struct {
 	hook func(ipscRecord)
 }
 
-func (r *ipscRecorder) handler(name string) func([]byte) {
-	return func(d []byte) {
+func (r *ipscRecorder) handler(name string) func(context.Context, []byte) {
+	return func(_ context.Context, d []byte) {
 		rec := ipscRecord{
 			via:         name,
 			src:         uint32(d[6])<<16 | uint32(d[7])<<8 | uint32(d[8]),
@@ -170,8 +171,8 @@ func TestReplayDoesNotBlockHandler(t *testing.T) {
 	c2 := newSlotTestClient(t, "net2", mgr)
 	gate := make(chan struct{})
 	t.Cleanup(func() { close(gate) })
-	c1.SetIPSCHandler(func([]byte) {})
-	c2.SetIPSCHandler(func([]byte) { <-gate })
+	c1.SetIPSCHandler(func(context.Context, []byte) {})
+	c2.SetIPSCHandler(func(context.Context, []byte) { <-gate })
 
 	c1.handleReady(dmrdFrom(srcA, 0xA, 1))
 	c2.handleReady(dmrdFrom(srcB, 0xB, 1))

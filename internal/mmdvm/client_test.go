@@ -300,14 +300,14 @@ func TestSetIPSCHandler(t *testing.T) {
 		t.Fatal("expected nil handler initially")
 	}
 	called := false
-	client.SetIPSCHandler(func(data []byte) {
+	client.SetIPSCHandler(func(_ context.Context, data []byte) {
 		called = true
 	})
 	handler := client.ipscHandler.Load()
 	if handler == nil {
 		t.Fatal("expected non-nil handler after SetIPSCHandler")
 	}
-	(*handler)([]byte{})
+	(*handler)(t.Context(), []byte{})
 	if !called {
 		t.Fatal("expected handler to be called")
 	}
@@ -826,7 +826,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 
 	var receivedPackets [][]byte
 	var mu sync.Mutex
-	client.SetIPSCHandler(func(data []byte) {
+	client.SetIPSCHandler(func(_ context.Context, data []byte) {
 		mu.Lock()
 		receivedPackets = append(receivedPackets, data)
 		mu.Unlock()
@@ -1819,7 +1819,7 @@ func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
 	waitFor(t, 2*time.Second, "READY", isReady(c))
 
 	got := make(chan struct{}, 1)
-	c.SetIPSCHandler(func([]byte) {
+	c.SetIPSCHandler(func(context.Context, []byte) {
 		select {
 		case got <- struct{}{}:
 		default:
@@ -2089,7 +2089,7 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			release := make(chan struct{})
 			blocked := make(chan struct{})
 			var once sync.Once
-			c.SetIPSCHandler(func([]byte) {
+			c.SetIPSCHandler(func(context.Context, []byte) {
 				once.Do(func() { close(blocked) })
 				<-release
 			})
@@ -2247,5 +2247,40 @@ func TestStopStopsInboundTimeslotManager(t *testing.T) {
 	}
 	if v := mgr.Submit(false, 3, "ipsc", pkt(3), false, client.forwardInbound); v != timeslot.Dropped {
 		t.Fatalf("expected the inbound manager to be stopped, Submit returned %v", v)
+	}
+}
+
+func TestStopReturnsWhileIPSCHandlerBlocks(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.state.Store(uint32(STATE_READY))
+	client.netRewrites = []rewrite.Rule{&rewrite.PassAllTG{Name: testRuleName, Slot: 1}}
+	entered := make(chan struct{}, 1)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	client.SetIPSCHandler(func(ctx context.Context, _ []byte) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-block:
+		case <-ctx.Done():
+		}
+	})
+	client.wg.Add(1)
+	go client.handler()
+	client.connRX <- dmrd(1)
+	<-entered
+
+	stopped := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung while the IPSC handler was blocked")
 	}
 }

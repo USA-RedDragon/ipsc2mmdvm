@@ -39,7 +39,7 @@ type MMDVMClient struct {
 	lastHeard    atomic.Int64 // UnixNano — last packet read from the master
 	rxWaiting    atomic.Bool  // rx holds a packet the handler has not taken yet
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
-	ipscHandler  atomic.Pointer[func(data []byte)]
+	ipscHandler  atomic.Pointer[func(ctx context.Context, data []byte)]
 	translator   *ipsc.IPSCTranslator
 	netLC        *ipsc.LCRewriter // re-encodes LC after netRewrites
 	rfLC         *ipsc.LCRewriter // re-encodes LC after rfRewrites
@@ -716,9 +716,29 @@ func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
 	handler := h.ipscHandler.Load()
 	if handler != nil && h.translator != nil {
 		ipscPackets := h.translator.TranslateToIPSC(packet)
+		ctx := stopContext{h.done}
 		for _, ipscData := range ipscPackets {
-			(*handler)(ipscData)
+			if ctx.Err() != nil {
+				return
+			}
+			(*handler)(ctx, ipscData)
 		}
+	}
+}
+
+// stopContext is a context.Context that is canceled when the client stops.
+type stopContext struct{ done <-chan struct{} }
+
+func (stopContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c stopContext) Done() <-chan struct{}     { return c.done }
+func (stopContext) Value(any) any               { return nil }
+
+func (c stopContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
 	}
 }
 
@@ -781,8 +801,10 @@ func (h *MMDVMClient) sendInbound(pkt proto.Packet) bool {
 }
 
 // SetIPSCHandler sets the function that receives translated IPSC packets.
-// It is safe to call at any time, including after Start.
-func (h *MMDVMClient) SetIPSCHandler(handler func(data []byte)) {
+// The handler must return soon after its context is done, which happens
+// when the client stops. It is safe to call at any time, including after
+// Start.
+func (h *MMDVMClient) SetIPSCHandler(handler func(ctx context.Context, data []byte)) {
 	if handler == nil {
 		h.ipscHandler.Store(nil)
 		return
