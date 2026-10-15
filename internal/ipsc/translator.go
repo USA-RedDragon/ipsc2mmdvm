@@ -36,6 +36,7 @@ type IPSCTranslator struct {
 	lastPrune      time.Time
 
 	nextCallControl uint32
+	nextCallSeq     uint8
 	nextStreamID    uint32
 }
 
@@ -52,8 +53,8 @@ type streamState struct {
 	callControl  uint32 // random per-call
 	rtpSeq       uint16
 	rtpTimestamp uint32
-	ipscSeq      uint8
-	headersSent  int // number of voice headers sent (3 required)
+	ipscSeq      uint8 // byte 5 of every packet of the call
+	headersSent  int   // number of voice headers sent (3 required)
 	lastSeen     time.Time
 	lc           [9]byte
 	hasLC        bool // lc holds the full LC from the voice header
@@ -212,8 +213,10 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 		}
 		ss = &streamState{
 			callControl: t.nextCallControl,
+			ipscSeq:     t.nextCallSeq,
 			firstPacket: true,
 		}
+		t.nextCallSeq++
 		t.streams[uint32(streamID)] = ss
 		if t.metrics != nil {
 			t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Inc()
@@ -343,7 +346,8 @@ func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt mmdvm.Packet, ss *strea
 	// Bytes 1-4: Peer ID
 	binary.BigEndian.PutUint32(buf[1:5], t.peerID)
 
-	// Byte 5: IPSC sequence number
+	// Byte 5: call sequence number, the same in every packet of a call and
+	// one more for each call, as an XPR 8400 sends it
 	buf[5] = ss.ipscSeq
 
 	// Bytes 6-8: Source subscriber (24-bit)
@@ -431,7 +435,6 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	// RTP Payload — voice terminator (same structure as header)
 	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc[:], slotTypeColorCode(pkt.DMRData))
 
-	ss.ipscSeq++
 	return buf
 }
 
@@ -451,7 +454,6 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
 	writeIPSCDataBurst(buf, burstType, 0x40, payload[:], slotTypeColorCode(pkt.DMRData))
 
-	ss.ipscSeq++
 	return buf
 }
 
@@ -467,7 +469,6 @@ func (t *IPSCTranslator) buildIPSCRate34Packet(pkt mmdvm.Packet, ss *streamState
 	copy(rotated[:], payload[2:])
 	copy(rotated[16:], payload[:2])
 	writeIPSCDataBurst(buf, ipscBurstRate34, 0x40, rotated[:], slotTypeColorCode(pkt.DMRData))
-	ss.ipscSeq++
 	return buf
 }
 

@@ -382,3 +382,39 @@ func TestLateEntryLCRejectsMismatch(t *testing.T) {
 		t.Fatal("LC with nonzero parity accepted")
 	}
 }
+
+// TestRigCallSequence checks that byte 5 is the same in every packet of a
+// call, voice or data, as in the XPR 8400 captures, and differs between
+// calls.
+func TestRigCallSequence(t *testing.T) {
+	t.Parallel()
+	for _, ref := range [][]string{rigPICall(), rigRate34Calls()[0].packets, rigRate34Calls()[1].packets} {
+		first, _ := hex.DecodeString(ref[0])
+		for _, h := range ref {
+			r, _ := hex.DecodeString(h)
+			if r[5] != first[5] {
+				t.Fatalf("capture: byte 5 %02x then %02x", first[5], r[5])
+			}
+		}
+	}
+	voice := rigVoiceToIPSC(t, rigPICall(), rigPICallBursts(), rigPICallKinds())
+	for i, g := range voice {
+		if g[5] != voice[0][5] {
+			t.Errorf("voice packet %d: byte 5 %02x, want %02x", i, g[5], voice[0][5])
+		}
+	}
+	data := rigDataToIPSC(t, rigRate34Calls()[1])
+	for i, g := range data {
+		if g[5] != data[0][5] {
+			t.Errorf("data packet %d: byte 5 %02x, want %02x", i, g[5], data[0][5])
+		}
+	}
+
+	tr := newTestTranslator(t)
+	a := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK)))
+	b := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
+	b.StreamID++
+	if out := tr.TranslateToIPSC(b); len(a) != 1 || len(out) != 1 || a[0][5] == out[0][5] {
+		t.Errorf("two calls share byte 5")
+	}
+}
