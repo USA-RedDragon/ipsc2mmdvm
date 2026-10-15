@@ -1633,3 +1633,64 @@ func TestStartedFlag(t *testing.T) {
 		t.Fatal("expected started=false after reset")
 	}
 }
+
+func TestSendRPTCOversizedFieldsKeepFixedLayout(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.cfg.Callsign = "KD9ABC-RPT"
+	client.cfg.RXFreq = 4400000000
+	client.cfg.TXFreq = 1234567890
+	client.cfg.TXPower = 200
+	client.cfg.ColorCode = 255
+	client.cfg.Latitude = 123.4
+	client.cfg.Longitude = -500
+	client.cfg.Height = 5000
+	client.cfg.Location = strings.Repeat("L", 30)
+	client.cfg.Description = strings.Repeat("D", 30)
+	client.cfg.Slots = 0
+	client.cfg.URL = strings.Repeat("u", 200)
+
+	client.sendRPTC()
+	data := <-client.connTX
+
+	if len(data) != 302 {
+		t.Fatalf("expected 302 bytes, got %d", len(data))
+	}
+	want := []struct {
+		from, to int
+		val      string
+	}{
+		{0, 4, tagRPTC},
+		{8, 16, "KD9ABC-R"},
+		{16, 25, "999999999"},
+		{25, 34, "999999999"},
+		{34, 36, "99"},
+		{36, 38, "99"},
+		{38, 46, "+90.0000"},
+		{46, 55, "-180.0000"},
+		{55, 58, "999"},
+		{58, 78, strings.Repeat("L", 20)},
+		{78, 97, strings.Repeat("D", 19)},
+		{97, 98, "3"},
+		{98, 222, strings.Repeat("u", 124)},
+		{222, 262, fmt.Sprintf("%-40s", "20210921")},
+		{262, 302, fmt.Sprintf("%-40s", "MMDVM_MMDVM_HS_Dual_Hat")},
+	}
+	for _, w := range want {
+		if got := string(data[w.from:w.to]); got != w.val {
+			t.Errorf("bytes %d:%d = %q, want %q", w.from, w.to, got, w.val)
+		}
+	}
+	if id := binary.BigEndian.Uint32(data[4:8]); id != client.cfg.ID {
+		t.Errorf("expected ID %d, got %d", client.cfg.ID, id)
+	}
+}
+
+func TestSendRPTCDefaultLength(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.sendRPTC()
+	if data := <-client.connTX; len(data) != 302 {
+		t.Fatalf("expected 302 bytes, got %d", len(data))
+	}
+}

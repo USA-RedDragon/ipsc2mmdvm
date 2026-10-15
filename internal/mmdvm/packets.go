@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
@@ -28,33 +29,59 @@ func (h *MMDVMClient) rptclPacket() []byte {
 	return data
 }
 
-func (h *MMDVMClient) sendRPTC() {
-	str := []byte("RPTC") // 0:4
-	str = append(str, make([]byte, 4)...)
-	binary.BigEndian.PutUint32(str[4:], h.cfg.ID) // 4:8
+// rptcLength is the fixed size of an RPTC configuration packet.
+const rptcLength = 302
 
-	// Apply defaults for fields the config library may not handle.
+func (h *MMDVMClient) sendRPTC() {
+	h.connTX <- h.rptcPacket()
+}
+
+// rptcPacket builds the RPTC configuration packet. Every field has a fixed
+// width and offset, so strings are truncated or padded and numbers are
+// clamped to the range their field can hold, as MMDVMHost does.
+func (h *MMDVMClient) rptcPacket() []byte {
 	slots := h.cfg.Slots
 	if slots == 0 {
 		slots = 3
 	}
 
-	str = append(str, []byte(fmt.Sprintf("%-8s", h.cfg.Callsign))...)             // 8:16
-	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.RXFreq))...)               // 16:25
-	str = append(str, []byte(fmt.Sprintf("%09d", h.cfg.TXFreq))...)               // 25:34
-	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.TXPower))...)              // 34:36
-	str = append(str, []byte(fmt.Sprintf("%02d", h.cfg.ColorCode))...)            // 36:38
-	str = append(str, []byte(fmt.Sprintf("%+08.4f", h.cfg.Latitude))...)          // 38:46
-	str = append(str, []byte(fmt.Sprintf("%+09.4f", h.cfg.Longitude))...)         // 46:55
-	str = append(str, []byte(fmt.Sprintf("%03d", h.cfg.Height))...)               // 55:58
-	str = append(str, []byte(fmt.Sprintf("%-20s", h.cfg.Location))...)            // 58:78
-	str = append(str, []byte(fmt.Sprintf("%-19s", h.cfg.Description))...)         // 78:97
-	str = append(str, []byte(fmt.Sprintf("%d", slots))...)                        // 97:98
-	str = append(str, []byte(fmt.Sprintf("%-124s", h.cfg.URL))...)                // 98:222
-	str = append(str, []byte(fmt.Sprintf("%-40s", "20210921"))...)                // 222:262
-	str = append(str, []byte(fmt.Sprintf("%-40s", "MMDVM_MMDVM_HS_Dual_Hat"))...) // 262:302
+	buf := make([]byte, 8, rptcLength)
+	copy(buf, "RPTC")
+	binary.BigEndian.PutUint32(buf[4:], h.cfg.ID)
 
-	h.connTX <- str
+	field := func(s string, width int) {
+		if len(s) > width {
+			s = s[:width]
+		}
+		buf = append(buf, s...)
+		for i := len(s); i < width; i++ {
+			buf = append(buf, ' ')
+		}
+	}
+
+	field(h.cfg.Callsign, 8)
+	field(fmt.Sprintf("%09d", min(h.cfg.RXFreq, 999999999)), 9)
+	field(fmt.Sprintf("%09d", min(h.cfg.TXFreq, 999999999)), 9)
+	field(fmt.Sprintf("%02d", min(h.cfg.TXPower, 99)), 2)
+	field(fmt.Sprintf("%02d", min(h.cfg.ColorCode, 99)), 2)
+	field(fmt.Sprintf("%+08.4f", clampCoord(h.cfg.Latitude, 90)), 8)
+	field(fmt.Sprintf("%+09.4f", clampCoord(h.cfg.Longitude, 180)), 9)
+	field(fmt.Sprintf("%03d", min(h.cfg.Height, 999)), 3)
+	field(h.cfg.Location, 20)
+	field(h.cfg.Description, 19)
+	field(fmt.Sprintf("%d", min(slots, 9)), 1)
+	field(h.cfg.URL, 124)
+	field("20210921", 40)
+	field("MMDVM_MMDVM_HS_Dual_Hat", 40)
+
+	return buf
+}
+
+func clampCoord(v, limit float64) float64 {
+	if math.IsNaN(v) {
+		return 0
+	}
+	return math.Max(-limit, math.Min(limit, v))
 }
 
 func (h *MMDVMClient) sendRPTK(random []byte) {
