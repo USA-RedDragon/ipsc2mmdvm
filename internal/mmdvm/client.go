@@ -13,7 +13,6 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
-	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
@@ -137,7 +136,7 @@ func (h *MMDVMClient) endInboundCall(streamID uint) {
 
 // outboundDataCall is the data packet so far of one MMDVM data call.
 type outboundDataCall struct {
-	asm      packet.Assembler
+	data     ipsc.DataCall
 	lastSeen time.Time
 }
 
@@ -869,7 +868,7 @@ func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
 		h.outData[pkt.StreamID] = call
 	}
 	call.lastSeen = now
-	if !ipsc.DataBurstEndsCall(&call.asm, pkt.DMRData) {
+	if !ipsc.DataBurstEndsCall(&call.data, pkt.DMRData) {
 		return false
 	}
 	delete(h.outData, pkt.StreamID)

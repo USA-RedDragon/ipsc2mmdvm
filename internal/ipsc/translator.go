@@ -59,12 +59,12 @@ type streamState struct {
 	headersSent  int   // number of voice headers sent (3 required)
 	lastSeen     time.Time
 	lc           [9]byte
-	hasLC        bool             // lc holds the full LC from the voice header
-	privacy      bool             // the call is encrypted: privacy LC or a PI header
-	data         packet.Assembler // the data packet of the call so far
-	embedded     [4][4]byte       // embedded LC fragments of bursts B-E
-	embeddedSeen uint8            // bit n set: embedded[n] is from this superframe
-	firstPacket  bool             // true for the very first packet
+	hasLC        bool       // lc holds the full LC from the voice header
+	privacy      bool       // the call is encrypted: privacy LC or a PI header
+	data         DataCall   // the data packet of the call so far
+	embedded     [4][4]byte // embedded LC fragments of bursts B-E
+	embeddedSeen uint8      // bit n set: embedded[n] is from this superframe
+	firstPacket  bool       // true for the very first packet
 }
 
 // IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
@@ -469,19 +469,59 @@ func (ss *streamState) lastDataBlock(data [33]byte) bool {
 	return DataBurstEndsCall(&ss.data, data)
 }
 
+// DataCall follows the data packet of one call to find its last block.
+type DataCall struct {
+	asm packet.Assembler
+	// pHead is set after a first header with the proprietary SAP, which a
+	// P_HEAD should follow.
+	pHead bool
+}
+
 // DataBurstEndsCall adds the data burst data, a data header or a rate 1/2,
-// 3/4 or 1 block, to asm, which holds the data packet of one call so far,
+// 3/4 or 1 block, to c, which holds the data packet of one call so far,
 // and reports whether the burst completes the packet: a header with no
 // blocks to follow, or the last block. A packet whose CRC fails is complete
 // too, and a block that does not decode still counts. Other bursts, such as
 // CSBKs, never complete a packet.
-func DataBurstEndsCall(asm *packet.Assembler, data [33]byte) bool {
+//
+// The Blocks To Follow of a first header with SAP 9 counts the P_HEAD that
+// follows it (ETSI TS 102 361-1 8.2.1 and 8.2.2.1). MMDVMHost does not pass
+// the P_HEAD of an RF packet to the network, so when a data block follows
+// such a header directly, the P_HEAD is counted as if it had arrived.
+func DataBurstEndsCall(c *DataCall, data [33]byte) bool {
 	b, err := layer2.NewBurstFromBytes(data)
 	if err != nil {
 		return false
 	}
-	_, done, err := asm.AddBurst(b)
+	pHead := c.pHead
+	c.pHead = false
+	if b.Kind == layer2.KindData {
+		switch d := b.Data.(type) {
+		case *pdu.DataHeader:
+			c.pHead = announcesPHead(d)
+		case *pdu.Rate12Data, *pdu.Rate34Data, *pdu.Rate1Data:
+			if pHead {
+				_, _, _ = c.asm.Add(&pdu.DataHeader{
+					Format:            pdu.FormatProprietary,
+					ProprietaryHeader: &pdu.ProprietaryHeader{SAP: enums.SAPProprietaryPacketData},
+				})
+			}
+		}
+	}
+	_, done, err := c.asm.AddBurst(b)
 	return done || errors.Is(err, packet.ErrBlocksMissing)
+}
+
+// announcesPHead reports whether h is the first header of a proprietary
+// packet: an unconfirmed or confirmed data header with SAP 9.
+func announcesPHead(h *pdu.DataHeader) bool {
+	switch {
+	case h.Format == pdu.FormatUnconfirmed && h.UnconfirmedDataHeader != nil:
+		return h.UnconfirmedDataHeader.SAP == enums.SAPProprietaryPacketData
+	case h.Format == pdu.FormatConfirmed && h.ConfirmedDataHeader != nil:
+		return h.ConfirmedDataHeader.SAP == enums.SAPProprietaryPacketData
+	}
+	return false
 }
 
 // dataPayloadType returns the RTP payload type of a data packet: 0x5E for

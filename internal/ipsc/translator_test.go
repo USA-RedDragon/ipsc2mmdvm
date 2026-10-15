@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/bit"
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -2098,6 +2100,90 @@ func TestTranslateToIPSCClearsPI(t *testing.T) {
 	}
 	if out[0][56] != 0x22 {
 		t.Fatalf("EMB byte 0x%02X, want 0x22 (color code 2, PI clear, first fragment)", out[0][56])
+	}
+}
+
+// proprietaryPacketBursts returns the bursts of a group data packet with
+// SAP 9, confirmed or unconfirmed: the first header, whose Blocks To Follow
+// counts the P_HEAD, the P_HEAD when withPHead is set, and the rate 1/2
+// blocks.
+func proprietaryPacketBursts(t *testing.T, confirmed, withPHead bool) ([][33]byte, []enums.DataType) {
+	t.Helper()
+	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+		Group: true, SAP: enums.SAPProprietaryPacketData, LLIDDestination: 200, LLIDSource: 100,
+	}}
+	if confirmed {
+		h = pdu.DataHeader{Format: pdu.FormatConfirmed, ConfirmedDataHeader: &pdu.ConfirmedDataHeader{
+			Group: true, SAP: enums.SAPProprietaryPacketData, LLIDDestination: 200, LLIDSource: 100,
+		}}
+	}
+	p, err := packet.Segment(h, make([]byte, 30), enums.DataTypeRate12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		c := *p.Header.ConfirmedDataHeader
+		c.BlocksToFollow++
+		p.Header.ConfirmedDataHeader = &c
+	} else {
+		u := *p.Header.UnconfirmedDataHeader
+		u.BlocksToFollow++
+		p.Header.UnconfirmedDataHeader = &u
+	}
+	bursts, err := packet.Bursts(p, 0, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph := pdu.DataHeader{Format: pdu.FormatProprietary, ProprietaryHeader: &pdu.ProprietaryHeader{
+		SAP: enums.SAPProprietaryPacketData, MFID: 0x10,
+	}}
+	bits, err := ph.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pHead, err := layer2.BuildDataBurst(bit.Pack96(bits), enums.DataTypeDataHeader, 0, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := [][33]byte{bursts[0]}
+	types := []enums.DataType{enums.DataTypeDataHeader}
+	if withPHead {
+		out = append(out, pHead)
+		types = append(types, enums.DataTypeDataHeader)
+	}
+	for _, b := range bursts[1:] {
+		out = append(out, b)
+		types = append(types, enums.DataTypeRate12)
+	}
+	return out, types
+}
+
+// TestProprietaryPacketEndsAtLastBlock sends confirmed and unconfirmed
+// packets with a P_HEAD second header to IPSC, with the P_HEAD and without
+// it, as MMDVMHost relays an RF packet. The end flag is on the last block
+// only, and the call ends there.
+func TestProprietaryPacketEndsAtLastBlock(t *testing.T) {
+	t.Parallel()
+	for _, confirmed := range []bool{false, true} {
+		for _, withPHead := range []bool{true, false} {
+			tr := newTestTranslator(t)
+			bursts, types := proprietaryPacketBursts(t, confirmed, withPHead)
+			for i, b := range bursts {
+				pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(types[i]))
+				pkt.DMRData = b
+				out := tr.TranslateToIPSC(pkt)
+				if len(out) != 1 {
+					t.Fatalf("confirmed %v P_HEAD %v burst %d: got %d packets", confirmed, withPHead, i, len(out))
+				}
+				last := i == len(bursts)-1
+				if end := out[0][17]&ipscCallInfoEnd != 0; end != last {
+					t.Errorf("confirmed %v P_HEAD %v burst %d: end flag %v, want %v", confirmed, withPHead, i, end, last)
+				}
+			}
+			if len(tr.streams) != 0 {
+				t.Errorf("confirmed %v P_HEAD %v: call still open after its last block", confirmed, withPHead)
+			}
+		}
 	}
 }
 
