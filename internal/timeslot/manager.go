@@ -20,6 +20,19 @@ import (
 // a voice terminator packet is lost.
 const DefaultTimeout = 3 * time.Second
 
+const (
+	// MaxPendingCalls is the number of calls that may wait behind the
+	// active call on one timeslot.
+	MaxPendingCalls = 8
+	// MaxQueuedPackets is the number of packets buffered for one call,
+	// about 30 seconds of voice at 16.7 packets per second. A call's
+	// terminator is still buffered when the limit is reached.
+	MaxQueuedPackets = 500
+	// MaxPendingAge is how long a complete call may wait for the slot
+	// after its last packet before it is discarded.
+	MaxPendingAge = 30 * time.Second
+)
+
 // Verdict tells the caller of Submit what to do with a packet.
 type Verdict int
 
@@ -30,6 +43,15 @@ const (
 	// Queued means the manager holds the packet and delivers it later
 	// through the stream's sink.
 	Queued
+	// Dropped means the manager discarded the packet because a buffer
+	// limit was reached or the manager is stopped.
+	Dropped
+)
+
+const (
+	dropPendingFull = "pending_full"
+	dropQueueFull   = "queue_full"
+	dropExpired     = "expired"
 )
 
 // Sink delivers one buffered packet on behalf of the source that
@@ -47,7 +69,22 @@ type stream struct {
 	network  string
 	sink     Sink
 	queue    []entry
+	ended    bool // the call's terminator is in queue
 	lastSeen time.Time
+}
+
+// expired reports whether a waiting call should be discarded. A call
+// that stopped sending without a terminator expires after timeout. A
+// complete call may wait up to MaxPendingAge.
+func (s *stream) expired(now time.Time, timeout time.Duration) bool {
+	return now.Sub(s.lastSeen) > s.maxIdle(timeout)
+}
+
+func (s *stream) maxIdle(timeout time.Duration) time.Duration {
+	if s.ended {
+		return MaxPendingAge
+	}
+	return timeout
 }
 
 // slotState tracks the active call and any pending calls on one timeslot.
@@ -58,7 +95,8 @@ type slotState struct {
 	draining bool
 	// sending is true while the slot's sender goroutine runs.
 	sending bool
-	pending []*stream
+	pending []*stream // waiting calls in arrival order
+	byID    map[uint]*stream
 	// timer reclaims the slot when the active call goes stale, so
 	// waiting calls do not depend on a new packet to be promoted.
 	timer *time.Timer
@@ -109,16 +147,6 @@ func slotLabel(slot bool) string {
 	return "1"
 }
 
-// findPending returns the pending stream for streamID, or nil.
-func (ss *slotState) findPending(streamID uint) *stream {
-	for _, p := range ss.pending {
-		if p.id == streamID {
-			return p
-		}
-	}
-	return nil
-}
-
 // Submit offers a packet from streamID to the timeslot. end marks the
 // packet that ends the call. sink delivers the packet later if the
 // manager buffers it, so it must send through the same path that the
@@ -126,7 +154,7 @@ func (ss *slotState) findPending(streamID uint) *stream {
 //
 // On Deliver the caller must deliver the packet, and when end is true
 // it must call Release after the delivery. On Queued the manager owns
-// the packet.
+// the packet. On Dropped the packet is discarded.
 //
 // When the active call has timed out, the oldest pending call takes over
 // the slot with its buffered packets, or the submitting stream claims the
@@ -135,14 +163,14 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped {
-		return Queued
+		return Dropped
 	}
 
 	ss := &m.slots[slotIndex(slot)]
 	now := time.Now()
 
-	if ss.active != nil && ss.active.id != streamID {
-		m.reclaimStaleLocked(slot, ss, now)
+	if ss.active == nil || ss.active.id != streamID {
+		m.sweepLocked(slot, ss, now)
 	}
 
 	if ss.active == nil {
@@ -161,21 +189,51 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		if !ss.draining {
 			return Deliver
 		}
-		m.enqueueLocked(slot, ss.active, packet, end)
-		return Queued
+		return m.enqueueLocked(slot, ss.active, packet, end)
 	}
 
-	ps := ss.findPending(streamID)
+	ps := ss.byID[streamID]
 	if ps == nil {
+		if len(ss.pending) >= MaxPendingCalls {
+			m.dropLocked(slot, dropPendingFull, 1)
+			return Dropped
+		}
 		ps = &stream{id: streamID, network: network, sink: sink}
 		ss.pending = append(ss.pending, ps)
+		if ss.byID == nil {
+			ss.byID = make(map[uint]*stream)
+		}
+		ss.byID[streamID] = ps
 		slog.Debug("timeslot busy, buffering new stream",
 			"slot", slot, "activeStream", ss.active.id,
 			"pendingStream", streamID, "network", network)
 	}
 	ps.lastSeen = now
-	m.enqueueLocked(slot, ps, packet, end)
-	return Queued
+	return m.enqueueLocked(slot, ps, packet, end)
+}
+
+// expirePendingLocked discards waiting calls that went idle.
+func (m *Manager) expirePendingLocked(slot bool, ss *slotState, now time.Time) {
+	kept := ss.pending[:0]
+	for _, p := range ss.pending {
+		if !p.expired(now, m.timeout) {
+			kept = append(kept, p)
+			continue
+		}
+		slog.Info("timeslot discarding idle pending stream",
+			"slot", slot, "streamID", p.id, "network", p.network,
+			"bufferedPackets", len(p.queue))
+		delete(ss.byID, p.id)
+		m.dropLocked(slot, dropExpired, len(p.queue))
+	}
+	clear(ss.pending[len(kept):])
+	ss.pending = kept
+}
+
+func (m *Manager) dropLocked(slot bool, reason string, n int) {
+	if m.metrics != nil && n > 0 {
+		m.metrics.TimeslotPacketsDropped.WithLabelValues(slotLabel(slot), m.direction, reason).Add(float64(n))
+	}
 }
 
 // reclaimStaleLocked ends the active call if no packet has arrived for
@@ -195,7 +253,8 @@ func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
 	m.advanceLocked(slot, ss)
 }
 
-// armLocked schedules the stale check for the active call on slot.
+// armLocked schedules the next stale check on slot: when the active call
+// or the first waiting call can expire.
 func (m *Manager) armLocked(slot bool, ss *slotState, now time.Time) {
 	if m.stopped || ss.active == nil {
 		return
@@ -204,7 +263,10 @@ func (m *Manager) armLocked(slot bool, ss *slotState, now time.Time) {
 	if !ss.draining {
 		d = ss.active.lastSeen.Add(m.timeout).Sub(now)
 	}
-	d += time.Millisecond
+	for _, p := range ss.pending {
+		d = min(d, p.lastSeen.Add(p.maxIdle(m.timeout)).Sub(now))
+	}
+	d = max(d, 0) + time.Millisecond
 	if ss.timer == nil {
 		ss.timer = time.AfterFunc(d, func() { m.onTimer(slot) })
 		return
@@ -220,15 +282,37 @@ func (m *Manager) onTimer(slot bool) {
 	}
 	ss := &m.slots[slotIndex(slot)]
 	now := time.Now()
-	m.reclaimStaleLocked(slot, ss, now)
+	m.sweepLocked(slot, ss, now)
 	m.armLocked(slot, ss, now)
 }
 
-func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) {
+// sweepLocked applies every timeout that has passed by now, in the order
+// the deadlines fell, so a late check gives the same result as a timely
+// one: waiting calls that went idle before the active call went stale
+// are discarded first, then the oldest remaining call takes over.
+func (m *Manager) sweepLocked(slot bool, ss *slotState, now time.Time) {
+	if a := ss.active; a != nil && !ss.draining {
+		if staleAt := a.lastSeen.Add(m.timeout); now.After(staleAt) {
+			m.expirePendingLocked(slot, ss, staleAt)
+			m.reclaimStaleLocked(slot, ss, now)
+		}
+	}
+	m.expirePendingLocked(slot, ss, now)
+}
+
+func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) Verdict {
+	if len(s.queue) >= MaxQueuedPackets && (!end || s.ended) {
+		m.dropLocked(slot, dropQueueFull, 1)
+		return Dropped
+	}
 	s.queue = append(s.queue, entry{packet: packet, end: end})
+	if end {
+		s.ended = true
+	}
 	if m.metrics != nil {
 		m.metrics.TimeslotPacketsBuffered.WithLabelValues(slotLabel(slot), m.direction).Inc()
 	}
+	return Queued
 }
 
 // Release frees a timeslot if it is currently held by the given stream.
@@ -281,6 +365,7 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	next := ss.pending[0]
 	ss.pending[0] = nil
 	ss.pending = ss.pending[1:]
+	delete(ss.byID, next.id)
 	now := time.Now()
 	next.lastSeen = now
 	ss.active = next

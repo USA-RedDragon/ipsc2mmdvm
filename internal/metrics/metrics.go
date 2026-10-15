@@ -42,6 +42,7 @@ type Metrics struct {
 	// Timeslot Manager
 	TimeslotActiveCalls     *prometheus.GaugeVec
 	TimeslotPacketsBuffered *prometheus.CounterVec
+	TimeslotPacketsDropped  *prometheus.CounterVec
 	TimeslotTimeouts        *prometheus.CounterVec
 
 	// Translator
@@ -128,6 +129,10 @@ func NewMetrics() *Metrics {
 			Name: "timeslot_packets_buffered_total",
 			Help: "Total packets buffered due to timeslot contention.",
 		}, []string{labelSlot, labelDirection}),
+		TimeslotPacketsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "timeslot_packets_dropped_total",
+			Help: "Total buffered or offered packets the timeslot manager discarded, by reason.",
+		}, []string{labelSlot, labelDirection, "reason"}),
 		TimeslotTimeouts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_timeouts_total",
 			Help: "Total timeslot call timeouts.",
@@ -160,6 +165,7 @@ func NewMetrics() *Metrics {
 		m.MMDVMRewriteMatches,
 		m.TimeslotActiveCalls,
 		m.TimeslotPacketsBuffered,
+		m.TimeslotPacketsDropped,
 		m.TimeslotTimeouts,
 		m.TranslatorActiveStreams,
 		m.TranslatorPackets,

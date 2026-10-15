@@ -579,6 +579,16 @@ func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
 	case timeslot.Queued:
 		slog.Debug("MMDVM DMRD buffered (timeslot busy)",
 			"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
+	case timeslot.Dropped:
+		h.countTimeslotDrop(packet)
+	}
+}
+
+func (h *MMDVMClient) countTimeslotDrop(pkt proto.Packet) {
+	slog.Debug("packet dropped (timeslot buffer full)",
+		"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
+	if h.metrics != nil {
+		h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_full").Inc()
 	}
 }
 
@@ -687,6 +697,8 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 		case timeslot.Queued:
 			slog.Debug("HandleIPSCBurst: buffered (timeslot busy)",
 				"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
+		case timeslot.Dropped:
+			h.countTimeslotDrop(pkt)
 		}
 	}
 	return matched

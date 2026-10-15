@@ -49,12 +49,12 @@ func newSlotTestClient(t *testing.T, name string, mgr *timeslot.Manager) *MMDVMC
 	return c
 }
 
-func dmrd(streamID, frameType, dtype uint) []byte {
-	return dmrdFrom(1, streamID, frameType, dtype)
+func dmrd(streamID uint) []byte {
+	return dmrdFrom(1, streamID, 1)
 }
 
-func dmrdFrom(src, streamID, frameType, dtype uint) []byte {
-	p := proto.Packet{Signature: "DMRD", Src: src, Dst: 9, GroupCall: true, FrameType: frameType, DTypeOrVSeq: dtype, StreamID: streamID}
+func dmrdFrom(src, streamID, dtype uint) []byte {
+	p := proto.Packet{Signature: "DMRD", Src: src, Dst: 9, GroupCall: true, FrameType: 2, DTypeOrVSeq: dtype, StreamID: streamID}
 	return p.Encode()
 }
 
@@ -138,11 +138,11 @@ func TestQueuedCallIsSentByItsOwnClient(t *testing.T) {
 		c2.translator.TranslateToIPSC(proto.Packet{StreamID: 900 + i, FrameType: 2, DTypeOrVSeq: 1, Dst: 1, GroupCall: true})
 	}
 
-	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
-	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
-	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
-	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
-	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 2))
+	c1.handleReady(dmrdFrom(srcA, 0xA, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 1))
+	c1.handleReady(dmrdFrom(srcA, 0xA, 2))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2))
 
 	recs := rec.waitFor(t, hasTerminatorFrom(srcB))
 	var cc uint32
@@ -173,11 +173,11 @@ func TestReplayDoesNotBlockHandler(t *testing.T) {
 	c1.SetIPSCHandler(func([]byte) {})
 	c2.SetIPSCHandler(func([]byte) { <-gate })
 
-	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
-	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
+	c1.handleReady(dmrdFrom(srcA, 0xA, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 1))
 	returned := make(chan struct{})
 	go func() {
-		c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
+		c1.handleReady(dmrdFrom(srcA, 0xA, 2))
 		close(returned)
 	}()
 	select {
@@ -207,14 +207,14 @@ func TestLivePacketsWaitBehindReplay(t *testing.T) {
 	c1.SetIPSCHandler(rec.handler("net1"))
 	c2.SetIPSCHandler(rec.handler("net2"))
 
-	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
-	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
-	c2.handleReady(dmrdFrom(srcB+1, 0xB, 2, 1))
-	go c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
+	c1.handleReady(dmrdFrom(srcA, 0xA, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 1))
+	c2.handleReady(dmrdFrom(srcB+1, 0xB, 1))
+	go c1.handleReady(dmrdFrom(srcA, 0xA, 2))
 	<-blocked
 	liveDone := make(chan struct{})
 	go func() {
-		c2.handleReady(dmrdFrom(srcB+2, 0xB, 2, 1))
+		c2.handleReady(dmrdFrom(srcB+2, 0xB, 1))
 		close(liveDone)
 	}()
 	select {
@@ -223,7 +223,7 @@ func TestLivePacketsWaitBehindReplay(t *testing.T) {
 	}
 	close(gate)
 	<-liveDone
-	c2.handleReady(dmrdFrom(srcB+3, 0xB, 2, 2))
+	c2.handleReady(dmrdFrom(srcB+3, 0xB, 2))
 
 	recs := rec.waitFor(t, hasTerminatorFrom(srcB+3))
 	var last uint32
@@ -246,10 +246,28 @@ func TestBufferedPacketsAreNotCountedAsDropped(t *testing.T) {
 	c2 := newSlotTestClient(t, "net2", mgr)
 	c1.metrics = m
 	c2.metrics = m
-	c1.handleReady(dmrd(0xA, 2, 1))
-	c2.handleReady(dmrd(0xB, 2, 1))
+	c1.handleReady(dmrd(0xA))
+	c2.handleReady(dmrd(0xB))
 	if body := scrapeMetrics(t, m); strings.Contains(body, `reason="timeslot_busy"`) {
 		t.Fatalf("buffered packet counted as dropped:\n%s", grepLines(body, "mmdvm_packets_dropped_total"))
+	}
+}
+
+func TestTimeslotOverflowIsCountedAsDropped(t *testing.T) {
+	t.Parallel()
+	m := metrics.NewMetrics()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c1 := newSlotTestClient(t, "net1", mgr)
+	c2 := newSlotTestClient(t, "net2", mgr)
+	c2.metrics = m
+	c1.handleReady(dmrd(0xA))
+	for range timeslot.MaxQueuedPackets + 3 {
+		c2.handleReady(dmrd(0xB))
+	}
+	want := `mmdvm_packets_dropped_total{network="net2",reason="timeslot_full"} 3`
+	if body := scrapeMetrics(t, m); !strings.Contains(body, want) {
+		t.Fatalf("want %s, got:\n%s", want, grepLines(body, "dropped_total"))
 	}
 }
 

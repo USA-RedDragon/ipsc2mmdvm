@@ -221,22 +221,28 @@ func TestTimeoutKeepsReclaimingStreamsBufferedPackets(t *testing.T) {
 
 func TestTimeoutPromotesPendingInOrder(t *testing.T) {
 	m := NewManager()
-	m.timeout = 20 * time.Millisecond
+	m.timeout = 100 * time.Millisecond
+	t.Cleanup(m.Stop)
 	a, b, c := &recorder{}, &recorder{}, &recorder{}
 	submit(m, false, 1, "A", "A-hdr", a)
 	submit(m, false, 2, "B", "B-hdr", b)
-	submit(m, false, 3, "C", "C-hdr", c)
-	time.Sleep(40 * time.Millisecond)
-
-	if submit(m, false, 3, "C", "C-v1", c) {
-		t.Fatal("C must wait behind B, which was queued first")
+	want := []any{0}
+	submit(m, false, 3, "C", 0, c)
+	for i := 1; len(b.packets()) == 0; i++ {
+		if i > 400 {
+			t.Fatal("B was never promoted")
+		}
+		time.Sleep(5 * time.Millisecond)
+		if submit(m, false, 3, "C", i, c) {
+			t.Fatal("C must wait behind B, which was queued first")
+		}
+		want = append(want, i)
 	}
 	b.waitPackets(t, "B-hdr")
-	if !submitEnd(m, 2, "B", "B-end", b) {
-		t.Fatal("B should be active after the reclaim")
+	if submitEnd(m, 2, "B", "B-end", b) {
+		m.Release(false, 2)
 	}
-	m.Release(false, 2)
-	c.waitPackets(t, "C-hdr", "C-v1")
+	c.waitPackets(t, want...)
 }
 
 func TestTimerDeliversCompleteCallBehindStaleActive(t *testing.T) {
@@ -303,6 +309,79 @@ func metricLine(t *testing.T, met *metrics.Metrics, prefix string) string {
 		}
 	}
 	return ""
+}
+
+func newMeteredManager(t *testing.T) (*Manager, *metrics.Metrics) {
+	t.Helper()
+	met := metrics.NewMetrics()
+	m := NewManager()
+	m.SetMetrics(met, "outbound")
+	t.Cleanup(m.Stop)
+	return m, met
+}
+
+func expectDropped(t *testing.T, met *metrics.Metrics, reason, want string) {
+	t.Helper()
+	prefix := `timeslot_packets_dropped_total{direction="outbound",reason="` + reason + `",slot="1"} `
+	if got := metricLine(t, met, prefix); got != want {
+		t.Fatalf("dropped{reason=%q} = %q, want %q", reason, got, want)
+	}
+}
+
+func TestPendingCallsPerSlotAreCapped(t *testing.T) {
+	m, met := newMeteredManager(t)
+	submit(m, false, 1, "A", "A-hdr", &recorder{})
+	recs := make([]*recorder, MaxPendingCalls+1)
+	for i := range recs {
+		recs[i] = &recorder{}
+		submitEnd(m, uint(10+i), "B", i, recs[i])
+	}
+	if v := m.Submit(false, 99, "B", "x", false, recs[0].sink); v != Dropped {
+		t.Fatalf("call beyond the pending limit got verdict %v, want Dropped", v)
+	}
+	m.Release(false, 1)
+	for i := range MaxPendingCalls {
+		recs[i].waitPackets(t, i)
+	}
+	recs[MaxPendingCalls].expectNone(t)
+	expectDropped(t, met, "pending_full", "2")
+}
+
+func TestQueuedPacketsPerCallAreCapped(t *testing.T) {
+	m, met := newMeteredManager(t)
+	submit(m, false, 1, "A", "A-hdr", &recorder{})
+	b := &recorder{}
+	want := make([]any, 0, MaxQueuedPackets+1)
+	for i := range MaxQueuedPackets + 5 {
+		submit(m, false, 2, "B", i, b)
+		if i < MaxQueuedPackets {
+			want = append(want, i)
+		}
+	}
+	submitEnd(m, 2, "B", "B-end", b)
+	want = append(want, "B-end")
+	m.Release(false, 1)
+	b.waitPackets(t, want...)
+	expectDropped(t, met, "queue_full", "5")
+}
+
+func TestIdlePendingCallExpires(t *testing.T) {
+	m, met := newMeteredManager(t)
+	m.timeout = 50 * time.Millisecond
+	t.Cleanup(func() { expectDropped(t, met, "expired", "1") })
+	a, b := &recorder{}, &recorder{}
+	submit(m, false, 1, "A", "A-hdr", a)
+	submit(m, false, 2, "B", "B-hdr", b)
+	for range 30 {
+		time.Sleep(5 * time.Millisecond)
+		submit(m, false, 1, "A", "A-voice", a)
+	}
+	submitEnd(m, 1, "A", "A-end", a)
+	m.Release(false, 1)
+	b.expectNone(t)
+	if !submit(m, false, 3, "C", "C-hdr", &recorder{}) {
+		t.Fatal("slot should be free once the idle pending call expired")
+	}
 }
 
 func TestSubmit_NotYetTimedOut(t *testing.T) {
