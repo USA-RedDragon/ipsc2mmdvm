@@ -80,6 +80,8 @@ const (
 	PacketType_PeerListReply         PacketType = 0x93
 	PacketType_MasterAliveRequest    PacketType = 0x96
 	PacketType_MasterAliveReply      PacketType = 0x97
+	PacketType_DeRegisterRequest     PacketType = 0x9A
+	PacketType_DeRegisterReply       PacketType = 0x9B
 	// PacketType_RepeaterStatus is sent by an XPR 8400 right after each
 	// master register or keepalive reply: the peer ID and four more bytes,
 	// zero or a value like 56 63 11 00. Its meaning is unknown and it needs
@@ -350,10 +352,16 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 		if err := s.handlePeerListRequest(data, addr); err != nil {
 			return nil, err
 		}
+	case PacketType_DeRegisterRequest:
+		s.countReceived("de_register")
+		if err := s.handleDeRegisterRequest(data, addr); err != nil {
+			return nil, err
+		}
 	case PacketType_RepeaterStatus:
 		s.countReceived("repeater_status")
 		return nil, ErrPacketIgnored
-	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply:
+	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply,
+		PacketType_DeRegisterReply:
 		// These are reply packets, we shouldn't receive them as a server, keeping quiet.
 		return nil, ErrPacketIgnored
 	default:
@@ -428,6 +436,33 @@ func (s *IPSCServer) handlePeerListRequest(data []byte, addr *net.UDPAddr) error
 		return fmt.Errorf("error sending peer list reply: %w", err)
 	}
 
+	return nil
+}
+
+// handleDeRegisterRequest removes a peer that leaves the network, as
+// DMRlink's de_register_peer does, and sends the new peer list to the peers
+// left, as ipsc2hbpc's remove_peer does. DMRlink sends no new list here, but
+// it sends one to every peer whenever a peer asks for it, where this server
+// answers only the peer that asks, so without it the peers would keep the
+// departed one. Like DMRlink, it sends no reply. The request must come from
+// the address the peer registered from.
+func (s *IPSCServer) handleDeRegisterRequest(data []byte, addr *net.UDPAddr) error {
+	peerID, err := parsePeerID(data)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	peer, ok := s.peers[peerID]
+	if !ok || peer.Addr == nil || addr == nil || !peer.Addr.IP.Equal(addr.IP) || peer.Addr.Port != addr.Port {
+		s.mu.Unlock()
+		return fmt.Errorf("de-registration from peer %d: %w", peerID, ErrUnregisteredPeer)
+	}
+	delete(s.peers, peerID)
+	delete(s.lastSend, peerID)
+	s.updatePeersGaugeLocked()
+	s.mu.Unlock()
+	slog.Info("IPSC peer de-registered", "peerID", peerID, "peer", addr)
+	s.sendPeerList(time.Now())
 	return nil
 }
 
@@ -541,6 +576,11 @@ func (s *IPSCServer) expirePeers(now time.Time) {
 		return
 	}
 	slog.Warn("IPSC peers timed out, de-registering", "peerIDs", expired, "timeout", peerTimeout)
+	s.sendPeerList(now)
+}
+
+// sendPeerList sends the peer list to every active peer.
+func (s *IPSCServer) sendPeerList(now time.Time) {
 	reply := s.buildPeerListReply()
 	for _, target := range s.activePeers(now) {
 		packet := &Packet{data: append([]byte(nil), reply...)}

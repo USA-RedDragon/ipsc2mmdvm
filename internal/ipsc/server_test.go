@@ -475,6 +475,8 @@ func TestPacketTypeValues(t *testing.T) {
 		PacketType_PeerListReply:         0x93,
 		PacketType_MasterAliveRequest:    0x96,
 		PacketType_MasterAliveReply:      0x97,
+		PacketType_DeRegisterRequest:     0x9A,
+		PacketType_DeRegisterReply:       0x9B,
 	}
 	for pt, val := range expected {
 		if byte(pt) != val {
@@ -2327,5 +2329,62 @@ func TestPaceDrainsTwoBusySlots(t *testing.T) {
 	}
 	if lag > 2*s.pace {
 		t.Fatalf("last packet sent %v after it arrived, want at most %v", lag, 2*s.pace)
+	}
+}
+
+// TestDeRegisterRequestRemovesPeer sends the 5-byte de-registration request
+// (0x9A and the peer ID) that DMRlink and ipsc2hbpc send. Only a request
+// from the address the peer registered from removes it. No reply is sent,
+// as in DMRlink, and the peer left gets the new peer list.
+func TestDeRegisterRequestRemovesPeer(t *testing.T) {
+	t.Parallel()
+	m := metrics.NewMetrics()
+	s, srvAddr := newTestServerWithUDP(t, false, "")
+	s.metrics = m
+	client, err := net.DialUDP("udp", nil, srvAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	peerAddr, _ := client.LocalAddr().(*net.UDPAddr)
+	if err := s.upsertPeer(314926, peerAddr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
+		t.Fatal(err)
+	}
+	left, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer left.Close()
+	leftAddr, _ := left.LocalAddr().(*net.UDPAddr)
+	if err := s.upsertPeer(7, leftAddr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
+		t.Fatal(err)
+	}
+
+	req := mustDecodeHex(t, "9a0004ce2e")
+	other := &net.UDPAddr{IP: peerAddr.IP, Port: peerAddr.Port + 1}
+	if _, err := s.handlePacket(req, other); !errors.Is(err, ErrUnregisteredPeer) {
+		t.Fatalf("request from another address: got %v, want ErrUnregisteredPeer", err)
+	}
+	if !s.isRegistered(314926) {
+		t.Fatal("peer removed by a request from another address")
+	}
+	if _, err := s.handlePacket(req, peerAddr); err != nil {
+		t.Fatal(err)
+	}
+	if s.isRegistered(314926) || s.peerCount() != 1 {
+		t.Fatalf("peer still registered, %d peers", s.peerCount())
+	}
+	if got := gaugeValue(t, m.IPSCPeersRegistered); got != 1 {
+		t.Fatalf("registered peers gauge is %v, want 1", got)
+	}
+	if list := s.buildPeerList(); len(list) != 11 || binary.BigEndian.Uint32(list) != 7 {
+		t.Fatalf("peer list %x, want only peer 7", list)
+	}
+	if got, want := readUDP(t, left), s.buildPeerListReply(); hex.EncodeToString(got) != hex.EncodeToString(want) {
+		t.Fatalf("peer left got %x, want the peer list %x", got, want)
+	}
+	expectNoUDP(t, client)
+	if _, err := s.handlePacket(mustDecodeHex(t, "9b0004ce2e"), peerAddr); !errors.Is(err, ErrPacketIgnored) {
+		t.Fatalf("de-registration reply: got %v, want ErrPacketIgnored", err)
 	}
 }
