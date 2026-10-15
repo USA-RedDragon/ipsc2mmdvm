@@ -1,13 +1,13 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/netip"
 	"regexp"
-	"strconv"
 
 	"github.com/vishvananda/netlink"
 )
@@ -242,7 +242,7 @@ func validListenAddress(addr string) bool {
 	if err != nil {
 		return false
 	}
-	p, err := strconv.ParseUint(port, 10, 16)
+	p, err := net.DefaultResolver.LookupPort(context.Background(), "tcp", port)
 	return err == nil && p != 0
 }
 

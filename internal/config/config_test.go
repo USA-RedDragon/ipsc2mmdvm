@@ -294,6 +294,8 @@ func TestValidateMetricsAddress(t *testing.T) {
 		{"default port only", ":9100", false},
 		{"host and port", "0.0.0.0:9100", false},
 		{"localhost", "127.0.0.1:2112", false},
+		{"named port", ":http", false},
+		{"host and named port", "127.0.0.1:https", false},
 		{"empty", "", true},
 		{"missing port", "localhost", true},
 		{"invalid format", ":::bad", true},
