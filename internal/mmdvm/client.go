@@ -70,6 +70,69 @@ type MMDVMClient struct {
 	// to find the block that ends it.
 	outDataMu sync.Mutex
 	outData   map[uint]*outboundDataCall
+
+	// inboundSlots holds the timeslot of each inbound call that has not
+	// ended, to end a data call whose last packet was dropped.
+	inboundMu    sync.Mutex
+	inboundSlots map[uint]inboundCall
+}
+
+// inboundCall is the timeslot of an IPSC call that has not ended.
+type inboundCall struct {
+	slot     bool
+	lastSeen time.Time
+}
+
+// maxInboundCalls bounds inboundSlots; the oldest calls are dropped first.
+const maxInboundCalls = 64
+
+// noteInboundSlot records the timeslot, after rewriting, of the inbound
+// call streamID, or forgets it when end is set.
+func (h *MMDVMClient) noteInboundSlot(streamID uint, slot, end bool) {
+	h.inboundMu.Lock()
+	defer h.inboundMu.Unlock()
+	if end {
+		delete(h.inboundSlots, streamID)
+		return
+	}
+	if h.inboundSlots == nil {
+		h.inboundSlots = make(map[uint]inboundCall)
+	}
+	if _, ok := h.inboundSlots[streamID]; !ok && len(h.inboundSlots) >= maxInboundCalls {
+		var oldest uint
+		var t time.Time
+		for id, c := range h.inboundSlots {
+			if t.IsZero() || c.lastSeen.Before(t) {
+				oldest, t = id, c.lastSeen
+			}
+		}
+		delete(h.inboundSlots, oldest)
+	}
+	h.inboundSlots[streamID] = inboundCall{slot: slot, lastSeen: time.Now()}
+}
+
+// dataCallEnd marks the end of an inbound data call in the timeslot
+// manager when the packet that ended it produced nothing for the master.
+// forwardInbound ignores it.
+type dataCallEnd struct{}
+
+// endInboundCall ends the inbound call streamID, whose last packet was
+// dropped, such as a block that failed its CRC or a 0x13 end packet, so
+// its timeslot goes to the next call. A call that is waiting behind another
+// one ends when its buffered packets have been sent. A call whose end
+// packet reached the timeslot manager is no longer tracked, so it is left
+// alone.
+func (h *MMDVMClient) endInboundCall(streamID uint) {
+	h.inboundMu.Lock()
+	c, ok := h.inboundSlots[streamID]
+	delete(h.inboundSlots, streamID)
+	h.inboundMu.Unlock()
+	if !ok || h.inboundTSMgr == nil {
+		return
+	}
+	if h.inboundTSMgr.Submit(c.slot, streamID, "ipsc", dataCallEnd{}, true, h.forwardInbound) == timeslot.Deliver {
+		h.inboundTSMgr.Release(c.slot, streamID)
+	}
 }
 
 // outboundDataCall is the data packet so far of one MMDVM data call.
@@ -962,9 +1025,15 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 	}
 	slog.Debug("HandleIPSCBurst: received IPSC burst", "network", h.cfg.Name, "type", packetType, "from", addr, "length", len(data))
 
+	dataEnd := ipsc.EndsDataCall(packetType, data)
+	streamID, hadStream := h.translator.ReverseStreamID(data)
 	packets := h.translator.TranslateToMMDVM(packetType, data)
 	matched := false
-	dataEnd := ipsc.EndsDataCall(packetType, data)
+	defer func() {
+		if dataEnd && hadStream {
+			h.endInboundCall(uint(streamID))
+		}
+	}()
 	for i, pkt := range packets {
 		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
 		// Apply RF→Net rewrite rules (outbound to this master).
@@ -992,6 +1061,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 		}
 
 		end := isTerminator(pkt) || (dataEnd && i == len(packets)-1)
+		h.noteInboundSlot(pkt.StreamID, pkt.Slot, end)
 		switch h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt, end, h.forwardInbound) {
 		case timeslot.Deliver:
 			matched = true

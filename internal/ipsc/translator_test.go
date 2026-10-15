@@ -2100,3 +2100,46 @@ func TestTranslateToIPSCClearsPI(t *testing.T) {
 		t.Fatalf("EMB byte 0x%02X, want 0x22 (color code 2, PI clear, first fragment)", out[0][56])
 	}
 }
+
+// TestDataSyncLostEndsCall uses a CSBK-only data call that an XPR 8400
+// relayed on TS2 (call control 0x934): preamble CSBKs, then a 0x13 packet
+// with the end flag when the signal ended. The 0x13 packet ends the call,
+// so a later packet with the same call control starts a new MMDVM stream.
+func TestDataSyncLostEndsCall(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	csbk, _ := hex.DecodeString("840004ce2e5730b43c30b43c010000093420805d4c68706950260000000003c0000a800a0060bd00800430b43c30b43cac55007348cd")
+	end, _ := hex.DecodeString("840004ce2e5730b43c30b43c010000093460805e4c74706966a60000000013800000")
+	first := tr.TranslateToMMDVM(csbk[0], csbk)
+	if len(first) != 1 {
+		t.Fatalf("CSBK: got %d packets", len(first))
+	}
+	if out := tr.TranslateToMMDVM(end[0], end); len(out) != 0 {
+		t.Fatalf("0x13 packet: got %d packets", len(out))
+	}
+	if id, ok := tr.ReverseStreamID(csbk); ok {
+		t.Fatalf("call still open after its end: stream %d", id)
+	}
+	next := tr.TranslateToMMDVM(csbk[0], csbk)
+	if len(next) != 1 || next[0].StreamID == first[0].StreamID {
+		t.Fatalf("next call reuses stream %d: %+v", first[0].StreamID, next)
+	}
+}
+
+// TestVoiceSyncLostKeepsCall sends captureSyncLost, where the repeater sets
+// the end flag on the 0x13 packet for a burst it lost in the middle of the
+// call. The call goes on in the same MMDVM stream.
+func TestVoiceSyncLostKeepsCall(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	ids := map[uint]bool{}
+	for _, h := range captureSyncLost() {
+		d, _ := hex.DecodeString(h)
+		for _, p := range tr.TranslateToMMDVM(d[0], d) {
+			ids[p.StreamID] = true
+		}
+	}
+	if len(ids) != 1 {
+		t.Fatalf("call split into streams %v", ids)
+	}
+}

@@ -2429,6 +2429,122 @@ func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
 	}
 }
 
+// TestHandleIPSCBurstDroppedDataEndReleasesSlot uses a confirmed rate 1
+// packet the XPR 8400 relayed on TS1: the header, the rate 1 block as a
+// 0x06 packet that fails its CRC and is dropped, and a 0x13 end packet. A
+// SACK on the same slot right after must reach the master at once, though
+// the packet that ended the data call produced nothing for MMDVM.
+func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.setState(STATE_READY)
+	client.started.Store(true)
+	client.translator.SetColorCode(7)
+	client.passallRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: testRuleName, Slot: 1}}
+	mgr := timeslot.NewManager()
+	client.inboundTSMgr = mgr
+	t.Cleanup(mgr.Stop)
+
+	packets := []string{
+		"840004ce2e6830b43c2febf6010000251c00805d2dd20f396f4f000000000640000a800a006043a82febf630b43c810083cf00765eba",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd30f39712f000000000642000a800a006013054441204104844141601500765e7a",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd40f39730f0000000013000000",
+		// The SACK of TestHandleIPSCBurstDataCallEndReleasesSlot, moved to TS1.
+		"840004ce2e742febf630b43c0100006bc20080ddd7133445d8f20000000006c0000a800a006001a030b43c2febf681800a520076496f",
+		"840004ce2e742febf630b43c0100006bc240805ed7143445dad20000000007c0000a800a0060b5ffffffffffffff0f341fd70077497f",
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 0, 231), Port: 50000}
+	for _, h := range packets {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.HandleIPSCBurst(data[0], data, addr)
+	}
+	for i, wantSrc := range []uint{3191868, 3140598, 3140598} {
+		select {
+		case pkt := <-client.tx_chan:
+			if pkt.Src != wantSrc || pkt.Slot {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Src, pkt.Slot, wantSrc)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("packet %d was held back", i)
+		}
+	}
+}
+
+// TestHandleIPSCBurstQueuedDroppedDataEnd sends the rate 1 data call and
+// the SACK of TestHandleIPSCBurstDroppedDataEndReleasesSlot while a voice
+// call holds TS1, so both wait. When the voice call ends, the data call
+// must not hold the slot until the timeout, though the packet that ended
+// it produced nothing for the master.
+func TestHandleIPSCBurstQueuedDroppedDataEnd(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.setState(STATE_READY)
+	client.started.Store(true)
+	client.translator.SetColorCode(7)
+	client.passallRewrites = []rewrite.Rule{
+		&rewrite.PassAllPC{Name: testRuleName, Slot: 1},
+		&rewrite.PassAllTG{Name: testRuleName, Slot: 1},
+	}
+	mgr := timeslot.NewManager()
+	client.inboundTSMgr = mgr
+	t.Cleanup(mgr.Stop)
+
+	packets := []string{
+		// The voice header and terminator of a group call from 3191868
+		// to 9, moved from TS2 to TS1.
+		"800004ce2e3230b43c00000902000058f300805dfb283bbf02a40000000001c0000a800a006000000000000930b43ce9f8ed00714694",
+		"840004ce2e6830b43c2febf6010000251c00805d2dd20f396f4f000000000640000a800a006043a82febf630b43c810083cf00765eba",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd30f39712f000000000642000a800a006013054441204104844141601500765e7a",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd40f39730f0000000013000000",
+		"840004ce2e742febf630b43c0100006bc20080ddd7133445d8f20000000006c0000a800a006001a030b43c2febf681800a520076496f",
+		"840004ce2e742febf630b43c0100006bc240805ed7143445dad20000000007c0000a800a0060b5ffffffffffffff0f341fd70077497f",
+		"800004ce2e3230b43c00000902000058f340805efb2f3bbf0fc40000000002c0000a800a006000000000000930b43ce6f7e20072467f",
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 0, 231), Port: 50000}
+	for _, h := range packets {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.HandleIPSCBurst(data[0], data, addr)
+	}
+	for i, wantSrc := range []uint{3191868, 3191868, 3191868, 3140598, 3140598} {
+		select {
+		case pkt := <-client.tx_chan:
+			if pkt.Src != wantSrc || pkt.Slot {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Src, pkt.Slot, wantSrc)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("packet %d was held back", i)
+		}
+	}
+}
+
+// TestInboundSlotsAreBounded tracks maxInboundCalls inbound calls that
+// never end, then one more. The oldest call is forgotten to make room.
+func TestInboundSlotsAreBounded(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	now := time.Now()
+	client.inboundSlots = make(map[uint]inboundCall)
+	for i := range uint(maxInboundCalls) {
+		client.inboundSlots[i+1] = inboundCall{lastSeen: now.Add(time.Duration(i) * time.Millisecond)}
+	}
+	client.noteInboundSlot(1000, true, false)
+	if len(client.inboundSlots) != maxInboundCalls {
+		t.Fatalf("tracking %d calls, want %d", len(client.inboundSlots), maxInboundCalls)
+	}
+	if _, ok := client.inboundSlots[1]; ok {
+		t.Error("the oldest call was kept")
+	}
+	if c, ok := client.inboundSlots[1000]; !ok || !c.slot {
+		t.Error("the new call was not tracked")
+	}
+}
+
 func TestStopStopsInboundTimeslotManager(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)

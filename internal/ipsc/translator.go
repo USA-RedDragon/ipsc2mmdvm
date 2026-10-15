@@ -945,10 +945,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	burstType := data[30]
 
 	if burstType&0x7F == ipscBurstSyncUndetect {
-		if rss, ok := t.reverseStreams[binary.BigEndian.Uint32(data[13:17])]; ok {
-			rss.lastSeen = now
-			superframeRestartsAfter(rss, binary.BigEndian.Uint16(data[20:22]))
-		}
+		t.syncLostLocked(packetType, data, isEnd, now)
 		return nil
 	}
 
@@ -1052,12 +1049,52 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	return results
 }
 
+// syncLostLocked handles data, a "sync not detected" packet of packetType
+// with the end flag when isEnd is set, at now: the repeater lost a burst of
+// the call, and the next one starts a new superframe at burst A. The end
+// flag ends a data call. A MOTOTRBO repeater also sets it on this packet in
+// a voice call when it loses sync in the middle of the call, so a voice
+// call goes on. The caller must hold t.mu.
+func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool, now time.Time) {
+	callControl := binary.BigEndian.Uint32(data[13:17])
+	rss, ok := t.reverseStreams[callControl]
+	if !ok {
+		return
+	}
+	rss.lastSeen = now
+	superframeRestartsAfter(rss, binary.BigEndian.Uint16(data[20:22]))
+	if isEnd && isDataPacket(packetType) {
+		t.removeReverseStreamLocked(callControl)
+	}
+}
+
+// isDataPacket reports whether packetType is a group or private data
+// packet.
+func isDataPacket(packetType byte) bool {
+	return packetType == 0x83 || packetType == 0x84
+}
+
+// ReverseStreamID returns the MMDVM stream ID of the IPSC call that data,
+// an IPSC user packet, belongs to, if the call has one.
+func (t *IPSCTranslator) ReverseStreamID(data []byte) (uint32, bool) {
+	if len(data) < 17 {
+		return 0, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rss, ok := t.reverseStreams[binary.BigEndian.Uint32(data[13:17])]
+	if !ok {
+		return 0, false
+	}
+	return rss.streamID, true
+}
+
 // EndsDataCall reports whether data, an IPSC user packet of packetType, is
 // the last packet of a data call: a group or private data packet with the
 // end flag. An XPR 8400 sets it on the last block of a data packet, and on
 // a header with no blocks to follow such as an ACK.
 func EndsDataCall(packetType byte, data []byte) bool {
-	return (packetType == 0x83 || packetType == 0x84) && len(data) > 17 && data[17]&ipscCallInfoEnd != 0
+	return isDataPacket(packetType) && len(data) > 17 && data[17]&ipscCallInfoEnd != 0
 }
 
 // newStreamIDLocked returns the next nonzero MMDVM stream ID. The caller
