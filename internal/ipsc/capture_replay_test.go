@@ -178,6 +178,7 @@ func TestIPSCNewRTPBaseStartsNewStream(t *testing.T) {
 		{"next call", both, "H-ABCDEFABCDEFA-ABCDEATHABCDEA"},
 		{"next call with its first burst A lost", without(both, 23), "H-ABCDEFABCDEFA-ABCDEATHBCDEA"},
 		{"next call without a voice header", without(both, 22, 23), "H-ABCDEFABCDEFA-ABCDEAT--EA"},
+		{"next call after a reordered burst", append(append(both[:19:19], both[20], both[19]), both[21:]...), "H-ABCDEFABCDEFA-ABCE-ATHABCDEA"},
 	} {
 		got, ids := replayStreams(t, tc.packets)
 		if got != tc.want {

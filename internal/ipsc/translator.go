@@ -725,8 +725,9 @@ type reverseStreamState struct {
 
 // rtpMaxForward is the largest forward RTP timestamp step (8 kHz units,
 // 1 second) that still continues a call, as in ipsc2hbpc's
-// OUT_RTP_MAX_FWD. A larger or backward step is a new call that reuses the
-// call control.
+// OUT_RTP_MAX_FWD. A larger step is a new call that reuses the call
+// control. Unlike ipsc2hbpc, a backward step this small is a reordered
+// packet, not a new call.
 const rtpMaxForward = 8000
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
@@ -809,13 +810,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	isVoice := burstType == ipscBurstVoiceHead || burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2
 	if isVoice {
-		ts := binary.BigEndian.Uint32(data[22:26])
-		if rss.hasTimestamp && ts-rss.rtpTimestamp > rtpMaxForward {
-			slog.Debug("IPSCTranslator: RTP discontinuity, starting a new stream",
-				"callControl", callControl, "streamID", rss.streamID)
-			results = append(results, t.restartReverseStream(rss)...)
-		}
-		rss.rtpTimestamp, rss.hasTimestamp = ts, true
+		results = append(results, t.checkRTPContinuity(rss, binary.BigEndian.Uint32(data[22:26]))...)
 	}
 	sent := len(results)
 
@@ -886,6 +881,25 @@ func (t *IPSCTranslator) newStreamIDLocked() uint32 {
 		t.nextStreamID = 1
 	}
 	return t.nextStreamID
+}
+
+// checkRTPContinuity tracks the RTP timestamp ts of a voice header or burst
+// and restarts the stream of rss when ts starts a new call. It returns the
+// terminator for the old stream, if any.
+func (t *IPSCTranslator) checkRTPContinuity(rss *reverseStreamState, ts uint32) []mmdvm.Packet {
+	step := ts - rss.rtpTimestamp
+	switch {
+	case !rss.hasTimestamp || step <= rtpMaxForward:
+		rss.rtpTimestamp, rss.hasTimestamp = ts, true
+		return nil
+	case -step <= rtpMaxForward:
+		return nil
+	default:
+		slog.Debug("IPSCTranslator: RTP discontinuity, starting a new stream", "streamID", rss.streamID)
+		out := t.restartReverseStream(rss)
+		rss.rtpTimestamp, rss.hasTimestamp = ts, true
+		return out
+	}
 }
 
 // restartReverseStream ends the MMDVM stream of rss with a terminator, if
