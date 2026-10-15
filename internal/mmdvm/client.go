@@ -35,7 +35,7 @@ type MMDVMClient struct {
 	timeout      time.Duration
 	lastPing     atomic.Int64 // UnixNano — last MSTPONG received
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
-	ipscHandler  func(data []byte)
+	ipscHandler  atomic.Pointer[func(data []byte)]
 	translator   *ipsc.IPSCTranslator
 
 	// Rewrite rules built from config, applied to packets
@@ -544,10 +544,11 @@ func (h *MMDVMClient) forwardTX() {
 
 // translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
 func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
-	if h.ipscHandler != nil && h.translator != nil {
+	handler := h.ipscHandler.Load()
+	if handler != nil && h.translator != nil {
 		ipscPackets := h.translator.TranslateToIPSC(packet)
 		for _, ipscData := range ipscPackets {
-			h.ipscHandler(ipscData)
+			(*handler)(ipscData)
 		}
 	}
 }
@@ -610,8 +611,14 @@ func (h *MMDVMClient) sendInbound(pkt proto.Packet) bool {
 	}
 }
 
+// SetIPSCHandler sets the function that receives translated IPSC packets.
+// It is safe to call at any time, including after Start.
 func (h *MMDVMClient) SetIPSCHandler(handler func(data []byte)) {
-	h.ipscHandler = handler
+	if handler == nil {
+		h.ipscHandler.Store(nil)
+		return
+	}
+	h.ipscHandler.Store(&handler)
 }
 
 // SetOutboundTSManager sets the shared timeslot manager used for the

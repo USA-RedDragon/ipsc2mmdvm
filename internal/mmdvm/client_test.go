@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,17 +287,18 @@ func TestSendPacketEncodesAndSends(t *testing.T) {
 func TestSetIPSCHandler(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	if client.ipscHandler != nil {
+	if client.ipscHandler.Load() != nil {
 		t.Fatal("expected nil handler initially")
 	}
 	called := false
 	client.SetIPSCHandler(func(data []byte) {
 		called = true
 	})
-	if client.ipscHandler == nil {
+	handler := client.ipscHandler.Load()
+	if handler == nil {
 		t.Fatal("expected non-nil handler after SetIPSCHandler")
 	}
-	client.ipscHandler([]byte{})
+	(*handler)([]byte{})
 	if !called {
 		t.Fatal("expected handler to be called")
 	}
@@ -1692,5 +1694,120 @@ func TestSendRPTCDefaultLength(t *testing.T) {
 	client.sendRPTC()
 	if data := <-client.connTX; len(data) != 302 {
 		t.Fatalf("expected 302 bytes, got %d", len(data))
+	}
+}
+
+// fakeMaster is a minimal homebrew master on loopback for lifecycle tests.
+type fakeMaster struct {
+	conn         *net.UDPConn
+	answer       atomic.Bool
+	dropLogins   atomic.Int32
+	logins       atomic.Int32
+	pings        atomic.Int32
+	peer         atomic.Pointer[net.UDPAddr]
+	pongsEnabled atomic.Bool
+}
+
+func newFakeMaster(t *testing.T) *fakeMaster {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	m := &fakeMaster{conn: conn}
+	m.answer.Store(true)
+	m.pongsEnabled.Store(true)
+	t.Cleanup(func() { conn.Close() })
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, addr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			m.peer.Store(addr)
+			data := buf[:n]
+			var reply []byte
+			switch {
+			case bytes.HasPrefix(data, []byte(tagRPTPING)):
+				m.pings.Add(1)
+				if m.pongsEnabled.Load() {
+					reply = []byte("MSTPONG\x00\x00\x00\x01")
+				}
+			case bytes.HasPrefix(data, []byte(tagRPTCL)):
+			case bytes.HasPrefix(data, []byte(tagRPTL)):
+				m.logins.Add(1)
+				if m.dropLogins.Load() > 0 {
+					m.dropLogins.Add(-1)
+					continue
+				}
+				reply = []byte("RPTACK\x01\x02\x03\x04")
+			case bytes.HasPrefix(data, []byte(tagRPTK)), bytes.HasPrefix(data, []byte(tagRPTC)):
+				reply = []byte("RPTACK\x00\x04\xC2\x34")
+			}
+			if reply != nil && m.answer.Load() {
+				_, _ = conn.WriteToUDP(reply, addr)
+			}
+		}
+	}()
+	return m
+}
+
+func (m *fakeMaster) addr() string {
+	return m.conn.LocalAddr().String()
+}
+
+func (m *fakeMaster) send(t *testing.T, data []byte) {
+	t.Helper()
+	addr := m.peer.Load()
+	if addr == nil {
+		t.Fatal("fake master has no peer yet")
+	}
+	if _, err := m.conn.WriteToUDP(data, addr); err != nil {
+		t.Fatalf("fake master write: %v", err)
+	}
+}
+
+func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for %s", d, what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func isState(c *MMDVMClient, s state) func() bool {
+	return func() bool { return state(c.state.Load()) == s }
+}
+
+func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
+	t.Parallel()
+	m := newFakeMaster(t)
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = m.addr()
+	cfg.PassAllTG = []int{1, 2}
+	c := NewMMDVMClient(cfg, nil)
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(c.Stop)
+	waitFor(t, 2*time.Second, "READY", isState(c, STATE_READY))
+
+	got := make(chan struct{}, 1)
+	c.SetIPSCHandler(func([]byte) {
+		select {
+		case got <- struct{}{}:
+		default:
+		}
+	})
+	pkt := proto.Packet{Signature: tagDMRD, Dst: 91, GroupCall: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 9}
+	m.send(t, pkt.Encode())
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("IPSC handler was not called")
 	}
 }
