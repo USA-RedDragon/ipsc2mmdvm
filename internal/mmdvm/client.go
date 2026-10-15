@@ -485,17 +485,26 @@ func (h *MMDVMClient) tick(now time.Time) {
 		if h.resentAt.After(last) {
 			last = h.resentAt
 		}
-		if now.Sub(last) >= 2*h.keepAlive {
+		if h.intervalsPassed(now, last, 2) {
 			h.resentAt = now
 			h.resend(st)
 		}
 	case STATE_TIMEOUT:
-		if now.Sub(time.Unix(0, h.stateSince.Load())) >= h.keepAlive {
+		if h.intervalsPassed(now, time.Unix(0, h.stateSince.Load()), 1) {
 			h.connectAndLogin()
 		}
 	case STATE_IDLE:
 		h.connectAndLogin()
 	}
+}
+
+// intervalsPassed reports whether n keepalive intervals have passed from
+// since to the tick at now. A state change made just after a tick, such as
+// a relogin on the MSTNAK that answers its ping, would otherwise miss the
+// tick n intervals later by a few microseconds and wait a whole extra
+// interval, so it allows a tenth of an interval of slack.
+func (h *MMDVMClient) intervalsPassed(now, since time.Time, n int) bool {
+	return now.Sub(since) >= time.Duration(n)*h.keepAlive-h.keepAlive/10
 }
 
 // resend repeats the handshake step for st. Must be called with sessMu held.

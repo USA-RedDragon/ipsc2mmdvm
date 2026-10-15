@@ -2267,6 +2267,52 @@ func TestHandshakeResendEverySecondInterval(t *testing.T) {
 	}
 }
 
+func TestReloginOnSecondTickAfterPingNak(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.keepAlive = time.Second
+	client.timeout = time.Hour
+	client.setState(STATE_READY)
+
+	now := time.Now()
+	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
+	client.tick(now.Add(client.keepAlive))
+	if n := len(client.connTX); n != 0 {
+		t.Fatalf("expected no RPTL one interval after the MSTNAK, got %d queued", n)
+	}
+	client.tick(now.Add(2 * client.keepAlive))
+	if n := len(client.connTX); n != 1 {
+		t.Fatalf("expected RPTL two intervals after the MSTNAK, got %d queued", n)
+	}
+	if data := <-client.connTX; string(data[:4]) != tagRPTL {
+		t.Fatalf("expected RPTL, got %q", data[:4])
+	}
+}
+
+func TestRedialOnTickAfterTimeoutReconnect(t *testing.T) {
+	t.Parallel()
+	serverConn, client := udpPair(t)
+	defer serverConn.Close()
+	client.timeout = time.Minute
+	client.setState(STATE_READY)
+	client.lastHeard.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+
+	now := time.Now()
+	client.tick(now)
+	if st := client.currentState(); st != STATE_TIMEOUT {
+		t.Fatalf("expected STATE_TIMEOUT, got %d", st)
+	}
+	client.tick(now.Add(client.keepAlive / 2))
+	if st := client.currentState(); st != STATE_TIMEOUT {
+		t.Fatalf("redialed half an interval after the timeout, state %d", st)
+	}
+	client.tick(now.Add(client.keepAlive))
+	if st := client.currentState(); st != STATE_SENT_LOGIN {
+		t.Fatalf("expected a redial on the next tick, got state %d", st)
+	}
+	client.Stop()
+}
+
 func TestStopStopsInboundTimeslotManager(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
