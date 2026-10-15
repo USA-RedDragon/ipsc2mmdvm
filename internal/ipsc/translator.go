@@ -361,9 +361,9 @@ func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt mmdvm.Packet, ss *strea
 	buf[11] = byte(pkt.Dst & 0xFF)
 
 	// Byte 12: call priority. MOTOTRBO repeaters send 0x02 on group and
-	// private voice, and 0x01 on PVT_DATA.
+	// private voice, and 0x01 on group and private data.
 	buf[12] = 0x02
-	if buf[0] == 0x84 {
+	if isData {
 		buf[12] = 0x01
 	}
 

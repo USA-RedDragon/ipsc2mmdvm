@@ -191,8 +191,9 @@ func TestRigRate34ToMMDVM(t *testing.T) {
 	}
 }
 
-// rigDataToIPSC sends the bursts of c to IPSC and checks bytes 30 to the
-// RSSI of each packet against what the XPR 8400 sent. Bit 1 of byte 31,
+// rigDataToIPSC sends the bursts of c to IPSC and checks the packet type,
+// the call priority, and bytes 30 to the RSSI of each packet against what
+// the XPR 8400 sent. Bit 1 of byte 31,
 // which the repeater sets when a block fails its CRC check, is not compared:
 // the repeater sets it on every unconfirmed rate 3/4 block, which has no
 // CRC-9.
@@ -218,6 +219,9 @@ func rigDataToIPSC(t *testing.T, c rigDataCall) [][]byte {
 		r, _ := hex.DecodeString(c.packets[i])
 		if len(out[0]) != len(r) {
 			t.Fatalf("%s burst %d: got %d bytes, want %d", c.name, i, len(out[0]), len(r))
+		}
+		if out[0][0] != r[0] || out[0][12] != r[12] {
+			t.Errorf("%s burst %d: packet type %02x priority %02x, want %02x %02x", c.name, i, out[0][0], out[0][12], r[0], r[12])
 		}
 		n := len(r) - 2
 		g := append([]byte(nil), out[0][30:n]...)
