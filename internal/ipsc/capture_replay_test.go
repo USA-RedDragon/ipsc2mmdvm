@@ -136,6 +136,34 @@ func without(packets []string, drop ...int) []string {
 	return out
 }
 
+// In the ipsc2hbpc captures the repeater sets the end bit and RTP payload
+// type 0x5E on a voice burst or "sync not detected" placeholder when it
+// loses the signal, and restarts the superframe at burst A on the next
+// burst: synclost_ipsc_in.txt lines 16-17, 21-22, and 28-29. A burst after
+// a lost restart A is placed from that restart.
+func TestIPSCEndBitRestartsSuperframe(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	burst := func(seq uint16, length int, end bool) []mmdvm.Packet {
+		d := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false)
+		d = append(d, make([]byte, 66)...)[:length]
+		if length == 52 {
+			d[32] = ipscVoiceCtrlSync
+		}
+		if end {
+			d[17] |= 0x40
+		}
+		binary.BigEndian.PutUint16(d[20:22], seq)
+		return tr.TranslateToMMDVM(0x80, d)
+	}
+	burst(1, 52, false)
+	burst(2, 57, true)
+	out := burst(4, 57, false)
+	if len(out) != 1 || out[0].FrameType != mmdvmFrameTypeVoice || out[0].DTypeOrVSeq != burstB {
+		t.Fatalf("burst after a lost restart A: got %+v, want burst B", out)
+	}
+}
+
 // A call that reuses the call control with a new RTP base is a new call,
 // as in ipsc2hbpc (translate.c out_call_continues): the old stream gets a
 // terminator, and the new one is placed from its own bursts.
@@ -177,6 +205,7 @@ func TestIPSCVoiceBurstPositionsFromCapture(t *testing.T) {
 		{"late entry at burst A", captureLateEntry()[6:], "ABCDEFA"},
 		{"burst A lost in transit", withoutA, "ABCDEFBCDEFA"},
 		{"first burst A after the voice header lost", without(captureSyncLost(), 2), "H-BCDEFABCDEFA-ABCDEA"},
+		{"restarted superframe with its burst A lost", without(captureSyncLost(), 16), "H-ABCDEFABCDEFA-BCDEA"},
 	} {
 		if got := replayBurstPositions(t, tc.packets); got != tc.want {
 			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)

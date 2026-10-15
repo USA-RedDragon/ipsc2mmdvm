@@ -96,6 +96,14 @@ const (
 // a burst carrying voice sync, which is burst A.
 const ipscVoiceCtrlSync = 0x40
 
+// ipscCallInfoEnd is the call end flag in byte 17 of an IPSC user packet.
+const ipscCallInfoEnd = 0x40
+
+// ipscBurstSyncUndetect is the burst type of the 34-byte placeholder a
+// repeater sends for a burst it lost because it lost sync. Bit 7 is the
+// timeslot.
+const ipscBurstSyncUndetect byte = 0x13
+
 // RTP timestamp increment per burst (~60ms spacing in 16.16 format)
 const rtpTimestampIncrement = 480
 
@@ -750,7 +758,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	groupCall := packetType == 0x80 || packetType == 0x83
 	callInfo := data[17]
 	slot := (callInfo & 0x20) != 0 // true = TS2
-	isEnd := (callInfo & 0x40) != 0
+	isEnd := (callInfo & ipscCallInfoEnd) != 0
 
 	slog.Debug("IPSCTranslator: TranslateToMMDVM",
 		"packetType", fmt.Sprintf("0x%02X", packetType),
@@ -759,6 +767,14 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	// Determine what kind of IPSC burst this is from byte 30
 	burstType := data[30]
+
+	if burstType&0x7F == ipscBurstSyncUndetect {
+		if rss, ok := t.reverseStreams[binary.BigEndian.Uint32(data[13:17])]; ok {
+			rss.lastSeen = now
+			superframeRestartsAfter(rss, binary.BigEndian.Uint16(data[20:22]))
+		}
+		return nil
+	}
 
 	minLen := ipscMinLCPacketLen
 	if burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2 {
@@ -1064,18 +1080,27 @@ func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 	case len(data) == 66:
 		anchor = burstE
 	}
-	if anchor >= 0 {
+	pos, ok := anchor, anchor >= 0
+	if ok {
 		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = anchor, seq, true
-		return anchor, true
+	} else if rss.hasAnchor {
+		delta := seq - rss.anchorRTPSeq
+		ok = delta != 0 && delta < 0x8000
+		pos = (rss.anchorPos + int(delta%6)) % 6
 	}
-	if !rss.hasAnchor {
-		return 0, false
+	if data[17]&ipscCallInfoEnd != 0 {
+		superframeRestartsAfter(rss, seq)
 	}
-	delta := seq - rss.anchorRTPSeq
-	if delta == 0 || delta >= 0x8000 {
-		return 0, false
-	}
-	return (rss.anchorPos + int(delta%6)) % 6, true
+	return pos, ok
+}
+
+// superframeRestartsAfter places burst A right after RTP sequence number
+// seq. A MOTOTRBO repeater that loses the signal sets the end bit on its
+// last voice burst or on a "sync not detected" placeholder for a burst it
+// lost, and its next burst starts a new superframe at A, since a receiver
+// regains sync only on the voice sync of burst A.
+func superframeRestartsAfter(rss *reverseStreamState, seq uint16) {
+	rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, seq, true
 }
 
 // populateEmbeddedSignalling fills in the embedded signalling of voice
