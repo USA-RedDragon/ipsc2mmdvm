@@ -317,6 +317,12 @@ func makeTestIPSCPacket(packetType byte, burstType byte, groupCall, slot bool) [
 	// Burst type (byte 30)
 	buf[30] = burstType
 
+	// A zero payload with a valid CRC for the data types that have one
+	if crcChecked(enums.DataType(burstType)) {
+		p := withCRC([12]byte{}, enums.DataType(burstType))
+		copy(buf[38:50], p[:])
+	}
+
 	return buf
 }
 

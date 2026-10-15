@@ -946,11 +946,9 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
 		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12:
-		// Data bursts carry the DMR data type in the burst type byte and the
-		// 12-byte BPTC(196,96) payload at the same offset as the voice LC.
-		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-			enums.DataType(burstType), data)
-		results = append(results, pkt)
+		if pkt, ok := t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, data); ok {
+			results = append(results, pkt)
+		}
 
 	case ipscBurstRate34:
 		results = append(results, t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data))
@@ -1122,6 +1120,24 @@ func lateEntryLC(payload [12]byte, src, dst uint, groupCall bool) (pdu.LCBytes, 
 		return pdu.LCBytes{}, false
 	}
 	return lc, true
+}
+
+// dataBurstToMMDVM builds the MMDVM DMRD packet for an IPSC data packet
+// with a 12-byte BPTC(196,96) payload. Data bursts carry the DMR data type
+// in the burst type byte and the payload at the same offset as the voice
+// LC. A payload that fails its CRC is dropped, as MMDVMHost would drop it:
+// an XPR 8400 relays such blocks with bit 1 of byte 31 set, for example a
+// rate 1 block it decoded as a 0x06 data header. MBC continuation blocks
+// are passed on, since MMDVMHost checks each one for a CRC that only the
+// last block of a standard MBC has.
+func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint, groupCall, slot bool, rss *reverseStreamState, burstType byte, data []byte) (mmdvm.Packet, bool) {
+	if burstType != ipscBurstMBCContinuation &&
+		!layer2.MMDVMHostAccepts(enums.DataType(burstType), [12]byte(data[38:50])) {
+		slog.Debug("IPSCTranslator: dropping data burst that fails its CRC",
+			"burstType", fmt.Sprintf("0x%02X", burstType))
+		return mmdvm.Packet{}, false
+	}
+	return t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss, enums.DataType(burstType), data), true
 }
 
 // buildMMDVMRate34Packet builds an MMDVM DMRD packet for an IPSC rate 3/4

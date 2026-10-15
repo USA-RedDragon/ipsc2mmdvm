@@ -558,6 +558,43 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 	}
 }
 
+// TestRigRate1BlockIsDropped uses a confirmed rate 1 packet from 3191868 to
+// 3140598 on TS1. The XPR 8400 relayed its data header, then the rate 1
+// block as a 0x06 packet with a meaningless BPTC(196,96) decode that fails
+// the data header CRC (byte 31 bit 1 set), then a 0x13 end packet. Only the
+// header goes to MMDVM.
+func TestRigRate1BlockIsDropped(t *testing.T) {
+	t.Parallel()
+	got := translateRig(t, []string{
+		"840004ce2e6830b43c2febf6010000251c00805d2dd20f396f4f000000000640000a800a006043a82febf630b43c810083cf00765eba",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd30f39712f000000000642000a800a006013054441204104844141601500765e7a",
+		"840004ce2e6830b43c2febf6010000251c40805e2dd40f39730f0000000013000000",
+	})
+	if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeDataHeader) {
+		t.Fatalf("got %+v, want the data header only", got)
+	}
+}
+
+// TestMBCContinuationPassesWithoutCRC sends a TS1 MBC continuation packet
+// in the form an XPR 8400 sends, taken from a capture of uncertain origin.
+// Only the last block of an MBC carries a CRC, so the block goes to MMDVM
+// with its payload although it fails a CSBK CRC check.
+func TestMBCContinuationPassesWithoutCRC(t *testing.T) {
+	t.Parallel()
+	ipsc := "840004ce2e1230b43c30b43c01000063c600805d958f41379d0b000000000540000a800a0060f07dadbd2aaff6880c9c22120025467c"
+	d, _ := hex.DecodeString(ipsc)
+	if layer2.MMDVMHostAccepts(enums.DataTypeMBCContinuation, [12]byte(d[38:50])) {
+		t.Fatal("payload passes the CRC check")
+	}
+	got := translateRig(t, []string{ipsc})
+	if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeMBCContinuation) {
+		t.Fatalf("got %+v, want the MBC continuation", got)
+	}
+	if p, _ := layer2.RawBurst(got[0].DMRData).BPTCPayload(); p != [12]byte(d[38:50]) {
+		t.Errorf("payload %x, want %x", p, d[38:50])
+	}
+}
+
 // TestRigCallSequence checks that byte 5 is the same in every packet of a
 // call, voice or data, as in the XPR 8400 captures, and differs between
 // calls.
