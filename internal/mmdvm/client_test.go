@@ -733,19 +733,21 @@ func TestHandlerSentRPTCRejected(t *testing.T) {
 func TestHandlerReadyMSTNAKLogsInAgain(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.keepAlive = time.Second
+	client.timeout = time.Hour
 	client.setState(STATE_READY)
 
 	client.handleState([]byte(testMSTNAK))
 	if st := client.currentState(); st != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
 	}
-	select {
-	case data := <-client.connTX:
-		if string(data[:4]) != tagRPTL {
-			t.Fatalf("expected RPTL, got %q", string(data[:4]))
-		}
-	default:
-		t.Fatal("expected an immediate RPTL")
+	if n := len(client.connTX); n != 0 {
+		t.Fatalf("expected no immediate RPTL, got %d queued packets", n)
+	}
+	client.tick(time.Now().Add(2 * client.keepAlive))
+	data := <-client.connTX
+	if string(data[:4]) != tagRPTL {
+		t.Fatalf("expected RPTL on the next resend, got %q", string(data[:4]))
 	}
 }
 
@@ -756,12 +758,24 @@ func TestHandlerMSTCLReconnects(t *testing.T) {
 		client.setState(st)
 		oldConn := client.conn
 
+		client.keepAlive = time.Second
 		client.handleState(append([]byte(packetTypeMstcl), 0, 4, 0xC2, 0x34))
 
+		if got := client.currentState(); got != STATE_TIMEOUT {
+			t.Fatalf("state %d: expected STATE_TIMEOUT, got %d", st, got)
+		}
+		if client.conn != nil || len(client.connTX) != 0 {
+			t.Fatalf("state %d: expected no redial before the retry interval", st)
+		}
+		client.tick(time.Now())
+		if client.conn != nil {
+			t.Fatalf("state %d: redialed before the retry interval", st)
+		}
+		client.tick(time.Now().Add(client.keepAlive))
 		if got := client.currentState(); got != STATE_SENT_LOGIN {
 			t.Fatalf("state %d: expected STATE_SENT_LOGIN, got %d", st, got)
 		}
-		if client.conn == oldConn {
+		if client.conn == nil || client.conn == oldConn {
 			t.Fatalf("state %d: expected a new connection", st)
 		}
 		data := <-client.connTX
@@ -1019,6 +1033,10 @@ func TestTickReconnectsOnPingTimeout(t *testing.T) {
 	oldConn := client.conn
 
 	client.tick(time.Now())
+	if st := client.currentState(); st != STATE_TIMEOUT {
+		t.Fatalf("expected STATE_TIMEOUT after timeout, got %d", st)
+	}
+	client.tick(time.Now().Add(client.keepAlive))
 
 	data := <-client.connTX
 	if string(data[:4]) != tagRPTL {
@@ -1041,6 +1059,7 @@ func TestTickReconnectsOnHandshakeTimeout(t *testing.T) {
 	client.setState(STATE_SENT_AUTH)
 
 	client.tick(time.Now().Add(time.Second))
+	client.tick(time.Now().Add(time.Second + client.keepAlive))
 
 	data := <-client.connTX
 	if string(data[:4]) != tagRPTL {

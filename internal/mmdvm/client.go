@@ -315,7 +315,7 @@ func (h *MMDVMClient) handleState(data []byte) {
 	}
 	defer h.sessMu.Unlock()
 	if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
-		slog.Warn("Master closed the connection, reconnecting", "network", h.cfg.Name)
+		slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
 		h.reconnect()
 		return
 	}
@@ -389,7 +389,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 		}
 	case "MSTC":
 		if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
-			slog.Warn("Master closed the connection, reconnecting", "network", h.cfg.Name)
+			slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
 			h.sessMu.Lock()
 			h.reconnect()
 			h.sessMu.Unlock()
@@ -432,7 +432,9 @@ func (h *MMDVMClient) handleReady(data []byte) {
 // second interval (a faster resend can reset a session on hblink), and
 // reconnects when the master has stopped answering, the
 // handshake has not progressed within the timeout, or there is no
-// connection at all.
+// connection at all. A dropped connection is dialed again only after a
+// full keepalive interval, like the DMRGateway retry timer, so a master
+// that keeps closing or rejecting the session is not flooded with logins.
 func (h *MMDVMClient) supervise() {
 	defer h.wg.Done()
 	h.sessMu.Lock()
@@ -475,7 +477,11 @@ func (h *MMDVMClient) tick(now time.Time) {
 			h.resentAt = now
 			h.resend(st)
 		}
-	case STATE_IDLE, STATE_TIMEOUT:
+	case STATE_TIMEOUT:
+		if now.Sub(time.Unix(0, h.stateSince.Load())) >= h.keepAlive {
+			h.connectAndLogin()
+		}
+	case STATE_IDLE:
 		h.connectAndLogin()
 	}
 }
@@ -493,8 +499,10 @@ func (h *MMDVMClient) resend(st state) {
 	}
 }
 
-// relogin starts a new login on the current connection after the master
-// rejected an established session.
+// relogin restarts the handshake on the current connection after the
+// master rejected an established session. The RPTL goes out with the
+// next handshake resend, not at once, so a master that rejects every
+// session is not flooded with logins.
 func (h *MMDVMClient) relogin() {
 	h.sessMu.Lock()
 	defer h.sessMu.Unlock()
@@ -505,7 +513,7 @@ func (h *MMDVMClient) relogin() {
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
 	}
-	h.startLogin()
+	h.setState(STATE_SENT_LOGIN)
 }
 
 // startLogin begins a new handshake on the current connection. Must be
@@ -515,8 +523,9 @@ func (h *MMDVMClient) startLogin() {
 	h.sendLogin()
 }
 
-// reconnect closes the current connection, then dials a new one and starts
-// a fresh login. Must be called with sessMu held.
+// reconnect closes the current connection. supervise dials a new one and
+// starts a fresh login once the retry interval has passed. Must be called
+// with sessMu held.
 func (h *MMDVMClient) reconnect() {
 	h.setState(STATE_TIMEOUT)
 	if h.metrics != nil {
@@ -525,7 +534,7 @@ func (h *MMDVMClient) reconnect() {
 	}
 	h.connMu.Lock()
 	if h.conn != nil {
-		if err := h.conn.Close(); err != nil {
+		if err := h.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			slog.Error("Error closing connection", "network", h.cfg.Name, "error", err)
 		}
 		h.conn = nil
@@ -538,7 +547,6 @@ func (h *MMDVMClient) reconnect() {
 		default:
 		}
 	}
-	h.connectAndLogin()
 }
 
 // connectAndLogin dials the master and starts a login. If the dial fails
