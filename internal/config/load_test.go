@@ -34,7 +34,7 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
       - from-slot: 1
         from-id: 1234
         to-slot: 2
-        to-id: 9
+        to-tg: 9
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	if len(m.TypeRewrites) != 1 || m.TypeRewrites[0].Range != 1 || m.TypeRewrites[0].ToID != 3100 {
 		t.Errorf("unexpected type-rewrite: %+v", m.TypeRewrites)
 	}
-	if len(m.SrcRewrites) != 1 || m.SrcRewrites[0].Range != 1 || m.SrcRewrites[0].FromID != 1234 {
+	if len(m.SrcRewrites) != 1 || m.SrcRewrites[0].Range != 1 || m.SrcRewrites[0].FromID != 1234 || m.SrcRewrites[0].ToID != 9 {
 		t.Errorf("unexpected src-rewrite: %+v", m.SrcRewrites)
 	}
 }

@@ -234,20 +234,20 @@ func TestTypeRewrite_NoMatch_PrivateCall(t *testing.T) {
 func TestSrcRewrite_Match(t *testing.T) {
 	t.Parallel()
 	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
-	pkt := privatePkt(1, 999, 1234) // private call from source 1234
+	pkt := privatePkt(1, 999, 1234)
 
 	res := r.Process(pkt)
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if pkt.Src != 9 {
-		t.Fatalf("expected Src=9, got %d", pkt.Src)
+	if pkt.Src != 1234 {
+		t.Fatalf("expected Src unchanged at 1234, got %d", pkt.Src)
 	}
-	if pkt.Dst != 999 {
-		t.Fatalf("expected Dst unchanged at 999, got %d", pkt.Dst)
+	if pkt.Dst != 9 {
+		t.Fatalf("expected Dst=TG9, got %d", pkt.Dst)
 	}
-	if pkt.GroupCall {
-		t.Fatal("expected GroupCall to remain false (private call)")
+	if !pkt.GroupCall {
+		t.Fatal("expected private call to become a group call")
 	}
 	if pktSlot(pkt) != 2 {
 		t.Fatalf("expected slot 2, got %d", pktSlot(pkt))
@@ -257,38 +257,48 @@ func TestSrcRewrite_Match(t *testing.T) {
 func TestSrcRewrite_Match_Range(t *testing.T) {
 	t.Parallel()
 	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1000, ToSlot: 1, ToID: 5000, Range: 100}
-	pkt := privatePkt(1, 999, 1050) // source in range
-
-	res := r.Process(pkt)
-	if res != Matched {
-		t.Fatal("expected Matched")
-	}
-	if pkt.GroupCall {
-		t.Fatal("expected GroupCall to remain false (private call)")
-	}
-	if pkt.Src != 5050 {
-		t.Fatalf("expected Src=5050, got %d", pkt.Src)
-	}
-	if pkt.Dst != 999 {
-		t.Fatalf("expected Dst unchanged at 999, got %d", pkt.Dst)
-	}
-}
-
-func TestSrcRewrite_Match_GroupCall(t *testing.T) {
-	t.Parallel()
-	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 9, Range: 1}
-	pkt := groupPkt(1, 9)
-	pkt.Src = 100 // source matches
+	pkt := privatePkt(1, 999, 1050)
 
 	res := r.Process(pkt)
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
 	if !pkt.GroupCall {
-		t.Fatal("expected GroupCall to remain true")
+		t.Fatal("expected private call to become a group call")
 	}
-	if pkt.Src != 9 {
-		t.Fatalf("expected Src=9, got %d", pkt.Src)
+	if pkt.Src != 1050 {
+		t.Fatalf("expected Src unchanged at 1050, got %d", pkt.Src)
+	}
+	if pkt.Dst != 5000 {
+		t.Fatalf("expected every source in range to map to TG5000, got %d", pkt.Dst)
+	}
+	if pktSlot(pkt) != 1 {
+		t.Fatalf("expected slot 1, got %d", pktSlot(pkt))
+	}
+}
+
+func TestSrcRewrite_NoMatch_GroupCall(t *testing.T) {
+	t.Parallel()
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToID: 9, Range: 1}
+	pkt := groupPkt(1, 91)
+	pkt.Src = 100
+
+	res := r.Process(pkt)
+	if res != Unmatched {
+		t.Fatal("expected Unmatched for group call")
+	}
+	if pkt.Src != 100 || pkt.Dst != 91 || !pkt.GroupCall || pktSlot(pkt) != 1 {
+		t.Fatalf("expected packet unchanged, got %+v", pkt)
+	}
+}
+
+func TestSrcRewrite_NoMatch_WrongSlot(t *testing.T) {
+	t.Parallel()
+	r := &SrcRewrite{Name: testRuleName, FromSlot: 2, FromID: 1234, ToSlot: 2, ToID: 9, Range: 1}
+	pkt := privatePkt(1, 999, 1234)
+
+	if r.Process(pkt) != Unmatched {
+		t.Fatal("expected Unmatched for wrong slot")
 	}
 }
 

@@ -47,7 +47,7 @@ metrics:
 #       - from-slot: 0
 #         from-id: 0
 #         to-slot: 0
-#         to-id: 0
+#         to-tg: 0
 #         range: 1
 #     pass-all-pc: []
 #     pass-all-tg: []

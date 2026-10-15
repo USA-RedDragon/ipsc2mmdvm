@@ -260,7 +260,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `mmdvm[].src-rewrite[].from-slot`  | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
 | `mmdvm[].src-rewrite[].from-id`    | integer         |               | —                   | —                     | Source ID start                                                           |
 | `mmdvm[].src-rewrite[].to-slot`    | integer         |               | —                   | —                     | Destination timeslot (1 or 2)                                             |
-| `mmdvm[].src-rewrite[].to-id`      | integer         |               | —                   | —                     | Destination source ID start                                               |
+| `mmdvm[].src-rewrite[].to-tg`      | integer         |               | —                   | —                     | Destination talkgroup for the converted group call                        |
 | `mmdvm[].src-rewrite[].range`      | integer         | `1`           | —                   | —                     | Number of contiguous source IDs to match                                  |
 | `mmdvm[].pass-all-pc`              | list of integer |               | —                   | —                     | Timeslots on which all private calls pass through unchanged (e.g. [1, 2]) |
 | `mmdvm[].pass-all-tg`              | list of integer |               | —                   | —                     | Timeslots on which all group calls pass through unchanged (e.g. [1, 2])   |
@@ -282,4 +282,4 @@ Each MMDVM entry can have these rule lists (fields are in the table above):
 - `tg-rewrite`: remap group talkgroup calls
 - `pc-rewrite`: remap private calls by destination ID
 - `type-rewrite`: convert group TG calls to private calls
-- `src-rewrite`: match calls by source, remap source ID
+- `src-rewrite`: convert private calls from a range of source IDs into group calls to one talkgroup (`to-tg`), keeping the source ID

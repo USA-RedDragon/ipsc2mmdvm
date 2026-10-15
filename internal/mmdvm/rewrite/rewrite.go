@@ -144,16 +144,18 @@ func (r *TypeRewrite) Process(pkt *proto.Packet) Result {
 }
 
 // --- SrcRewrite --------------------------------------------------------------
-// Matches calls by source ID and remaps the source into a prefixed range.
-// The destination and call type (group/private) are preserved.
+// Converts private calls to group calls by source: matches Private FLCO,
+// fromSlot, and source ID in range [fromId, fromId+range-1]. Rewrites to Group
+// FLCO addressed to toTG on toSlot. The source ID is not changed. This mirrors
+// DMRGateway's CRewriteSrc::process (RewriteSrc.cpp).
 
-// SrcRewrite rewrites the source ID of matched calls.
+// SrcRewrite converts matched private calls into group calls to a fixed TG.
 type SrcRewrite struct {
 	Name     string
 	FromSlot uint
 	FromID   uint // start of source ID range
 	ToSlot   uint
-	ToID     uint // start of destination source ID range
+	ToID     uint // destination talkgroup (DMRGateway's toTG)
 	Range    uint
 }
 
@@ -161,7 +163,7 @@ func (r *SrcRewrite) fromIDEnd() uint { return r.FromID + r.Range - 1 }
 
 func (r *SrcRewrite) Process(pkt *proto.Packet) Result {
 	slot := pktSlot(pkt)
-	if slot != r.FromSlot || pkt.Src < r.FromID || pkt.Src > r.fromIDEnd() {
+	if pkt.GroupCall || slot != r.FromSlot || pkt.Src < r.FromID || pkt.Src > r.fromIDEnd() {
 		return Unmatched
 	}
 
@@ -169,7 +171,8 @@ func (r *SrcRewrite) Process(pkt *proto.Packet) Result {
 		setPktSlot(pkt, r.ToSlot)
 	}
 
-	pkt.Src = r.ToID + (pkt.Src - r.FromID)
+	pkt.Dst = r.ToID
+	pkt.GroupCall = true
 
 	return Matched
 }

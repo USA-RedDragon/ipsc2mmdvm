@@ -111,13 +111,16 @@ type TypeRewriteConfig struct {
 	Range    uint `name:"range" description:"Number of contiguous entries to map" default:"1"`
 }
 
-// SrcRewriteConfig matches calls by source ID and remaps the source into a prefixed range.
+// SrcRewriteConfig converts private calls from a range of source IDs into
+// group calls to one talkgroup. The source ID is not changed.
+// Modeled after DMRGateway's SrcRewrite: fromSlot, fromId, toSlot, toTG, range.
 type SrcRewriteConfig struct {
 	FromSlot uint `name:"from-slot" description:"Source timeslot (1 or 2)"`
 	FromID   uint `name:"from-id" description:"Source ID start"`
 	ToSlot   uint `name:"to-slot" description:"Destination timeslot (1 or 2)"`
-	ToID     uint `name:"to-id" description:"Destination source ID start"`
-	Range    uint `name:"range" description:"Number of contiguous source IDs to match" default:"1"`
+	// ToID is the destination talkgroup.
+	ToID  uint `name:"to-tg" description:"Destination talkgroup for the converted group call"`
+	Range uint `name:"range" description:"Number of contiguous source IDs to match" default:"1"`
 }
 
 var (
@@ -133,6 +136,7 @@ var (
 	ErrInvalidMMDVMPassword     = errors.New("invalid MMDVM password provided")
 	ErrInvalidRewriteSlot       = errors.New("invalid rewrite slot (must be 1 or 2)")
 	ErrInvalidRewriteRange      = errors.New("invalid rewrite range (must be >= 1)")
+	ErrInvalidRewriteTG         = errors.New("invalid rewrite talkgroup (must be >= 1)")
 	ErrInvalidIPSCInterface     = errors.New("invalid IPSC interface provided")
 	ErrInvalidIPSCIP            = errors.New("invalid IPSC IP address provided")
 	ErrInvalidIPSCSubnetMask    = errors.New("invalid IPSC subnet mask provided")
@@ -266,6 +270,9 @@ func validateRewrites(h *MMDVM) error {
 		}
 		if r.Range < 1 {
 			return ErrInvalidRewriteRange
+		}
+		if r.ToID < 1 {
+			return ErrInvalidRewriteTG
 		}
 	}
 	return nil

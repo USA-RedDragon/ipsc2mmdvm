@@ -53,7 +53,7 @@ type srcRewriteConfigShadow struct {
 	FromSlot *uint `json:"from-slot" toml:"from-slot" yaml:"from-slot"`
 	FromID   *uint `json:"from-id"   toml:"from-id"   yaml:"from-id"`
 	ToSlot   *uint `json:"to-slot"   toml:"to-slot"   yaml:"to-slot"`
-	ToID     *uint `json:"to-id"     toml:"to-id"     yaml:"to-id"`
+	ToID     *uint `json:"to-tg"     toml:"to-tg"     yaml:"to-tg"`
 	Range    *uint `json:"range"     toml:"range"     yaml:"range"`
 }
 
@@ -337,7 +337,7 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 					}
 					if esh1.ToID != nil {
 						e1.ToID = *esh1.ToID
-						set(idx1+".to-id", configulator.LayerFile, file)
+						set(idx1+".to-tg", configulator.LayerFile, file)
 					}
 					if esh1.Range != nil {
 						e1.Range = *esh1.Range
@@ -1736,7 +1736,7 @@ func (s *srcRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) 
 			default:
 				return configJSONError(path+".to-slot", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
-		case "to-id":
+		case "to-tg":
 			v, err := dec.ReadToken()
 			if err != nil {
 				return err
@@ -1746,15 +1746,15 @@ func (s *srcRewriteConfigShadow) decodeJSON(dec *jsontext.Decoder, path string) 
 			case jsontext.KindNumber:
 				raw, err := v.Uint()
 				if err != nil {
-					return configJSONError(path+".to-id", v, err)
+					return configJSONError(path+".to-tg", v, err)
 				}
 				if raw > math.MaxUint {
-					return configJSONError(path+".to-id", v, fmt.Errorf("%d overflows uint", raw))
+					return configJSONError(path+".to-tg", v, fmt.Errorf("%d overflows uint", raw))
 				}
 				num := uint(raw)
 				s.ToID = &num
 			default:
-				return configJSONError(path+".to-id", v, fmt.Errorf("expected a number, got %v", v.Kind()))
+				return configJSONError(path+".to-tg", v, fmt.Errorf("expected a number, got %v", v.Kind()))
 			}
 		case "range":
 			v, err := dec.ReadToken()
