@@ -177,8 +177,13 @@ func (c Config) Validate() error {
 		return ErrInvalidLogLevel
 	}
 
-	if c.Metrics.Enabled && !validListenAddress(c.Metrics.Address) {
-		return ErrInvalidMetricsAddress
+	if c.Metrics.Enabled {
+		if c.Metrics.Address == "" {
+			return fmt.Errorf("%w: metrics.enabled is true but metrics.address is empty; set it to a listen address such as \":9100\"", ErrInvalidMetricsAddress)
+		}
+		if !validListenAddress(c.Metrics.Address) {
+			return fmt.Errorf("%w %q: want [host]:port with a port from 1 to 65535", ErrInvalidMetricsAddress, c.Metrics.Address)
+		}
 	}
 
 	if len(c.MMDVM) == 0 {

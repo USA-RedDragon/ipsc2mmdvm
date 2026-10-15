@@ -320,6 +320,20 @@ func TestValidateMetricsAddress(t *testing.T) {
 	}
 }
 
+func TestValidateMetricsAddressErrorNamesTheProblem(t *testing.T) {
+	t.Parallel()
+	c := validConfig()
+	c.Metrics.Enabled = true
+	c.Metrics.Address = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "metrics.address is empty") {
+		t.Fatalf("error %v does not say that metrics.address is empty", err)
+	}
+	c.Metrics.Address = "metrics.example"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `"metrics.example"`) {
+		t.Fatalf("error %v does not name the bad address", err)
+	}
+}
+
 func TestValidConfigPasses(t *testing.T) {
 	t.Parallel()
 	if err := validConfig().Validate(); err != nil {
