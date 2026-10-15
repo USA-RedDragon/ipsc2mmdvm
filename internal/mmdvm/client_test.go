@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -2381,6 +2382,51 @@ func TestRedialOnTickAfterTimeoutReconnect(t *testing.T) {
 		t.Fatalf("expected a redial on the next tick, got state %d", st)
 	}
 	client.Stop()
+}
+
+// TestHandleIPSCBurstDataCallEndReleasesSlot uses a confirmed data packet
+// from 3191868 to 3140598 and the SACK that answered it 180 ms later, both
+// on TS2, as an XPR 8400 relayed them. The data packet ends with the end
+// flag on its last block, so the SACK must reach the master at once instead
+// of waiting behind the data call for the timeslot timeout.
+func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.setState(STATE_READY)
+	client.started.Store(true)
+	client.translator.SetColorCode(7)
+	client.passallRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: testRuleName, Slot: 2}}
+	mgr := timeslot.NewManager()
+	client.inboundTSMgr = mgr
+	t.Cleanup(mgr.Stop)
+
+	packets := []string{
+		"840004ce2e7330b43c2febf6010000432d2080dd531b694054fa0000000006c0000a800a006043a62febf630b43c8200a5eb0076495b",
+		"840004ce2e7330b43c2febf6010000432d20805d531c694056da0000000007c0000a800a00600107444d52474f20544553540077499f",
+		"840004ce2e7330b43c2febf6010000432d60805e531d694058ba0000000007c0000a800a006002c3000000000000d0281b1300774960",
+		"840004ce2e742febf630b43c0100006bc22080ddd7133445d8f20000000006c0000a800a006001a030b43c2febf681800a520076496f",
+		"840004ce2e742febf630b43c0100006bc260805ed7143445dad20000000007c0000a800a0060b5ffffffffffffff0f341fd70077497f",
+	}
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 0, 231), Port: 50000}
+	for i, h := range packets {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.HandleIPSCBurst(data[0], data, addr)
+		select {
+		case pkt := <-client.tx_chan:
+			wantSrc := uint(3191868)
+			if i >= 3 {
+				wantSrc = 3140598
+			}
+			if pkt.Src != wantSrc || !pkt.Slot {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS2", i, pkt.Src, pkt.Slot, wantSrc)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("packet %d was held back", i)
+		}
+	}
 }
 
 func TestStopStopsInboundTimeslotManager(t *testing.T) {

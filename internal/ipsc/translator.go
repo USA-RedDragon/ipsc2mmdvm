@@ -947,6 +947,14 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	return results
 }
 
+// EndsDataCall reports whether data, an IPSC user packet of packetType, is
+// the last packet of a data call: a group or private data packet with the
+// end flag. An XPR 8400 sets it on the last block of a data packet, and on
+// a header with no blocks to follow such as an ACK.
+func EndsDataCall(packetType byte, data []byte) bool {
+	return (packetType == 0x83 || packetType == 0x84) && len(data) > 17 && data[17]&ipscCallInfoEnd != 0
+}
+
 // newStreamIDLocked returns the next nonzero MMDVM stream ID. The caller
 // must hold t.mu.
 func (t *IPSCTranslator) newStreamIDLocked() uint32 {

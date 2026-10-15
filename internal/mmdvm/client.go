@@ -881,7 +881,8 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 
 	packets := h.translator.TranslateToMMDVM(packetType, data)
 	matched := false
-	for _, pkt := range packets {
+	dataEnd := ipsc.EndsDataCall(packetType, data)
+	for i, pkt := range packets {
 		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
 		// Apply RF→Net rewrite rules (outbound to this master).
 		// Try specific rewrites first; if none match, try passall
@@ -907,7 +908,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			continue
 		}
 
-		end := isTerminator(pkt)
+		end := isTerminator(pkt) || (dataEnd && i == len(packets)-1)
 		switch h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt, end, h.forwardInbound) {
 		case timeslot.Deliver:
 			matched = true
