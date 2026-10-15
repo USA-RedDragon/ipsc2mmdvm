@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
@@ -30,10 +31,20 @@ type IPSCTranslator struct {
 	streams        map[uint32]*streamState
 	reverseStreams map[uint32]*reverseStreamState
 	burst          layer2.Burst // reusable burst to reduce allocations
+	now            func() time.Time
+	lastPrune      time.Time
 
 	nextCallControl uint32
 	nextStreamID    uint32
 }
+
+// Stream state that sees no packets for streamIdleTimeout is dropped, so a
+// lost terminator or a data-only transaction does not leak. Pruning runs on
+// access, at most once per pruneInterval.
+const (
+	streamIdleTimeout = 5 * time.Second
+	pruneInterval     = time.Second
+)
 
 // streamState tracks RTP sequencing and call framing for one voice stream.
 type streamState struct {
@@ -42,6 +53,7 @@ type streamState struct {
 	rtpTimestamp uint32
 	ipscSeq      uint8
 	headersSent  int // number of voice headers sent (3 required)
+	lastSeen     time.Time
 	lc           [9]byte
 	hasLC        bool // lc holds the full LC from the voice header
 	firstPacket  bool // true for the very first packet
@@ -86,7 +98,53 @@ func NewIPSCTranslator() (*IPSCTranslator, error) {
 	return &IPSCTranslator{
 		streams:        make(map[uint32]*streamState),
 		reverseStreams: make(map[uint32]*reverseStreamState),
+		now:            time.Now,
 	}, nil
+}
+
+// pruneLocked drops stream state in both directions that has been idle for
+// longer than streamIdleTimeout. The caller must hold t.mu.
+func (t *IPSCTranslator) pruneLocked(now time.Time) {
+	if now.Sub(t.lastPrune) < pruneInterval {
+		return
+	}
+	t.lastPrune = now
+	for id, ss := range t.streams {
+		if now.Sub(ss.lastSeen) > streamIdleTimeout {
+			slog.Debug("IPSCTranslator: pruning idle MMDVM stream", "streamID", id)
+			t.removeStreamLocked(id)
+		}
+	}
+	for callControl, rss := range t.reverseStreams {
+		if now.Sub(rss.lastSeen) > streamIdleTimeout {
+			slog.Debug("IPSCTranslator: pruning idle IPSC stream", "callControl", callControl)
+			t.removeReverseStreamLocked(callControl)
+		}
+	}
+}
+
+// removeStreamLocked deletes MMDVM-to-IPSC stream state and updates the
+// active stream gauge. The caller must hold t.mu.
+func (t *IPSCTranslator) removeStreamLocked(streamID uint32) {
+	if _, ok := t.streams[streamID]; !ok {
+		return
+	}
+	delete(t.streams, streamID)
+	if t.metrics != nil {
+		t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Dec()
+	}
+}
+
+// removeReverseStreamLocked deletes IPSC-to-MMDVM stream state and updates
+// the active stream gauge. The caller must hold t.mu.
+func (t *IPSCTranslator) removeReverseStreamLocked(callControl uint32) {
+	if _, ok := t.reverseStreams[callControl]; !ok {
+		return
+	}
+	delete(t.reverseStreams, callControl)
+	if t.metrics != nil {
+		t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
+	}
 }
 
 // SetMetrics configures the metrics collector for this translator.
@@ -103,7 +161,7 @@ func (t *IPSCTranslator) SetPeerID(peerID uint32) {
 // TranslateToIPSC converts an MMDVM DMRD Packet into one or more IPSC
 // user packets ready to send to IPSC peers. It returns nil if the packet
 // cannot be translated (e.g. non-voice data we don't handle yet).
-func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
+func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -112,9 +170,12 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		return nil
 	}
 
+	now := t.now()
+	t.pruneLocked(now)
+
 	// Get or create stream state
-	ss, ok := t.streams[uint32(streamID)]
-	if !ok {
+	ss, existed := t.streams[uint32(streamID)]
+	if !existed {
 		t.nextCallControl++
 		if t.nextCallControl == 0 {
 			t.nextCallControl = 1
@@ -128,11 +189,15 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 			t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Inc()
 		}
 	}
+	ss.lastSeen = now
+	defer func(id uint32) {
+		if !existed && len(results) == 0 {
+			t.removeStreamLocked(id)
+		}
+	}(uint32(streamID))
 
 	frameType := pkt.FrameType
 	dtypeOrVSeq := pkt.DTypeOrVSeq
-
-	var results [][]byte
 
 	switch frameType {
 	case mmdvmFrameTypeDataSync:
@@ -156,11 +221,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		case enums.DataTypeTerminatorWithLC:
 			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(pkt, enums.DataTypeTerminatorWithLC))
 			results = append(results, data)
-			// Clean up stream state
-			delete(t.streams, uint32(streamID))
-			if t.metrics != nil {
-				t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Dec()
-			}
+			t.removeStreamLocked(uint32(streamID))
 		case enums.DataTypeCSBK, enums.DataTypePIHeader,
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
 			enums.DataTypeRate34, enums.DataTypeRate1,
@@ -206,11 +267,18 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 	return results
 }
 
-// CleanupStream removes state for a given stream (e.g. on timeout).
+// CleanupStream removes state for an MMDVM stream ID in both directions
+// (e.g. on timeout): the MMDVM-to-IPSC stream with that ID and any
+// IPSC-to-MMDVM stream that was assigned that ID.
 func (t *IPSCTranslator) CleanupStream(streamID uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.streams, streamID)
+	t.removeStreamLocked(streamID)
+	for callControl, rss := range t.reverseStreams {
+		if rss.streamID == streamID {
+			t.removeReverseStreamLocked(callControl)
+		}
+	}
 }
 
 // buildIPSCHeader writes the common 18-byte IPSC header (bytes 0-17).
@@ -625,13 +693,17 @@ type reverseStreamState struct {
 	lastRTPSeq uint16 // RTP sequence number of the last voice burst
 	hasLast    bool
 	started    bool // whether we've seen a voice header
+	lastSeen   time.Time
 }
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
 // Returns nil if the packet cannot be translated.
-func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.Packet {
+func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results []mmdvm.Packet) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	now := t.now()
+	t.pruneLocked(now)
 
 	if len(data) < ipscMinUserPacketLen {
 		slog.Debug("IPSCTranslator: IPSC packet too short", "length", len(data))
@@ -660,12 +732,25 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 		"src", src, "dst", dst, "groupCall", groupCall,
 		"slot", slot, "isEnd", isEnd)
 
+	// Determine what kind of IPSC burst this is from byte 30
+	burstType := data[30]
+
+	minLen := ipscMinLCPacketLen
+	if burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2 {
+		minLen = ipscMinVoicePktLen
+	}
+	if len(data) < minLen {
+		slog.Debug("IPSCTranslator: IPSC burst too short",
+			"burstType", fmt.Sprintf("0x%02X", burstType), "length", len(data))
+		return nil
+	}
+
 	// Use call control bytes as stream identifier
 	callControl := binary.BigEndian.Uint32(data[13:17])
 
 	// Get or create reverse stream state
-	rss, ok := t.reverseStreams[callControl]
-	if !ok {
+	rss, existed := t.reverseStreams[callControl]
+	if !existed {
 		t.nextStreamID++
 		if t.nextStreamID == 0 {
 			t.nextStreamID = 1
@@ -678,21 +763,12 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Inc()
 		}
 	}
-
-	// Determine what kind of IPSC burst this is from byte 30
-	burstType := data[30]
-
-	var results []mmdvm.Packet
-
-	minLen := ipscMinLCPacketLen
-	if burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2 {
-		minLen = ipscMinVoicePktLen
-	}
-	if len(data) < minLen {
-		slog.Debug("IPSCTranslator: IPSC burst too short",
-			"burstType", fmt.Sprintf("0x%02X", burstType), "length", len(data))
-		return nil
-	}
+	rss.lastSeen = now
+	defer func() {
+		if !existed && len(results) == 0 {
+			t.removeReverseStreamLocked(callControl)
+		}
+	}()
 
 	switch burstType {
 	case ipscBurstVoiceHead:
@@ -710,11 +786,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
 			enums.DataTypeTerminatorWithLC, data)
 		results = append(results, pkt)
-		// Clean up
-		delete(t.reverseStreams, callControl)
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
-		}
+		t.removeReverseStreamLocked(callControl)
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
@@ -731,15 +803,10 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 
 	default:
 		slog.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
-		return nil
 	}
 
-	if isEnd && burstType != ipscBurstVoiceTerm {
-		// End flag set but not a terminator — clean up anyway
-		delete(t.reverseStreams, callControl)
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Dec()
-		}
+	if isEnd {
+		t.removeReverseStreamLocked(callControl)
 	}
 
 	if t.metrics != nil && len(results) > 0 {

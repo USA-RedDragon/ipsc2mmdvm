@@ -3,12 +3,18 @@ package ipsc
 import (
 	"encoding/binary"
 	"math/rand/v2"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
@@ -853,7 +859,7 @@ func TestBuildMMDVMVoiceBurstSequencing(t *testing.T) {
 
 	// Send 3 voice bursts and verify sequencing
 	for i := 0; i < 3; i++ {
-		burstData := makeIPSCVoiceBurst(i, uint16(10+i), 0xEEEE, false) //nolint:gosec // G115: i is in [0,2]
+		burstData := makeIPSCVoiceBurst(i, uint16(10+i), 0xEEEE) //nolint:gosec // G115: i is in [0,2]
 
 		result := tr.TranslateToMMDVM(0x80, burstData)
 		if len(result) != 1 {
@@ -890,7 +896,7 @@ func TestBuildMMDVMVoiceBurstWrapsAt6(t *testing.T) {
 
 	// Send 7 voice bursts — the 7th is burst A of the next superframe
 	for i := 0; i < 7; i++ {
-		burstData := makeIPSCVoiceBurst(i%6, uint16(10+i), 0xFFFF, false) //nolint:gosec // G115: i is in [0,6]
+		burstData := makeIPSCVoiceBurst(i%6, uint16(10+i), 0xFFFF) //nolint:gosec // G115: i is in [0,6]
 
 		result := tr.TranslateToMMDVM(0x80, burstData)
 		if len(result) != 1 {
@@ -1475,18 +1481,15 @@ func TestTranslateToMMDVMVoicePassesThroughFullLC(t *testing.T) {
 // makeIPSCVoiceBurst builds an IPSC voice burst laid out like a MOTOTRBO
 // repeater sends it: 52 bytes for A, 66 for E, 57 for B, C, D, and F, with
 // the EMB byte (color code 1) after the embedded data.
-func makeIPSCVoiceBurst(pos int, rtpSeq uint16, callControl uint32, slot bool) []byte {
+func makeIPSCVoiceBurst(pos int, rtpSeq uint16, callControl uint32) []byte {
 	sizes := [6]int{52, 57, 57, 57, 66, 57}
 	lcss := [6]enums.LCSS{0, enums.LCSSFirstFragment, enums.LCSSContinuationFragment,
 		enums.LCSSContinuationFragment, enums.LCSSLastFragment, enums.LCSSSingleFragment}
-	hdr := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, slot)
+	hdr := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false)
 	b := make([]byte, sizes[pos])
 	copy(b, hdr[:31])
 	binary.BigEndian.PutUint32(b[13:17], callControl)
 	binary.BigEndian.PutUint16(b[20:22], rtpSeq)
-	if slot {
-		b[30] = ipscBurstSlot2
-	}
 	if pos != burstA {
 		b[len(b)-1] = 0x10 | byte(lcss[pos]&0x03)<<1
 	}
@@ -1569,7 +1572,7 @@ func reverseVSeqs(t *testing.T, tr *IPSCTranslator, bursts []struct {
 	t.Helper()
 	got := make([]uint, 0, len(bursts))
 	for _, b := range bursts {
-		out := tr.TranslateToMMDVM(0x80, makeIPSCVoiceBurst(b.pos, b.seq, 0xCAFE, false))
+		out := tr.TranslateToMMDVM(0x80, makeIPSCVoiceBurst(b.pos, b.seq, 0xCAFE))
 		if len(out) != 1 {
 			t.Fatalf("burst at RTP seq %d: expected 1 packet, got %d", b.seq, len(out))
 		}
@@ -1631,5 +1634,153 @@ func TestVoiceSuperframeRoundTrip(t *testing.T) {
 		if len(back) != 1 || back[0].DTypeOrVSeq != vseq {
 			t.Fatalf("vseq %d came back as %v", vseq, back)
 		}
+	}
+}
+
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func newClockedTranslator(t *testing.T) (*IPSCTranslator, *fakeClock, *metrics.Metrics) {
+	t.Helper()
+	tr := newTestTranslator(t)
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	tr.now = clock.now
+	m := metrics.NewMetrics()
+	tr.SetMetrics(m)
+	return tr, clock, m
+}
+
+func activeStreams(t *testing.T, m *metrics.Metrics, direction string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	prefix := `translator_active_streams{direction="` + direction + `"} `
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if v, ok := strings.CutPrefix(line, prefix); ok {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			return f
+		}
+	}
+	return 0
+}
+
+func sendCSBKBothWays(tr *IPSCTranslator, id uint32) {
+	p := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
+	p.StreamID = uint(id)
+	tr.TranslateToIPSC(p)
+	d := makeTestIPSCPacket(0x83, ipscBurstCSBK, true, false)
+	binary.BigEndian.PutUint32(d[13:17], id)
+	tr.TranslateToMMDVM(0x83, d)
+}
+
+func TestIdleDataStreamsArePruned(t *testing.T) {
+	t.Parallel()
+	tr, clock, m := newClockedTranslator(t)
+	for i := uint32(1); i <= 1000; i++ {
+		sendCSBKBothWays(tr, i)
+	}
+	if len(tr.streams) != 1000 || len(tr.reverseStreams) != 1000 {
+		t.Fatalf("expected 1000 streams each way, got %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+	if activeStreams(t, m, "mmdvm_to_ipsc") != 1000 || activeStreams(t, m, "ipsc_to_mmdvm") != 1000 {
+		t.Fatal("gauge does not match stream count")
+	}
+
+	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
+	sendCSBKBothWays(tr, 5000)
+
+	if len(tr.streams) != 1 || len(tr.reverseStreams) != 1 {
+		t.Fatalf("expected only the new stream each way, got %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+	if got := activeStreams(t, m, "mmdvm_to_ipsc"); got != 1 {
+		t.Fatalf("mmdvm_to_ipsc gauge %v, want 1", got)
+	}
+	if got := activeStreams(t, m, "ipsc_to_mmdvm"); got != 1 {
+		t.Fatalf("ipsc_to_mmdvm gauge %v, want 1", got)
+	}
+}
+
+func TestActiveVoiceStreamIsNotPruned(t *testing.T) {
+	t.Parallel()
+	tr, clock, _ := newClockedTranslator(t)
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 1))
+	h := makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false)
+	tr.TranslateToMMDVM(0x80, h)
+	for i := 0; i < 200; i++ {
+		clock.t = clock.t.Add(60 * time.Millisecond)
+		sendMMDVMVoice(t, tr, 0x1234, uint(i%6))                                 //nolint:gosec // i%6 is in [0,5]
+		tr.TranslateToMMDVM(0x80, makeIPSCVoiceBurst(i%6, uint16(10+i), 0xAAAA)) //nolint:gosec // bounded
+	}
+	if len(tr.streams) != 1 || len(tr.reverseStreams) != 1 {
+		t.Fatalf("active calls were pruned: %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+}
+
+func TestLostTerminatorStreamIsPruned(t *testing.T) {
+	t.Parallel()
+	tr, clock, m := newClockedTranslator(t)
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 1))
+	sendMMDVMVoice(t, tr, 0x1234, 0)
+	tr.TranslateToMMDVM(0x80, makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false))
+
+	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
+	tr.TranslateToMMDVM(0x80, make([]byte, 10))
+
+	if len(tr.streams) != 0 || len(tr.reverseStreams) != 0 {
+		t.Fatalf("expected no streams, got %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+	if activeStreams(t, m, "mmdvm_to_ipsc") != 0 || activeStreams(t, m, "ipsc_to_mmdvm") != 0 {
+		t.Fatal("gauge not back to zero")
+	}
+}
+
+func TestCleanupStreamHandlesBothDirections(t *testing.T) {
+	t.Parallel()
+	tr, _, m := newClockedTranslator(t)
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 1))
+	out := tr.TranslateToMMDVM(0x80, makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false))
+	if len(out) != 1 {
+		t.Fatal("expected a header")
+	}
+	tr.CleanupStream(0x1234)
+	tr.CleanupStream(uint32(out[0].StreamID)) //nolint:gosec // generated IDs fit in uint32
+	tr.CleanupStream(0xDEAD)
+	if len(tr.streams) != 0 || len(tr.reverseStreams) != 0 {
+		t.Fatalf("expected no streams, got %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+	if activeStreams(t, m, "mmdvm_to_ipsc") != 0 || activeStreams(t, m, "ipsc_to_mmdvm") != 0 {
+		t.Fatal("gauge not back to zero")
+	}
+}
+
+func TestDroppedPacketsDoNotCreateStreams(t *testing.T) {
+	t.Parallel()
+	tr, _, m := newClockedTranslator(t)
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeRate1)))
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeIdle)))
+	tr.TranslateToMMDVM(0x83, makeTestIPSCPacket(0x83, 0x08, true, false))
+	tr.TranslateToMMDVM(0x80, make([]byte, 40))
+	if len(tr.streams) != 0 || len(tr.reverseStreams) != 0 {
+		t.Fatalf("expected no streams, got %d/%d", len(tr.streams), len(tr.reverseStreams))
+	}
+	if activeStreams(t, m, "mmdvm_to_ipsc") != 0 || activeStreams(t, m, "ipsc_to_mmdvm") != 0 {
+		t.Fatal("gauge not zero")
+	}
+}
+
+func TestEndFlagAfterTerminatorKeepsGaugeAccurate(t *testing.T) {
+	t.Parallel()
+	tr, _, m := newClockedTranslator(t)
+	tr.TranslateToMMDVM(0x80, makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false))
+	term := makeTestIPSCPacket(0x80, ipscBurstVoiceTerm, true, false)
+	term[17] |= 0x40
+	tr.TranslateToMMDVM(0x80, term)
+	tr.TranslateToMMDVM(0x80, term)
+	if got := activeStreams(t, m, "ipsc_to_mmdvm"); got != 0 {
+		t.Fatalf("ipsc_to_mmdvm gauge %v, want 0", got)
 	}
 }
