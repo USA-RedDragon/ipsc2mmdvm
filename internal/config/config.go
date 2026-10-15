@@ -352,7 +352,7 @@ func validateRewrites(h *MMDVM) error {
 			return ErrInvalidRewriteRange
 		}
 		if r.ToTG < 1 {
-			return ErrInvalidRewriteTG
+			return fmt.Errorf("%w; src-rewrite: to-id was renamed to to-tg", ErrInvalidRewriteTG)
 		}
 	}
 	return nil

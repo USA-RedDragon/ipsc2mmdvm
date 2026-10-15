@@ -390,8 +390,12 @@ func TestValidateSrcRewriteRequiresTG(t *testing.T) {
 	t.Parallel()
 	c := validConfig()
 	c.MMDVM[0].SrcRewrites = []SrcRewriteConfig{{FromSlot: 1, FromID: 1234, ToSlot: 2, ToTG: 0, Range: 1}}
-	if err := c.Validate(); !errors.Is(err, ErrInvalidRewriteTG) {
+	err := c.Validate()
+	if !errors.Is(err, ErrInvalidRewriteTG) {
 		t.Fatalf("expected %v, got %v", ErrInvalidRewriteTG, err)
+	}
+	if !strings.Contains(err.Error(), "src-rewrite: to-id was renamed to to-tg") {
+		t.Fatalf("error %q does not name the to-id rename", err)
 	}
 	c.MMDVM[0].SrcRewrites[0].ToTG = 9
 	if err := c.Validate(); err != nil {
