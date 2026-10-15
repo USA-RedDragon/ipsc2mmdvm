@@ -847,8 +847,11 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 	encoded := pkt.Encode()
 	client.connRX <- encoded
 
-	// Wait for handler to process
-	time.Sleep(100 * time.Millisecond)
+	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(receivedPackets) >= 3
+	})
 
 	mu.Lock()
 	count := len(receivedPackets)
