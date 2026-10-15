@@ -984,26 +984,22 @@ func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 	return (rss.anchorPos + int(delta%6)) % 6, true
 }
 
-// populateEmbeddedSignalling fills in the embedded signalling fields
-// for voice bursts B-F from the IPSC packet's trailing data.
+// populateEmbeddedSignalling fills in the embedded signalling of voice
+// bursts B-F from an IPSC voice burst. MOTOTRBO repeaters put the 32-bit
+// embedded fragment in bytes 52-55 and the EMB in the last byte: byte 56 of
+// the 57-byte bursts, byte 65 of the 66-byte burst E, whose bytes 56-64
+// repeat the decoded LC. The color code and PI come from the EMB. The LCSS
+// follows the burst position, as every voice superframe uses the same
+// LCSS at each position, and on a weak signal the repeater's LCSS is wrong.
 func (t *IPSCTranslator) populateEmbeddedSignalling(raw *layer2.RawBurst, burstIdx int, ipscData []byte) {
 	emb := pdu.EmbeddedSignalling{
 		LCSS: defaultLCSS(burstIdx),
 	}
-
-	// The EMB byte follows the embedded data: offset 56 in the 57-byte
-	// bursts B, C, D, and F, offset 65 in the 66-byte burst E.
 	if len(ipscData) == 57 || len(ipscData) == 66 {
-		emb = pdu.EMBInfo(ipscData[len(ipscData)-1]).EmbeddedSignalling()
+		info := pdu.EMBInfo(ipscData[len(ipscData)-1])
+		emb.ColorCode = info.ColorCode()
+		emb.PreemptionAndPowerControlIndicator = info.PI()
+		raw.SetEmbeddedData([4]byte(ipscData[52:56]))
 	}
 	raw.SetEMB(emb)
-
-	// Copy the embedded data from bytes 52-55 if present: bursts B, C, D,
-	// and F are 57 bytes and burst E is 66 bytes
-	switch len(ipscData) {
-	case 57, 66:
-		raw.SetEmbeddedData([4]byte(ipscData[52:56]))
-	default:
-		// No embedded data available
-	}
 }

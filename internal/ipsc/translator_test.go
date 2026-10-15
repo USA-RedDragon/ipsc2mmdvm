@@ -988,7 +988,7 @@ func TestPopulateEmbeddedSignallingBurstB(t *testing.T) {
 
 	var raw layer2.RawBurst
 
-	// Burst B with 57-byte packet (5 bytes embedded data at [52:57])
+	// Burst B with 57-byte packet: fragment at [52:56], EMB at 56
 	ipscData := make([]byte, 57)
 	ipscData[52] = 0xAB
 	ipscData[53] = 0xCD
@@ -1018,12 +1018,13 @@ func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
 
 	var raw layer2.RawBurst
 
-	// Burst E with 66-byte packet (7 bytes embedded data at [52:59])
+	// Burst E with 66-byte packet: fragment at [52:56], LC at [56:65], EMB at 65
 	ipscData := make([]byte, 66)
 	ipscData[52] = 0x11
 	ipscData[53] = 0x22
 	ipscData[54] = 0x33
 	ipscData[55] = 0x44
+	ipscData[56] = 0x55
 	ipscData[65] = 0x14 // CC 1, last fragment
 
 	tr.populateEmbeddedSignalling(&raw, 4, ipscData)

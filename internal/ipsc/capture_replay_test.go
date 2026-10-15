@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
@@ -205,5 +206,35 @@ func TestIPSCVoiceBurstEndBitKeepsStream(t *testing.T) {
 	tr.TranslateToMMDVM(0x83, data)
 	if _, ok := tr.reverseStreams[0xD00D]; ok {
 		t.Fatal("a data packet with the end bit did not end its stream")
+	}
+}
+
+// In MOTOTRBO captures the embedded LC fragment of bursts B-E is bytes
+// 52-55 and the EMB is the last byte: on the clean private call in
+// ipsc2hbpc's tests/pvt_ipsc_in.txt the four fragments decode to the LC
+// that burst E repeats in bytes 56-64. On a weak signal the repeater sends
+// LCSS values that do not match the position (captureSyncLost line 5 is
+// burst D with a first-fragment LCSS), so the LCSS follows the position.
+func TestIPSCEmbeddedSignallingFromCapture(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	for i, h := range captureSyncLost() {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+		out := tr.TranslateToMMDVM(data[0], data)
+		if len(out) != 1 || out[0].FrameType != mmdvmFrameTypeVoice {
+			continue
+		}
+		pos := int(out[0].DTypeOrVSeq) //nolint:gosec // a voice sequence is 1-5
+		raw := layer2.RawBurst(out[0].DMRData)
+		emb := raw.EMB()
+		if got := emb.LCSS; got != defaultLCSS(pos) {
+			t.Errorf("packet %d burst %c: LCSS %d, want %d", i, 'A'+pos, got, defaultLCSS(pos))
+		}
+		if got := raw.EmbeddedData(); string(got[:]) != string(data[52:56]) {
+			t.Errorf("packet %d burst %c: fragment % X, want % X", i, 'A'+pos, got, data[52:56])
+		}
 	}
 }
