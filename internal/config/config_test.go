@@ -333,7 +333,7 @@ func TestValidateFieldLimits(t *testing.T) {
 		wantErr error
 	}{
 		{"callsign 8 chars", func(c *Config) { c.MMDVM[0].Callsign = "AB1CDEFG" }, nil},
-		{"callsign 9 chars", func(c *Config) { c.MMDVM[0].Callsign = "AB1CDEFGH" }, ErrInvalidMMDVMCallsign},
+		{"callsign 9 chars", func(c *Config) { c.MMDVM[0].Callsign = "AB1CDEFGH" }, nil},
 		{"radio id zero", func(c *Config) { c.MMDVM[0].ID = 0 }, ErrInvalidMMDVMRadioID},
 		{"radio id 9 digits", func(c *Config) { c.MMDVM[0].ID = 999999999 }, nil},
 		{"radio id 10 digits", func(c *Config) { c.MMDVM[0].ID = 1000000000 }, ErrInvalidMMDVMRadioID},
@@ -345,11 +345,11 @@ func TestValidateFieldLimits(t *testing.T) {
 		{"height 999", func(c *Config) { c.MMDVM[0].Height = 999 }, nil},
 		{"height 1000", func(c *Config) { c.MMDVM[0].Height = 1000 }, ErrInvalidMMDVMHeight},
 		{"location 20", func(c *Config) { c.MMDVM[0].Location = strings.Repeat("a", 20) }, nil},
-		{"location 21", func(c *Config) { c.MMDVM[0].Location = strings.Repeat("a", 21) }, ErrInvalidMMDVMLocation},
+		{"location 21", func(c *Config) { c.MMDVM[0].Location = "Springfield, Illinois, USA" }, nil},
 		{"description 19", func(c *Config) { c.MMDVM[0].Description = strings.Repeat("a", 19) }, nil},
-		{"description 20", func(c *Config) { c.MMDVM[0].Description = strings.Repeat("a", 20) }, ErrInvalidMMDVMDescription},
+		{"description 20", func(c *Config) { c.MMDVM[0].Description = strings.Repeat("a", 20) }, nil},
 		{"url 124", func(c *Config) { c.MMDVM[0].URL = strings.Repeat("a", 124) }, nil},
-		{"url 125", func(c *Config) { c.MMDVM[0].URL = strings.Repeat("a", 125) }, ErrInvalidMMDVMURL},
+		{"url 125", func(c *Config) { c.MMDVM[0].URL = strings.Repeat("a", 125) }, nil},
 		{"slots 4", func(c *Config) { c.MMDVM[0].Slots = 4 }, nil},
 		{"slots 5", func(c *Config) { c.MMDVM[0].Slots = 5 }, ErrInvalidMMDVMSlots},
 		{"latitude NaN", func(c *Config) { c.MMDVM[0].Latitude = math.NaN() }, ErrInvalidMMDVMLatitude},

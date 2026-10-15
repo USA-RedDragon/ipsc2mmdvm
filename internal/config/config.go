@@ -141,9 +141,6 @@ var (
 	ErrInvalidMMDVMFrequency    = errors.New("invalid MMDVM frequency provided (must be at most 9 digits)")
 	ErrInvalidMMDVMTXPower      = errors.New("invalid MMDVM tx power provided (must be 0-99)")
 	ErrInvalidMMDVMHeight       = errors.New("invalid MMDVM height provided (must be 0-999)")
-	ErrInvalidMMDVMLocation     = errors.New("invalid MMDVM location provided (must be at most 20 characters)")
-	ErrInvalidMMDVMDescription  = errors.New("invalid MMDVM description provided (must be at most 19 characters)")
-	ErrInvalidMMDVMURL          = errors.New("invalid MMDVM URL provided (must be at most 124 characters)")
 	ErrInvalidMMDVMSlots        = errors.New("invalid MMDVM slots provided (must be 0-4)")
 	ErrInvalidPassAllSlot       = errors.New("invalid pass-all slot (must be 1 or 2)")
 	ErrInvalidRewriteSlot       = errors.New("invalid rewrite slot (must be 1 or 2)")
@@ -157,20 +154,17 @@ var (
 	ErrInvalidMetricsAddress    = errors.New("invalid metrics address provided")
 )
 
-// Field limits of the RPTC configuration message, from the format string in
-// DMRGateway's CDMRGateway::getConfig:
+// Numeric field limits of the RPTC configuration message, from the format
+// string in DMRGateway's CDMRGateway::getConfig. Longer string fields are
+// truncated when the message is built, as DMRGateway does:
 // "%-8.8s%09u%09u%02u%02u%8.8s%9.9s%03d%-20.20s%-19.19s%c%-124.124s...".
 const (
-	maxCallsignLen    = 8
-	maxFrequency      = 999999999
-	maxTXPower        = 99
-	maxHeight         = 999
-	maxLocationLen    = 20
-	maxDescriptionLen = 19
-	maxURLLen         = 124
-	maxSlots          = 4
-	latitudeWidth     = 8
-	longitudeWidth    = 9
+	maxFrequency   = 999999999
+	maxTXPower     = 99
+	maxHeight      = 999
+	maxSlots       = 4
+	latitudeWidth  = 8
+	longitudeWidth = 9
 	// maxRadioID allows 9-digit IDs, such as a 7-digit DMR ID with a
 	// 2-digit hotspot suffix.
 	maxRadioID = 999999999
@@ -261,7 +255,7 @@ func validIPv4Unicast(s string) bool {
 }
 
 func validateMMDVM(h *MMDVM) error {
-	if h.Callsign == "" || len(h.Callsign) > maxCallsignLen {
+	if h.Callsign == "" {
 		return ErrInvalidMMDVMCallsign
 	}
 
@@ -293,18 +287,6 @@ func validateMMDVM(h *MMDVM) error {
 
 	if h.Height > maxHeight {
 		return ErrInvalidMMDVMHeight
-	}
-
-	if len(h.Location) > maxLocationLen {
-		return ErrInvalidMMDVMLocation
-	}
-
-	if len(h.Description) > maxDescriptionLen {
-		return ErrInvalidMMDVMDescription
-	}
-
-	if len(h.URL) > maxURLLen {
-		return ErrInvalidMMDVMURL
 	}
 
 	if h.Slots > maxSlots {
