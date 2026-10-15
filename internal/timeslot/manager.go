@@ -52,6 +52,7 @@ const (
 	dropPendingFull = "pending_full"
 	dropQueueFull   = "queue_full"
 	dropExpired     = "expired"
+	dropAfterEnd    = "after_end"
 )
 
 // Sink delivers one buffered packet on behalf of the source that
@@ -301,7 +302,11 @@ func (m *Manager) sweepLocked(slot bool, ss *slotState, now time.Time) {
 }
 
 func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) Verdict {
-	if len(s.queue) >= MaxQueuedPackets && (!end || s.ended) {
+	if s.ended {
+		m.dropLocked(slot, dropAfterEnd, 1)
+		return Dropped
+	}
+	if len(s.queue) >= MaxQueuedPackets && !end {
 		m.dropLocked(slot, dropQueueFull, 1)
 		return Dropped
 	}

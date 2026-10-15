@@ -365,6 +365,20 @@ func TestQueuedPacketsPerCallAreCapped(t *testing.T) {
 	expectDropped(t, met, "queue_full", "5")
 }
 
+func TestPacketsAfterQueuedTerminatorAreDropped(t *testing.T) {
+	m, met := newMeteredManager(t)
+	submit(m, false, 1, "A", "A-hdr", &recorder{})
+	b := &recorder{}
+	submit(m, false, 2, "B", "B-hdr", b)
+	submitEnd(m, 2, "B", "B-end", b)
+	if v := m.Submit(false, 2, "B", "B-late", false, b.sink); v != Dropped {
+		t.Fatalf("packet after a queued terminator got verdict %v, want Dropped", v)
+	}
+	m.Release(false, 1)
+	b.waitPackets(t, "B-hdr", "B-end")
+	expectDropped(t, met, "after_end", "1")
+}
+
 func TestIdlePendingCallExpires(t *testing.T) {
 	m, met := newMeteredManager(t)
 	m.timeout = 50 * time.Millisecond
