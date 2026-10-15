@@ -20,6 +20,7 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
 
 // Test protocol tag constants to avoid goconst warnings.
@@ -2208,5 +2209,41 @@ func TestHandshakeResendEverySecondInterval(t *testing.T) {
 	client.tick(start.Add(4 * time.Second))
 	if n := len(client.connTX); n != 2 {
 		t.Fatalf("expected a second resend, got %d queued", n)
+	}
+}
+
+func TestStopStopsInboundTimeslotManager(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.setState(STATE_READY)
+	mgr := timeslot.NewManager()
+	client.inboundTSMgr = mgr
+	pkt := func(stream uint) proto.Packet {
+		return proto.Packet{Signature: tagDMRD, StreamID: stream, GroupCall: true}
+	}
+
+	if v := mgr.Submit(false, 1, "ipsc", pkt(1), false, client.forwardInbound); v != timeslot.Deliver {
+		t.Fatalf("expected Deliver, got %v", v)
+	}
+	if v := mgr.Submit(false, 2, "ipsc", pkt(2), false, client.forwardInbound); v != timeslot.Queued {
+		t.Fatalf("expected Queued, got %v", v)
+	}
+	for len(client.tx_chan) < cap(client.tx_chan) {
+		client.tx_chan <- pkt(9)
+	}
+	mgr.Release(false, 1)
+
+	stopped := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung with an inbound replay blocked on tx_chan")
+	}
+	if v := mgr.Submit(false, 3, "ipsc", pkt(3), false, client.forwardInbound); v != timeslot.Dropped {
+		t.Fatalf("expected the inbound manager to be stopped, Submit returned %v", v)
 	}
 }

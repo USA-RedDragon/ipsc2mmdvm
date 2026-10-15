@@ -664,6 +664,12 @@ func (h *MMDVMClient) Stop() {
 		// Signal all goroutines to stop.
 		close(h.done)
 
+		// Must follow close(done): Manager.Stop waits for replays, and
+		// a replay blocked in sendInbound only returns once done closes.
+		if h.inboundTSMgr != nil {
+			h.inboundTSMgr.Stop()
+		}
+
 		// Send the disconnect message directly on the wire (best-effort).
 		h.connMu.Lock()
 		if h.conn != nil {
