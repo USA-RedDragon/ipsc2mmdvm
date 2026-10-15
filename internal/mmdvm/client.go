@@ -34,7 +34,8 @@ type MMDVMClient struct {
 	connTX       chan []byte
 	keepAlive    time.Duration
 	timeout      time.Duration
-	lastPing     atomic.Int64 // UnixNano — last MSTPONG received
+	lastHeard    atomic.Int64 // UnixNano — last packet read from the master
+	rxWaiting    atomic.Bool  // rx holds a packet the handler has not taken yet
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
 	ipscHandler  atomic.Pointer[func(data []byte)]
 	translator   *ipsc.IPSCTranslator
@@ -356,7 +357,7 @@ func (h *MMDVMClient) handleSentAuth(data []byte) {
 func (h *MMDVMClient) handleSentRPTC(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
 		slog.Info("Config accepted, logged in", "network", h.cfg.Name)
-		h.lastPing.Store(time.Now().UnixNano())
+		h.lastHeard.Store(time.Now().UnixNano())
 		h.setState(STATE_READY)
 		if h.metrics != nil {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
@@ -370,17 +371,6 @@ func (h *MMDVMClient) handleSentRPTC(data []byte) {
 
 func (h *MMDVMClient) handleReady(data []byte) {
 	switch string(data[:4]) {
-	case "MSTP":
-		if len(data) >= 7 && string(data[:7]) == "MSTPONG" {
-			now := time.Now()
-			if h.metrics != nil {
-				sent := time.Unix(0, h.lastPingSent.Load())
-				if !sent.IsZero() {
-					h.metrics.MMDVMPingRTT.WithLabelValues(h.cfg.Name).Observe(now.Sub(sent).Seconds())
-				}
-			}
-			h.lastPing.Store(now.UnixNano())
-		}
 	case "MSTN":
 		if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
 			h.relogin()
@@ -450,7 +440,7 @@ func (h *MMDVMClient) tick(now time.Time) {
 	defer h.sessMu.Unlock()
 	switch st := h.currentState(); st {
 	case STATE_READY:
-		if now.Sub(time.Unix(0, h.lastPing.Load())) > h.timeout {
+		if !h.rxWaiting.Load() && now.Sub(time.Unix(0, h.lastHeard.Load())) > h.timeout {
 			slog.Info("Connection timed out", "network", h.cfg.Name)
 			h.reconnect()
 			return
@@ -570,7 +560,9 @@ func (h *MMDVMClient) tx() {
 	}
 }
 
-// rx reads from one connection until it is closed.
+// rx reads from one connection until it is closed. It records when the
+// master was last heard from and handles MSTPONG itself, so keepalive does
+// not depend on the handler goroutine.
 func (h *MMDVMClient) rx(conn net.Conn) {
 	defer h.wg.Done()
 	for {
@@ -588,11 +580,46 @@ func (h *MMDVMClient) rx(conn net.Conn) {
 			slog.Error("Error reading from MMDVM server", "network", h.cfg.Name, "error", err)
 			continue
 		}
-		select {
-		case h.connRX <- data[:n]:
-		case <-h.done:
+		h.lastHeard.Store(time.Now().UnixNano())
+		if n >= 7 && string(data[:7]) == "MSTPONG" {
+			h.handlePong()
+			continue
+		}
+		if !h.deliver(data[:n]) {
 			return
 		}
+	}
+}
+
+// deliver hands a packet to the handler. While it waits, rxWaiting tells
+// supervise that the master is still talking to us: the handler is busy
+// (for example replaying a buffered call), and MSTPONGs queued behind this
+// packet are not lost. Returns false when the client stops.
+func (h *MMDVMClient) deliver(data []byte) bool {
+	select {
+	case h.connRX <- data:
+		return true
+	default:
+	}
+	h.rxWaiting.Store(true)
+	defer func() {
+		h.lastHeard.Store(time.Now().UnixNano())
+		h.rxWaiting.Store(false)
+	}()
+	select {
+	case h.connRX <- data:
+		return true
+	case <-h.done:
+		return false
+	}
+}
+
+func (h *MMDVMClient) handlePong() {
+	if h.metrics == nil {
+		return
+	}
+	if sent := h.lastPingSent.Load(); sent != 0 {
+		h.metrics.MMDVMPingRTT.WithLabelValues(h.cfg.Name).Observe(time.Since(time.Unix(0, sent)).Seconds())
 	}
 }
 

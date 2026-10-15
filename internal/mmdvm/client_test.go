@@ -769,27 +769,28 @@ func TestHandlerMSTCLReconnects(t *testing.T) {
 	}
 }
 
-func TestHandlerReadyRPTPONG(t *testing.T) {
+func TestRxHandlesPongWithoutHandler(t *testing.T) {
 	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
-
+	serverConn, client := udpPair(t)
+	client.metrics = metrics.NewMetrics()
+	client.lastPingSent.Store(time.Now().UnixNano())
 	client.wg.Add(1)
-	go client.handler()
+	go client.rx(client.conn)
 
+	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	_, clientAddr := readFromServer(t, serverConn, time.Second)
 	before := time.Now().UnixNano()
-	client.connRX <- []byte("MSTPONG_________")
-
-	// Give handler time
-	time.Sleep(50 * time.Millisecond)
-
-	lastPing := client.lastPing.Load()
-	if lastPing < before {
-		t.Fatal("expected lastPing to be updated after MSTPONG")
+	if _, err := serverConn.WriteToUDP([]byte("MSTPONG\x00\x04\xC2\x34"), clientAddr); err != nil {
+		t.Fatalf("server write: %v", err)
 	}
 
-	close(client.done)
-	client.wg.Wait()
+	waitFor(t, time.Second, "lastHeard update", func() bool { return client.lastHeard.Load() >= before })
+	if len(client.connRX) != 0 {
+		t.Fatal("expected MSTPONG to be handled in rx, not queued for the handler")
+	}
+	client.Stop()
 }
 
 func TestHandlerReadyRPTSBKN(t *testing.T) {
@@ -960,7 +961,7 @@ func TestTickSendsPingWhenReady(t *testing.T) {
 	client := newTestClient(t)
 	client.timeout = 5 * time.Second
 	client.setState(STATE_READY)
-	client.lastPing.Store(time.Now().UnixNano())
+	client.lastHeard.Store(time.Now().UnixNano())
 
 	client.tick(time.Now())
 	data := <-client.connTX
@@ -1007,7 +1008,7 @@ func TestTickReconnectsOnPingTimeout(t *testing.T) {
 	defer serverConn.Close()
 	client.timeout = 10 * time.Millisecond
 	client.setState(STATE_READY)
-	client.lastPing.Store(time.Now().Add(-time.Minute).UnixNano())
+	client.lastHeard.Store(time.Now().Add(-time.Minute).UnixNano())
 	oldConn := client.conn
 
 	client.tick(time.Now())
@@ -1415,9 +1416,8 @@ func TestStartAndFullHandshake(t *testing.T) {
 	// Give handler time to process
 	time.Sleep(100 * time.Millisecond)
 
-	lastPing := client.lastPing.Load()
-	if lastPing == 0 {
-		t.Fatal("expected lastPing to be set after MSTPONG")
+	if client.lastHeard.Load() == 0 {
+		t.Fatal("expected lastHeard to be set after MSTPONG")
 	}
 
 	client.Stop()
@@ -2058,4 +2058,66 @@ func TestDialTimesOut(t *testing.T) {
 	}
 	t.Cleanup(c.Stop)
 	waitFor(t, 2*time.Second, "READY after a hung dial", isReady(c))
+}
+
+func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
+	t.Parallel()
+	for _, packets := range []int{1, 64} {
+		t.Run(fmt.Sprintf("%d packets", packets), func(t *testing.T) {
+			t.Parallel()
+			m := newFakeMaster(t)
+			cfg := testMMDVMConfig()
+			cfg.MasterServer = m.addr()
+			cfg.PassAllTG = []int{1, 2}
+			c := NewMMDVMClient(cfg, nil)
+			c.keepAlive = 20 * time.Millisecond
+			c.timeout = 200 * time.Millisecond
+			release := make(chan struct{})
+			blocked := make(chan struct{})
+			var once sync.Once
+			c.SetIPSCHandler(func([]byte) {
+				once.Do(func() { close(blocked) })
+				<-release
+			})
+			if err := c.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(c.Stop)
+			t.Cleanup(func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			})
+			waitFor(t, 2*time.Second, "READY", isReady(c))
+			c.connMu.Lock()
+			conn := c.conn
+			c.connMu.Unlock()
+			reconnected := func() bool {
+				c.connMu.Lock()
+				defer c.connMu.Unlock()
+				return c.conn != conn || c.currentState() != STATE_READY
+			}
+
+			for i := range packets {
+				pkt := proto.Packet{Signature: tagDMRD, Dst: 91, GroupCall: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 9, Seq: uint(i)}
+				m.send(t, pkt.Encode())
+			}
+			<-blocked
+			busyUntil := time.Now().Add(4 * c.timeout)
+			for time.Now().Before(busyUntil) {
+				if reconnected() {
+					t.Fatalf("reconnected while the handler was busy (state %d)", c.currentState())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			close(release)
+			waitFor(t, time.Second, "handler to drain", func() bool { return len(c.connRX) == 0 && !c.rxWaiting.Load() })
+			time.Sleep(2 * c.keepAlive)
+			if reconnected() {
+				t.Fatalf("reconnected after the handler drained (state %d)", c.currentState())
+			}
+		})
+	}
 }
