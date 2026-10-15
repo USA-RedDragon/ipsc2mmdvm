@@ -91,6 +91,10 @@ const (
 	ipscMinVoicePktLen   = 52 // through the 19-byte AMBE payload at 33-51
 )
 
+// ipscVoiceCtrlSync is the flag in byte 32 of an IPSC voice burst that marks
+// a burst carrying voice sync, which is burst A.
+const ipscVoiceCtrlSync = 0x40
+
 // RTP timestamp increment per burst (~60ms spacing in 16.16 format)
 const rtpTimestampIncrement = 480
 
@@ -671,13 +675,15 @@ func fullLCFromBurst(pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
 
 // reverseStreamState tracks per-call state for IPSC→MMDVM translation.
 type reverseStreamState struct {
-	streamID   uint32
-	seq        uint8
-	lastPos    int    // superframe position of the last voice burst
-	lastRTPSeq uint16 // RTP sequence number of the last voice burst
-	hasLast    bool
-	started    bool // whether we've seen a voice header
-	lastSeen   time.Time
+	streamID     uint32
+	seq          uint8
+	anchorPos    int    // superframe position of the last burst A or E
+	anchorRTPSeq uint16 // RTP sequence number of that burst
+	hasAnchor    bool
+	lastRTPSeq   uint16 // RTP sequence number of the last voice burst
+	hasLast      bool
+	started      bool // whether we've seen a voice header
+	lastSeen     time.Time
 }
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
@@ -866,9 +872,6 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 		slog.Debug("IPSCTranslator: cannot place voice burst in superframe", "length", len(ipscData))
 		return nil
 	}
-	rss.lastPos = burstIdx
-	rss.lastRTPSeq = binary.BigEndian.Uint16(ipscData[20:22])
-	rss.hasLast = true
 
 	burst := layer2.Burst{Kind: layer2.KindVoice}
 	burst.SetAMBEFrames(frames)
@@ -936,43 +939,39 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 }
 
 // ipscVoiceBurstPosition returns the superframe position (0-5 for A-F) of an
-// IPSC voice burst. Burst A is 52 bytes and burst E is 66 bytes. Bursts B, C,
-// D, and F are 57 bytes and are told apart by the LCSS in the EMB byte at
-// offset 56: B starts the embedded LC, F is a single fragment, and C and D
-// are both continuations. C and D are resolved from the RTP sequence distance
-// to the previous burst, so a lost packet does not shift later positions.
+// IPSC voice burst. Only bursts A and E can be told from the packet alone:
+// A is 52 bytes or carries the voice sync flag, and E is 66 bytes when the
+// repeater reassembled the embedded LC. The repeater numbers every burst in
+// the RTP sequence, including the ones it lost, so every other burst is
+// placed by its RTP sequence distance to the last A or E. The LCSS in the
+// EMB byte is not used: on a weak signal the repeater sends it wrong. A
+// burst that comes before any A or E cannot be placed and is dropped, so a
+// late entry starts at the next A or E. A repeated burst is dropped.
 func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
-	expected := -1
-	if rss.hasLast {
-		delta := binary.BigEndian.Uint16(data[20:22]) - rss.lastRTPSeq
-		if delta > 0 && delta < 6 {
-			expected = (rss.lastPos + int(delta)) % 6
-		}
+	seq := binary.BigEndian.Uint16(data[20:22])
+	if rss.hasLast && seq == rss.lastRTPSeq {
+		return 0, false
 	}
-
-	switch len(data) {
-	case 52:
-		return burstA, true
-	case 66:
-		return burstE, true
-	case 57:
-		switch pdu.EMBInfo(data[56]).LCSS() {
-		case enums.LCSSFirstFragment:
-			return burstB, true
-		case enums.LCSSSingleFragment:
-			return burstF, true
-		case enums.LCSSContinuationFragment:
-			if expected == burstC || expected == burstD {
-				return expected, true
-			}
-			if rss.hasLast && rss.lastPos == burstC {
-				return burstD, true
-			}
-			return burstC, true
-		case enums.LCSSLastFragment:
-		}
+	rss.lastRTPSeq, rss.hasLast = seq, true
+	anchor := -1
+	switch {
+	case len(data) == 52 || data[32]&ipscVoiceCtrlSync != 0:
+		anchor = burstA
+	case len(data) == 66:
+		anchor = burstE
 	}
-	return expected, expected >= 0
+	if anchor >= 0 {
+		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = anchor, seq, true
+		return anchor, true
+	}
+	if !rss.hasAnchor {
+		return 0, false
+	}
+	delta := seq - rss.anchorRTPSeq
+	if delta == 0 || delta >= 0x8000 {
+		return 0, false
+	}
+	return (rss.anchorPos + int(delta%6)) % 6, true
 }
 
 // populateEmbeddedSignalling fills in the embedded signalling fields

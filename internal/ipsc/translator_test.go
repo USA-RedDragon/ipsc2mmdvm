@@ -1565,6 +1565,9 @@ func TestTranslateToIPSCRejectsInvalidVoiceSequence(t *testing.T) {
 	}
 }
 
+// droppedBurst stands for a burst reverseVSeqs got no packet for.
+const droppedBurst = 9
+
 func reverseVSeqs(t *testing.T, tr *IPSCTranslator, bursts []struct {
 	pos int
 	seq uint16
@@ -1574,6 +1577,10 @@ func reverseVSeqs(t *testing.T, tr *IPSCTranslator, bursts []struct {
 	got := make([]uint, 0, len(bursts))
 	for _, b := range bursts {
 		out := tr.TranslateToMMDVM(0x80, makeIPSCVoiceBurst(b.pos, b.seq, 0xCAFE))
+		if len(out) == 0 {
+			got = append(got, droppedBurst)
+			continue
+		}
 		if len(out) != 1 {
 			t.Fatalf("burst at RTP seq %d: expected 1 packet, got %d", b.seq, len(out))
 		}
@@ -1606,7 +1613,10 @@ func TestTranslateToMMDVMBurstPositionFromPacket(t *testing.T) {
 		{"lost C", true, []burst{{0, 10}, {1, 11}, {3, 13}, {4, 14}}, []uint{0, 1, 3, 4}},
 		{"lost A", true, []burst{{4, 14}, {5, 15}, {1, 17}, {2, 18}}, []uint{4, 5, 1, 2}},
 		{"late entry at E", false, []burst{{4, 14}, {5, 15}, {0, 16}, {1, 17}}, []uint{4, 5, 0, 1}},
-		{"late entry at D", false, []burst{{3, 13}, {4, 14}, {5, 15}}, []uint{2, 4, 5}},
+		{"late entry at D", false, []burst{{3, 13}, {4, 14}, {5, 15}}, []uint{droppedBurst, 4, 5}},
+		{"late entry at B", false, []burst{{1, 11}, {2, 12}, {3, 13}, {0, 16}, {1, 17}}, []uint{droppedBurst, droppedBurst, droppedBurst, 0, 1}},
+		{"wrong LCSS", true, []burst{{0, 10}, {1, 11}, {2, 12}, {1, 13}, {2, 14}, {3, 15}, {0, 16}}, []uint{0, 1, 2, 3, 4, 5, 0}},
+		{"duplicate and reordered", true, []burst{{0, 10}, {1, 11}, {1, 11}, {3, 13}, {2, 12}, {4, 14}}, []uint{0, 1, droppedBurst, 3, 2, 4}},
 	}
 	for _, tc := range cases {
 		tr := newTestTranslator(t)
