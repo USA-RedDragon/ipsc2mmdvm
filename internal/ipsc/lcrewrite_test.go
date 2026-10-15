@@ -116,7 +116,7 @@ func voicePacket(vseq uint, lcss enums.LCSS) mmdvm.Packet {
 
 func decodedLC(t *testing.T, pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
 	t.Helper()
-	lc, ok := decodeBPTCPayload(pkt.DMRData)
+	lc, ok := decodeBPTCPayload(pkt.DMRData, dataType)
 	if !ok || !layer2.MMDVMHostAccepts(dataType, lc) {
 		t.Fatalf("%s: invalid full LC % X", dataType.String(), lc)
 	}
@@ -430,7 +430,7 @@ func rewriteBlock(t *testing.T, dataType enums.DataType, in [12]byte, src, dst u
 	pkt := orig
 	pkt.Dst, pkt.GroupCall = 9, true
 	r.Rewrite(orig, &pkt)
-	got, _ := decodeBPTCPayload(pkt.DMRData)
+	got, _ := decodeBPTCPayload(pkt.DMRData, dataType)
 	if !sameBits(orig.DMRData, pkt.DMRData, 98, 166) {
 		t.Fatalf("%s: slot type or sync changed", dataType.String())
 	}

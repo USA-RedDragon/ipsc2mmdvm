@@ -204,7 +204,7 @@ func (r *LCRewriter) pruneLocked(now time.Time) {
 // (Rewrite.cpp lines 189-206 and 213-230). Blocks that fail their CRC, or
 // that edit refuses, are left alone.
 func rewriteDataBlock(pkt *mmdvm.Packet, dataType enums.DataType, edit func(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool)) {
-	b, ok := decodeBPTCPayload(pkt.DMRData)
+	b, ok := decodeBPTCPayload(pkt.DMRData, dataType)
 	if !ok || !pdu.BlockCRCOK(b, dataType) {
 		return
 	}
@@ -251,8 +251,7 @@ func rewriteDataHeader(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 // it is. A call type change clears the reserved bit, as DMRGateway does.
 func rewrittenLC(pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
 	var lc pdu.LCBytes
-	payload, ok := decodeBPTCPayload(pkt.DMRData)
-	if ok && layer2.MMDVMHostAccepts(dataType, payload) {
+	if payload, ok := decodeBPTCPayload(pkt.DMRData, dataType); ok {
 		lc = pdu.LCBytes(payload[:9])
 	} else {
 		slog.Debug("invalid full LC in burst, constructing from packet fields",

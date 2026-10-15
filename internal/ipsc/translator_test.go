@@ -104,7 +104,17 @@ func TestCleanupStream(t *testing.T) {
 	}
 }
 
+// makeTestMMDVMPacket builds a packet with an all-zero burst, except that a
+// CRC-checked data type gets a zero payload with a valid CRC.
 func makeTestMMDVMPacket(groupCall, slot bool, frameType, dtypeOrVSeq uint) mmdvm.Packet {
+	var data [33]byte
+	if crcChecked(enums.DataType(dtypeOrVSeq)) && frameType == mmdvmFrameTypeDataSync { //nolint:gosec // test data types are small
+		burst, err := layer2.BuildDataBurst(withCRC([12]byte{}, enums.DataType(dtypeOrVSeq)), enums.DataType(dtypeOrVSeq), 0, layer2.SyncSourceBS) //nolint:gosec // test data types are small
+		if err != nil {
+			panic(err)
+		}
+		data = burst
+	}
 	return mmdvm.Packet{
 		Signature:   mmdvm.DMRDSignature,
 		Seq:         0,
@@ -116,7 +126,7 @@ func makeTestMMDVMPacket(groupCall, slot bool, frameType, dtypeOrVSeq uint) mmdv
 		FrameType:   frameType,
 		DTypeOrVSeq: dtypeOrVSeq,
 		StreamID:    0x1234,
-		DMRData:     [33]byte{},
+		DMRData:     data,
 	}
 }
 
@@ -1325,7 +1335,7 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 		if len(back) != 1 {
 			t.Fatalf("%s: expected 1 packet back, got %d", dt.String(), len(back))
 		}
-		got, ok := decodeBPTCPayload(back[0].DMRData)
+		got, ok := decodeBPTCPayload(back[0].DMRData, dt)
 		if !ok || got != payload {
 			t.Fatalf("%s: round trip payload % X (ok=%t), want % X", dt.String(), got, ok, payload)
 		}
@@ -1478,14 +1488,14 @@ func TestTranslateToMMDVMVoicePassesThroughFullLC(t *testing.T) {
 		if len(out) != 1 {
 			t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
 		}
-		got, ok := decodeBPTCPayload(out[0].DMRData)
+		got, ok := decodeBPTCPayload(out[0].DMRData, dt)
 		if !ok || got != lc {
 			t.Fatalf("%s: MMDVM LC % X, want % X", dt.String(), got, lc)
 		}
 
 		bad := makeTestIPSCPacket(0x80, burstType, true, false)
 		out = newTestTranslator(t).TranslateToMMDVM(0x80, bad)
-		got, _ = decodeBPTCPayload(out[0].DMRData)
+		got, _ = decodeBPTCPayload(out[0].DMRData, dt)
 		if want := constructFullLC(100, 200, true, dt); got != want {
 			t.Fatalf("%s: fallback LC % X, want % X", dt.String(), got, want)
 		}
@@ -1876,7 +1886,7 @@ func TestDecodeBPTCPayloadRealBursts(t *testing.T) {
 	// Over-the-air bursts from an MMDVM DMRD stream. The decoded payloads are
 	// checked by their own CRC, not by re-encoding.
 	csbk := mustBurst(t, "53df0a83b7a8282c2509625014fdff57d75df5dcadde429028c87ae3341e24191c")
-	got, ok := decodeBPTCPayload(csbk)
+	got, ok := decodeBPTCPayload(csbk, enums.DataTypeCSBK)
 	want := [12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b, 0x58, 0x89}
 	if !ok || got != want {
 		t.Fatalf("CSBK preamble: got % X (ok=%t), want % X", got, ok, want)
@@ -1889,7 +1899,7 @@ func TestDecodeBPTCPayloadRealBursts(t *testing.T) {
 	damaged := csbk
 	damaged[3] ^= 0x10
 	damaged[30] ^= 0x02
-	if got, ok := decodeBPTCPayload(damaged); !ok || got != want {
+	if got, ok := decodeBPTCPayload(damaged, enums.DataTypeCSBK); !ok || got != want {
 		t.Fatalf("damaged CSBK: got % X (ok=%t)", got, ok)
 	}
 }
@@ -1922,7 +1932,7 @@ func TestDecodeBPTCPayloadAcceptsEveryRecoveredDoubleError(t *testing.T) {
 				b := burst
 				flipBPTCBit(&b, i)
 				flipBPTCBit(&b, j)
-				if got, ok := decodeBPTCPayload(b); got == tc.payload && !ok {
+				if got, ok := decodeBPTCPayload(b, tc.dt); got == tc.payload && !ok {
 					rejected++
 				}
 			}
@@ -1960,7 +1970,7 @@ func TestDecodeBPTCPayloadChecksLikeMMDVMHost(t *testing.T) {
 		{"PI header", enums.DataTypePIHeader, badCSBK, true},
 		{"rate 1/2 data", enums.DataTypeRate12, badCSBK, true},
 	} {
-		got, ok := decodeBPTCPayload(buildLCDataBurst(t, tc.payload, tc.dt, 1))
+		got, ok := decodeBPTCPayload(buildLCDataBurst(t, tc.payload, tc.dt, 1), tc.dt)
 		if got != tc.payload || ok != tc.want {
 			t.Errorf("%s: got % X (ok=%t), want ok=%t", tc.name, got, ok, tc.want)
 		}
@@ -1974,10 +1984,36 @@ func TestDecodeBPTCPayloadChecksLikeMMDVMHost(t *testing.T) {
 	}
 }
 
+// MMDVMHost checks a network data burst by the data type in the DMRD
+// header, not by the slot type inside the burst, which may be damaged.
+func TestTranslateToIPSCChecksBPTCByDMRDDataType(t *testing.T) {
+	t.Parallel()
+	badCSBK := withCRC([12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b}, enums.DataTypeCSBK)
+	badCSBK[11] ^= 0x01
+	for _, tc := range []struct {
+		name      string
+		dmrd      enums.DataType
+		slotType  enums.DataType
+		wantCount int
+	}{
+		{"rate 1/2 data with a CSBK slot type", enums.DataTypeRate12, enums.DataTypeCSBK, 1},
+		{"PI header with a data header slot type", enums.DataTypePIHeader, enums.DataTypeDataHeader, 1},
+		{"CSBK with a PI header slot type", enums.DataTypeCSBK, enums.DataTypePIHeader, 0},
+		{"data header with a rate 1/2 slot type", enums.DataTypeDataHeader, enums.DataTypeRate12, 0},
+	} {
+		tr := newTestTranslator(t)
+		p := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(tc.dmrd))
+		p.DMRData = buildLCDataBurst(t, badCSBK, tc.slotType, 1)
+		if got := len(tr.TranslateToIPSC(p)); got != tc.wantCount {
+			t.Errorf("%s: got %d IPSC packets, want %d", tc.name, got, tc.wantCount)
+		}
+	}
+}
+
 func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
 	t.Parallel()
 	onAir := mustBurst(t, "53df0a83b7a8282c2509625014fdff57d75df5dcadde429028c87ae3341e24191c")
-	payload, _ := decodeBPTCPayload(onAir)
+	payload, _ := decodeBPTCPayload(onAir, enums.DataTypeCSBK)
 	built := buildLCDataBurst(t, payload, enums.DataTypeCSBK, slotTypeColorCode(onAir))
 	bit := func(b [33]byte, i int) byte { return (b[i/8] >> (7 - i%8)) & 1 }
 	for i := 0; i < 108; i++ {
@@ -1989,7 +2025,7 @@ func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
 		{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x92, 0xaf, 0x70},
 		{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 	} {
-		if got, _ := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypePIHeader, 1)); got != lc {
+		if got, _ := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypePIHeader, 1), enums.DataTypePIHeader); got != lc {
 			t.Fatalf("round trip % X: got % X", lc, got)
 		}
 	}

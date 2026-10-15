@@ -236,7 +236,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 					"dtype", enums.DataType(dtypeOrVSeq).String())
 				return nil
 			}
-			payload, ok := decodeBPTCPayload(pkt.DMRData)
+			payload, ok := decodeBPTCPayload(pkt.DMRData, enums.DataType(dtypeOrVSeq))
 			if !ok {
 				slog.Debug("IPSCTranslator: dropping data burst with uncorrectable BPTC errors",
 					"dtype", enums.DataType(dtypeOrVSeq).String())
@@ -616,17 +616,12 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 // decodeBPTCPayload returns the 12-byte BPTC(196,96) payload of a 33-byte
 // DMR data burst. The BPTC(196,96) decoder never rejects a burst by itself,
 // as in MMDVMHost's CBPTC19696::decode. The payload is accepted as MMDVMHost
-// accepts it, by layer2.MMDVMHostAccepts for the data type in the burst's
-// slot type. When the slot type is uncorrectable, it is accepted only if
-// every Hamming codeword checks after correction.
-func decodeBPTCPayload(data [33]byte) ([12]byte, bool) {
+// accepts a network burst, by layer2.MMDVMHostAccepts for dataType, the data
+// type in the DMRD header. The slot type inside the burst is not used.
+func decodeBPTCPayload(data [33]byte, dataType enums.DataType) ([12]byte, bool) {
 	raw := layer2.RawBurst(data)
-	payload, result := raw.BPTCPayload()
-	st := raw.SlotType()
-	if st.FEC.Uncorrectable {
-		return payload, !result.Uncorrectable
-	}
-	return payload, layer2.MMDVMHostAccepts(st.DataType, payload)
+	payload, _ := raw.BPTCPayload()
+	return payload, layer2.MMDVMHostAccepts(dataType, payload)
 }
 
 // constructFullLC builds a 12-byte voice full LC (9 LC bytes plus masked
