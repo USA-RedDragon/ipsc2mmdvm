@@ -3,6 +3,7 @@ package ipsc
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,22 @@ func captureSyncLost() []string {
 	}
 }
 
+// captureSyncLostNextCall is the next call in tests/synclost_ipsc_in.txt,
+// lines 23-29. It reuses the call control of captureSyncLost with a new RTP
+// sequence and timestamp base, and the repeater restarts the superframe
+// after burst E, whose end bit is set.
+func captureSyncLostNextCall() []string {
+	return []string{
+		"800004c313062f9be50000020200007cdf0080ddd8f347c4dad200000000010000081000006063800000e8822f9a4d000000",
+		"800004c313062f9be50000020200007cdf00805dd8f447c4dcb2000000000a1440b81926db41ffee02b10f6242ae8133bd747a00",
+		"800004c313062f9be50000020200007cdf00805dd8f547c4de92000000000a1906e80dd74da7fcba02c1a7da596e90ed8e288c200697068612",
+		"800004c313062f9be50000020200007cdf00805dd8f647c4e072000000000a1907d803d4344aceb60275a4c38bee80243a68c7380700000616",
+		"800004c313062f9be50000020200007cdf00805dd8f747c4e252000000000a1906790a67a1ebf87a0225d281f58e8039819efd600c023c0b16",
+		"800004c313062f9be50000020200007cdf40805ed8f847c4e432000000000a22974e0a6db609c96a021ced4191bc964fad76a218063633b35020000000022f9be514",
+		"800004c313062f9be50000020200007cdf00805dd8f947c4e612000000000a1440e80434a60aca3a0276581b80ce800f694cedf8",
+	}
+}
+
 func captureLateEntry() []string {
 	return []string{
 		"800004c313052f9be5000002020000430e00805d331469dc5e1d000000000a1440809447044d87202c81e5c0b4080b5969063d20",
@@ -63,35 +80,87 @@ func captureLateEntry() []string {
 }
 
 // replayBurstPositions feeds IPSC packets to a fresh translator and returns
-// one letter per packet: A-F for a voice burst, H for a voice header, T for
-// a terminator, and - for a dropped packet.
+// one letter per MMDVM packet: A-F for a voice burst, H for a voice header,
+// and T for a terminator, with - for an IPSC packet that gave none.
 func replayBurstPositions(t *testing.T, packets []string) string {
+	t.Helper()
+	got, _ := replayStreams(t, packets)
+	return got
+}
+
+// replayStreams is replayBurstPositions that also returns the MMDVM stream
+// ID of each letter.
+func replayStreams(t *testing.T, packets []string) (string, []uint) {
 	t.Helper()
 	tr, err := NewIPSCTranslator()
 	if err != nil {
 		t.Fatalf("NewIPSCTranslator: %v", err)
 	}
 	var sb strings.Builder
+	var ids []uint
 	for i, h := range packets {
 		data, err := hex.DecodeString(h)
 		if err != nil {
 			t.Fatalf("packet %d: %v", i, err)
 		}
 		out := tr.TranslateToMMDVM(data[0], data)
-		switch {
-		case len(out) == 0:
+		if len(out) == 0 {
 			sb.WriteByte('-')
-		case out[0].FrameType == mmdvmFrameTypeDataSync && out[0].DTypeOrVSeq == 1:
-			sb.WriteByte('H')
-		case out[0].FrameType == mmdvmFrameTypeDataSync:
-			sb.WriteByte('T')
-		case out[0].FrameType == mmdvmFrameTypeVoiceSync:
-			sb.WriteByte('A')
-		default:
-			sb.WriteByte("ABCDEF"[out[0].DTypeOrVSeq%6])
+			ids = append(ids, 0)
+		}
+		for _, p := range out {
+			ids = append(ids, p.StreamID)
+			switch {
+			case p.FrameType == mmdvmFrameTypeDataSync && p.DTypeOrVSeq == 1:
+				sb.WriteByte('H')
+			case p.FrameType == mmdvmFrameTypeDataSync:
+				sb.WriteByte('T')
+			case p.FrameType == mmdvmFrameTypeVoiceSync:
+				sb.WriteByte('A')
+			default:
+				sb.WriteByte("ABCDEF"[p.DTypeOrVSeq%6])
+			}
 		}
 	}
-	return sb.String()
+	return sb.String(), ids
+}
+
+// without returns packets with the ones at the given indexes left out.
+func without(packets []string, drop ...int) []string {
+	out := make([]string, 0, len(packets))
+	for i, p := range packets {
+		if !slices.Contains(drop, i) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// A call that reuses the call control with a new RTP base is a new call,
+// as in ipsc2hbpc (translate.c out_call_continues): the old stream gets a
+// terminator, and the new one is placed from its own bursts.
+func TestIPSCNewRTPBaseStartsNewStream(t *testing.T) {
+	t.Parallel()
+	both := append(captureSyncLost(), captureSyncLostNextCall()...)
+	for _, tc := range []struct {
+		name    string
+		packets []string
+		want    string
+	}{
+		{"next call", both, "H-ABCDEFABCDEFA-ABCDEATHABCDEA"},
+		{"next call with its first burst A lost", without(both, 23), "H-ABCDEFABCDEFA-ABCDEATHBCDEA"},
+		{"next call without a voice header", without(both, 22, 23), "H-ABCDEFABCDEFA-ABCDEAT--EA"},
+	} {
+		got, ids := replayStreams(t, tc.packets)
+		if got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+			continue
+		}
+		term := strings.IndexByte(got, 'T')
+		if last := ids[len(ids)-1]; ids[term] != ids[0] || last == ids[0] || last == 0 {
+			t.Errorf("%s: stream IDs %v, want the terminator on the first call and a new ID after it", tc.name, ids)
+		}
+	}
 }
 
 func TestIPSCVoiceBurstPositionsFromCapture(t *testing.T) {
@@ -107,6 +176,7 @@ func TestIPSCVoiceBurstPositionsFromCapture(t *testing.T) {
 		{"late entry before burst E", captureLateEntry()[7:], "---EFA"},
 		{"late entry at burst A", captureLateEntry()[6:], "ABCDEFA"},
 		{"burst A lost in transit", withoutA, "ABCDEFBCDEFA"},
+		{"first burst A after the voice header lost", without(captureSyncLost(), 2), "H-BCDEFABCDEFA-ABCDEA"},
 	} {
 		if got := replayBurstPositions(t, tc.packets); got != tc.want {
 			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)

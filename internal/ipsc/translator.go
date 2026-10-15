@@ -700,7 +700,26 @@ type reverseStreamState struct {
 	hasLast      bool
 	started      bool // whether we've seen a voice header
 	lastSeen     time.Time
+
+	// RTP timestamp of the last voice header or burst.
+	rtpTimestamp uint32
+	hasTimestamp bool
+
+	// Call fields and voice header LC of the last voice packet sent, for
+	// the terminator that ends the stream on an RTP discontinuity.
+	voiceSent bool
+	src, dst  uint
+	groupCall bool
+	slot      bool
+	headerLC  [12]byte
+	hasLC     bool
 }
+
+// rtpMaxForward is the largest forward RTP timestamp step (8 kHz units,
+// 1 second) that still continues a call, as in ipsc2hbpc's
+// OUT_RTP_MAX_FWD. A larger or backward step is a new call that reuses the
+// call control.
+const rtpMaxForward = 8000
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
 // Returns nil if the packet cannot be translated.
@@ -757,12 +776,8 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	// Get or create reverse stream state
 	rss, existed := t.reverseStreams[callControl]
 	if !existed {
-		t.nextStreamID++
-		if t.nextStreamID == 0 {
-			t.nextStreamID = 1
-		}
 		rss = &reverseStreamState{
-			streamID: t.nextStreamID,
+			streamID: t.newStreamIDLocked(),
 		}
 		t.reverseStreams[callControl] = rss
 		if t.metrics != nil {
@@ -776,8 +791,24 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		}
 	}()
 
+	isVoice := burstType == ipscBurstVoiceHead || burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2
+	if isVoice {
+		ts := binary.BigEndian.Uint32(data[22:26])
+		if rss.hasTimestamp && ts-rss.rtpTimestamp > rtpMaxForward {
+			slog.Debug("IPSCTranslator: RTP discontinuity, starting a new stream",
+				"callControl", callControl, "streamID", rss.streamID)
+			results = append(results, t.restartReverseStream(rss)...)
+		}
+		rss.rtpTimestamp, rss.hasTimestamp = ts, true
+	}
+	sent := len(results)
+
 	switch burstType {
 	case ipscBurstVoiceHead:
+		// Voice follows the header with burst A, so the header holds the
+		// place of a burst F.
+		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, binary.BigEndian.Uint16(data[20:22]), true
+		rss.hasLast = false
 		// Voice LC Header — only process the first one (IPSC sends 3)
 		if !rss.started {
 			pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
@@ -815,6 +846,11 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	// of a weak-signal call, so a voice burst never ends the stream. As in
 	// ipsc2hbpc, the call ends at its terminator, and pruning ends a call
 	// whose terminator is lost.
+	if isVoice && len(results) > sent {
+		rss.voiceSent = true
+		rss.src, rss.dst, rss.groupCall, rss.slot = src, dst, groupCall, slot
+	}
+
 	if isEnd && burstType != ipscBurstSlot1 && burstType != ipscBurstSlot2 {
 		t.removeReverseStreamLocked(callControl)
 	}
@@ -824,6 +860,50 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	}
 
 	return results
+}
+
+// newStreamIDLocked returns the next nonzero MMDVM stream ID. The caller
+// must hold t.mu.
+func (t *IPSCTranslator) newStreamIDLocked() uint32 {
+	t.nextStreamID++
+	if t.nextStreamID == 0 {
+		t.nextStreamID = 1
+	}
+	return t.nextStreamID
+}
+
+// restartReverseStream ends the MMDVM stream of rss with a terminator, if
+// it sent any voice, and resets rss to a new stream. MMDVMHost ignores a
+// voice header while a network call is active, so without the terminator
+// the new call would not start.
+func (t *IPSCTranslator) restartReverseStream(rss *reverseStreamState) []mmdvm.Packet {
+	var out []mmdvm.Packet
+	if rss.voiceSent {
+		lc := constructFullLC(rss.src, rss.dst, rss.groupCall, enums.DataTypeTerminatorWithLC)
+		if rss.hasLC {
+			lc = rss.headerLC
+			_ = layer2.MMDVMHostSeal(enums.DataTypeTerminatorWithLC, &lc) // never fails for a terminator
+		}
+		dmrData, err := layer2.BuildDataBurst(lc, enums.DataTypeTerminatorWithLC, t.colorCode, layer2.SyncSourceBS)
+		if err != nil {
+			slog.Debug("IPSCTranslator: cannot build terminator", "error", err)
+		}
+		out = append(out, mmdvm.Packet{
+			Signature:   mmdvm.DMRDSignature,
+			Seq:         uint(rss.seq),
+			Src:         rss.src,
+			Dst:         rss.dst,
+			Repeater:    uint(t.repeaterID),
+			Slot:        rss.slot,
+			GroupCall:   rss.groupCall,
+			FrameType:   mmdvmFrameTypeDataSync,
+			DTypeOrVSeq: uint(enums.DataTypeTerminatorWithLC),
+			StreamID:    uint(rss.streamID),
+			DMRData:     dmrData,
+		})
+	}
+	*rss = reverseStreamState{streamID: t.newStreamIDLocked(), lastSeen: rss.lastSeen}
+	return out
 }
 
 // buildMMDVMDataPacket builds an MMDVM DMRD packet for a voice LC header, terminator,
@@ -860,6 +940,9 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 		slog.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
 			"dtype", dataType.String())
 		lcBytes = constructFullLC(src, dst, groupCall, dataType)
+	}
+	if dataType == enums.DataTypeVoiceLCHeader {
+		rss.headerLC, rss.hasLC = lcBytes, true
 	}
 
 	// Build the 33-byte DMR data burst
@@ -963,10 +1046,11 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 // A is 52 bytes or carries the voice sync flag, and E is 66 bytes when the
 // repeater reassembled the embedded LC. The repeater numbers every burst in
 // the RTP sequence, including the ones it lost, so every other burst is
-// placed by its RTP sequence distance to the last A or E. The LCSS in the
-// EMB byte is not used: on a weak signal the repeater sends it wrong. A
-// burst that comes before any A or E cannot be placed and is dropped, so a
-// late entry starts at the next A or E. A repeated burst is dropped.
+// placed by its RTP sequence distance to the last A or E, or to the voice
+// header, which burst A follows. The LCSS in the EMB byte is not used: on
+// a weak signal the repeater sends it wrong. A burst that comes before any
+// header, A, or E cannot be placed and is dropped, so a late entry starts
+// at the next A or E. A repeated burst is dropped.
 func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 	seq := binary.BigEndian.Uint16(data[20:22])
 	if rss.hasLast && seq == rss.lastRTPSeq {
