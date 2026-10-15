@@ -266,6 +266,7 @@ func TestSendPingPacket(t *testing.T) {
 func TestSendPacketEncodesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 	pkt := proto.Packet{
 		Signature:   tagDMRD,
 		Seq:         1,
@@ -1050,6 +1051,7 @@ func TestTickReconnectsOnHandshakeTimeout(t *testing.T) {
 func TestForwardTXSendsPackets(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 
 	client.wg.Add(1)
 	go client.forwardTX()
@@ -1115,6 +1117,7 @@ func TestHandleIPSCBurstWhenNotStarted(t *testing.T) {
 func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -1174,6 +1177,7 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -1525,6 +1529,7 @@ func TestSendRPTKTokenVerification(t *testing.T) {
 func TestSendPacketFieldsEncoded(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 	pkt := proto.Packet{
 		Signature:   tagDMRD,
 		Seq:         42,
@@ -1556,6 +1561,7 @@ func TestSendPacketFieldsEncoded(t *testing.T) {
 func TestHandleIPSCBurstMultiple(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.setState(STATE_READY)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -2155,4 +2161,26 @@ func TestReconnectDiscardsPacketsFromOldConnection(t *testing.T) {
 		t.Fatalf("expected no stale packets queued after reconnect, got %d", n)
 	}
 	client.Stop()
+}
+
+func TestSendPacketDroppedUntilReady(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.metrics = metrics.NewMetrics()
+	for _, st := range []state{STATE_IDLE, STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC, STATE_TIMEOUT} {
+		client.setState(st)
+		client.sendPacket(proto.Packet{Signature: tagDMRD})
+		if n := len(client.connTX); n != 0 {
+			t.Fatalf("state %d: expected DMRD to be dropped, got %d queued", st, n)
+		}
+	}
+	rec := httptest.NewRecorder()
+	client.metrics.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if want := `mmdvm_packets_dropped_total{network="TestNet",reason="not_ready"} 5`; !strings.Contains(body, want) {
+		t.Fatalf("expected %q in metrics output", want)
+	}
+	if strings.Contains(body, "mmdvm_packets_sent_total{") {
+		t.Fatal("dropped packets must not be counted as sent")
+	}
 }

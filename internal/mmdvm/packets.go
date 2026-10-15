@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -117,7 +118,16 @@ func (h *MMDVMClient) sendPing() {
 	h.enqueue(data)
 }
 
+// sendPacket queues a DMRD packet for the master. Like DMRGateway, it only
+// sends traffic while logged in.
 func (h *MMDVMClient) sendPacket(packet proto.Packet) {
+	if h.currentState() != STATE_READY {
+		slog.Debug("Dropping DMRD, not logged in", "network", h.cfg.Name)
+		if h.metrics != nil {
+			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "not_ready").Inc()
+		}
+		return
+	}
 	data := make([]byte, 53)
 	copy(data, packet.Encode())
 	if h.metrics != nil {
