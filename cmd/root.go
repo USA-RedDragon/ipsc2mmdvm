@@ -139,10 +139,10 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			}
 		}
 
-		ipscServer.Stop()
 		for _, client := range mmdvmClients {
 			client.Stop()
 		}
+		ipscServer.Stop()
 	})
 }
 
