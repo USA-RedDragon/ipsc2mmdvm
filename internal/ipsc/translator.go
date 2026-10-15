@@ -613,11 +613,19 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 }
 
 // decodeBPTCPayload returns the 12-byte BPTC(196,96) payload of a 33-byte
-// DMR data burst. It reports false when the FEC cannot correct the errors.
+// DMR data burst. The BPTC(196,96) decoder never rejects a burst by itself,
+// as in MMDVMHost's CBPTC19696::decode. The payload is accepted as MMDVMHost
+// accepts it, by layer2.MMDVMHostAccepts for the data type in the burst's
+// slot type. When the slot type is uncorrectable, it is accepted only if
+// every Hamming codeword checks after correction.
 func decodeBPTCPayload(data [33]byte) ([12]byte, bool) {
 	raw := layer2.RawBurst(data)
 	payload, result := raw.BPTCPayload()
-	return payload, !result.Uncorrectable
+	st := raw.SlotType()
+	if st.FEC.Uncorrectable {
+		return payload, !result.Uncorrectable
+	}
+	return payload, layer2.MMDVMHostAccepts(st.DataType, payload)
 }
 
 // constructFullLC builds a 12-byte voice full LC (9 LC bytes plus masked

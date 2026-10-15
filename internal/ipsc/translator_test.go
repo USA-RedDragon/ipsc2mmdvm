@@ -1306,6 +1306,9 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 	} {
 		payload := [12]byte{0xBD, 0x00, 0x80, 0x12, 0x34, 0x56, 0x00, 0xAB, 0xCD, 0xEF, 0x5A, 0xA5}
 		payload[11] ^= byte(dt)
+		if crcChecked(dt) {
+			payload = withCRC(payload, dt)
+		}
 		tr := newTestTranslator(t)
 		pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(dt))
 		pkt.DMRData = buildLCDataBurst(t, payload, dt, 1)
@@ -1328,14 +1331,23 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 	}
 }
 
+// crcChecked reports whether MMDVMHost checks the CRC of a data type.
+func crcChecked(dt enums.DataType) bool {
+	switch dt { //nolint:exhaustive // only the CRC-checked types
+	case enums.DataTypeCSBK, enums.DataTypeMBCHeader, enums.DataTypeMBCContinuation, enums.DataTypeDataHeader:
+		return true
+	}
+	return false
+}
+
 func TestTranslateToIPSCDataPayloadDependsOnBurst(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 	a := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
-	a.DMRData = buildLCDataBurst(t, [12]byte{1, 2, 3}, enums.DataTypeCSBK, 0)
+	a.DMRData = buildLCDataBurst(t, withCRC([12]byte{1, 2, 3}, enums.DataTypeCSBK), enums.DataTypeCSBK, 0)
 	b := a
 	b.StreamID = 0x9999
-	b.DMRData = buildLCDataBurst(t, [12]byte{4, 5, 6}, enums.DataTypeCSBK, 0)
+	b.DMRData = buildLCDataBurst(t, withCRC([12]byte{4, 5, 6}, enums.DataTypeCSBK), enums.DataTypeCSBK, 0)
 	oa := tr.TranslateToIPSC(a)
 	ob := tr.TranslateToIPSC(b)
 	if len(oa) != 1 || len(ob) != 1 {
@@ -1833,7 +1845,7 @@ func TestTranslateToIPSCDataSlotType(t *testing.T) {
 	for _, slot := range []bool{false, true} {
 		tr := newTestTranslator(t)
 		p := makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
-		p.DMRData = buildLCDataBurst(t, [12]byte{0xBD}, enums.DataTypeCSBK, 7)
+		p.DMRData = buildLCDataBurst(t, withCRC([12]byte{0xBD}, enums.DataTypeCSBK), enums.DataTypeCSBK, 7)
 		out := tr.TranslateToIPSC(p)
 		if len(out) != 1 {
 			t.Fatalf("expected 1 packet, got %d", len(out))
@@ -1881,6 +1893,86 @@ func TestDecodeBPTCPayloadRealBursts(t *testing.T) {
 	}
 }
 
+// flipBPTCBit flips BPTC bit i (0-195) of a data burst.
+func flipBPTCBit(b *[33]byte, i int) {
+	if i >= 98 {
+		i += 166 - 98
+	}
+	b[i/8] ^= 1 << (7 - i%8)
+}
+
+// Like MMDVMHost, a burst is accepted when its payload passes the check for
+// its data type, even if a Hamming codeword still has a nonzero syndrome.
+func TestDecodeBPTCPayloadAcceptsEveryRecoveredDoubleError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		dt      enums.DataType
+		payload [12]byte
+	}{
+		{enums.DataTypeCSBK, withCRC([12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b}, enums.DataTypeCSBK)},
+		{enums.DataTypeDataHeader, withCRC([12]byte{0x02, 0x08, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2, 0x81, 0x00}, enums.DataTypeDataHeader)},
+		{enums.DataTypeVoiceLCHeader, testFullLC(t, [9]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}, enums.DataTypeVoiceLCHeader)},
+		{enums.DataTypePIHeader, [12]byte{0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C}},
+	} {
+		burst := buildLCDataBurst(t, tc.payload, tc.dt, 1)
+		rejected := 0
+		for i := range 196 {
+			for j := i + 1; j < 196; j++ {
+				b := burst
+				flipBPTCBit(&b, i)
+				flipBPTCBit(&b, j)
+				if got, ok := decodeBPTCPayload(b); got == tc.payload && !ok {
+					rejected++
+				}
+			}
+		}
+		if rejected != 0 {
+			t.Errorf("%s: %d double errors corrected to the payload but rejected", (tc.dt).String(), rejected)
+		}
+	}
+}
+
+func TestDecodeBPTCPayloadChecksLikeMMDVMHost(t *testing.T) {
+	t.Parallel()
+	csbk := withCRC([12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b}, enums.DataTypeCSBK)
+	badCSBK := csbk
+	badCSBK[11] ^= 0x01
+	lc := testFullLC(t, [9]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}, enums.DataTypeVoiceLCHeader)
+	badLC := lc
+	badLC[11] ^= 0x01
+	for _, tc := range []struct {
+		name    string
+		dt      enums.DataType
+		payload [12]byte
+		want    bool
+	}{
+		{"CSBK", enums.DataTypeCSBK, csbk, true},
+		{"CSBK with a bad CRC", enums.DataTypeCSBK, badCSBK, false},
+		{"CSBK CRC under the data header mask", enums.DataTypeDataHeader, csbk, false},
+		{"MBC header", enums.DataTypeMBCHeader, withCRC(csbk, enums.DataTypeMBCHeader), true},
+		{"MBC continuation", enums.DataTypeMBCContinuation, withCRC(csbk, enums.DataTypeMBCContinuation), true},
+		{"MBC continuation with a masked CRC", enums.DataTypeMBCContinuation, csbk, false},
+		{"data header", enums.DataTypeDataHeader, withCRC(csbk, enums.DataTypeDataHeader), true},
+		{"voice LC header", enums.DataTypeVoiceLCHeader, lc, true},
+		{"voice LC header with bad parity", enums.DataTypeVoiceLCHeader, badLC, false},
+		{"terminator with a header's parity", enums.DataTypeTerminatorWithLC, lc, false},
+		{"PI header", enums.DataTypePIHeader, badCSBK, true},
+		{"rate 1/2 data", enums.DataTypeRate12, badCSBK, true},
+	} {
+		got, ok := decodeBPTCPayload(buildLCDataBurst(t, tc.payload, tc.dt, 1))
+		if got != tc.payload || ok != tc.want {
+			t.Errorf("%s: got % X (ok=%t), want ok=%t", tc.name, got, ok, tc.want)
+		}
+	}
+
+	tr := newTestTranslator(t)
+	p := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
+	p.DMRData = buildLCDataBurst(t, badCSBK, enums.DataTypeCSBK, 1)
+	if out := tr.TranslateToIPSC(p); out != nil {
+		t.Fatalf("CSBK with a bad CRC: expected no IPSC packet, got %d", len(out))
+	}
+}
+
 func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
 	t.Parallel()
 	onAir := mustBurst(t, "53df0a83b7a8282c2509625014fdff57d75df5dcadde429028c87ae3341e24191c")
@@ -1896,8 +1988,8 @@ func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
 		{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x92, 0xaf, 0x70},
 		{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 	} {
-		if got, ok := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypeVoiceLCHeader, 1)); !ok || got != lc {
-			t.Fatalf("round trip % X: got % X (ok=%t)", lc, got, ok)
+		if got, _ := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypePIHeader, 1)); got != lc {
+			t.Fatalf("round trip % X: got % X", lc, got)
 		}
 	}
 }
