@@ -196,8 +196,9 @@ func TestRigRate34ToMMDVM(t *testing.T) {
 }
 
 // rigDataToIPSC sends the bursts of c to IPSC and checks the packet type,
-// the call priority, and bytes 30 to the RSSI of each packet against what
-// the XPR 8400 sent. Bit 1 of byte 31,
+// the call priority, the call info with the end flag on the last packet,
+// the RTP marker and payload type, and bytes 30 to the RSSI of each packet
+// against what the XPR 8400 sent. Bit 1 of byte 31,
 // which the repeater sets when a block fails its CRC check, is not compared:
 // the repeater sets it on every unconfirmed rate 3/4 block, which has no
 // CRC-9.
@@ -224,8 +225,9 @@ func rigDataToIPSC(t *testing.T, c rigDataCall) [][]byte {
 		if len(out[0]) != len(r) {
 			t.Fatalf("%s burst %d: got %d bytes, want %d", c.name, i, len(out[0]), len(r))
 		}
-		if out[0][0] != r[0] || out[0][12] != r[12] {
-			t.Errorf("%s burst %d: packet type %02x priority %02x, want %02x %02x", c.name, i, out[0][0], out[0][12], r[0], r[12])
+		if out[0][0] != r[0] || out[0][12] != r[12] || out[0][17] != r[17] || out[0][19] != r[19] {
+			t.Errorf("%s burst %d: packet type %02x priority %02x call info %02x RTP %02x, want %02x %02x %02x %02x",
+				c.name, i, out[0][0], out[0][12], out[0][17], out[0][19], r[0], r[12], r[17], r[19])
 		}
 		n := len(r) - 2
 		g := append([]byte(nil), out[0][30:n]...)
@@ -243,6 +245,71 @@ func TestRigRate34ToIPSC(t *testing.T) {
 	t.Parallel()
 	for _, c := range rigRate34Calls() {
 		rigDataToIPSC(t, c)
+	}
+}
+
+// TestRate34CallEndsAtLastBlock sends the unconfirmed rate 3/4 packet of
+// rigRate34Calls twice with one stream ID, as an MMDVM master may send a
+// packet and its repeat. The last block ends the first call, so the second
+// is a new call with a new call control and the RTP marker.
+func TestRate34CallEndsAtLastBlock(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	c := rigRate34Calls()[0]
+	first := make([][]byte, 0, 2*len(c.bursts))
+	for range 2 {
+		for i, h := range c.bursts {
+			w, _ := hex.DecodeString(h)
+			out := tr.TranslateToIPSC(mmdvm.Packet{
+				Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: true, Slot: true,
+				FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 81, DMRData: [33]byte(w),
+			})
+			if len(out) != 1 {
+				t.Fatalf("burst %d: got %d packets", i, len(out))
+			}
+			first = append(first, out[0])
+		}
+		if len(tr.streams) != 0 {
+			t.Fatalf("call still open after its last block: %d streams", len(tr.streams))
+		}
+	}
+	if string(first[0][13:17]) == string(first[2][13:17]) || first[2][19] != 0xDD {
+		t.Errorf("repeat is not a new call:\n first %x\nrepeat %x", first[0], first[2])
+	}
+}
+
+// TestRate34MessageCRCFailureEndsCall sends the unconfirmed rate 3/4 packet
+// of rigRate34Calls with a user data octet of its block changed, so the
+// block decodes but the message CRC fails. The packet is still complete,
+// so its last block carries the end flag.
+func TestRate34MessageCRCFailureEndsCall(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	c := rigRate34Calls()[0]
+	for i, h := range c.bursts {
+		w, _ := hex.DecodeString(h)
+		if i == 1 {
+			block, res := layer2.RawBurst(w).Rate34Payload()
+			if res.Uncorrectable {
+				t.Fatal("block does not decode")
+			}
+			block[3] ^= 0x01
+			b, err := layer2.BuildRate34DataBurst(block, 7, layer2.SyncSourceBS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w = b[:]
+		}
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: true, Slot: true,
+			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 82, DMRData: [33]byte(w),
+		})
+		if len(out) != 1 {
+			t.Fatalf("burst %d: got %d packets", i, len(out))
+		}
+		if end := out[0][17]&ipscCallInfoEnd != 0; end != (i == 1) {
+			t.Errorf("burst %d: end flag %v", i, end)
+		}
 	}
 }
 

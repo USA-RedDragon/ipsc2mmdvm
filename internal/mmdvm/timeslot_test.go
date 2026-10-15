@@ -3,6 +3,7 @@ package mmdvm
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -160,6 +161,44 @@ func TestQueuedCallIsSentByItsOwnClient(t *testing.T) {
 		if r.callControl != cc {
 			t.Fatalf("stream B call control changed mid-call: %+v", recs)
 		}
+	}
+}
+
+// TestOutboundDataCallEndReleasesSlot sends two confirmed rate 1/2 data
+// packets from 3191868 to 3140598 on TS2 as separate streams, as an MMDVM
+// master sends a packet and its retry. The first packet's last block ends
+// the call, so the second one goes out at once instead of waiting for the
+// timeslot timeout.
+func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c := newSlotTestClient(t, "net1", mgr)
+	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: "net1", Slot: 2}}
+	rec := &ipscRecorder{}
+	c.SetIPSCHandler(rec.handler("net1"))
+
+	bursts := []string{
+		"20f7370570bee26393b7cda7ddadff57d75df5de6accf9067160278e89420a3c95",
+		"06dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
+		"403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
+	}
+	dtypes := []uint{6, 7, 7}
+	start := time.Now()
+	for _, stream := range []uint{0xA, 0xB} {
+		for i, h := range bursts {
+			b, err := hex.DecodeString(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := proto.Packet{Signature: "DMRD", Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
+				DTypeOrVSeq: dtypes[i], StreamID: stream, DMRData: [33]byte(b)}
+			c.handleReady(p.Encode())
+		}
+	}
+	rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 6 })
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("second data call went out after %v", d)
 	}
 }
 

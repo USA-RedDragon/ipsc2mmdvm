@@ -2,6 +2,7 @@ package ipsc
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -57,9 +59,10 @@ type streamState struct {
 	headersSent  int   // number of voice headers sent (3 required)
 	lastSeen     time.Time
 	lc           [9]byte
-	hasLC        bool // lc holds the full LC from the voice header
-	privacy      bool // the call is encrypted: privacy LC or a PI header
-	firstPacket  bool // true for the very first packet
+	hasLC        bool             // lc holds the full LC from the voice header
+	privacy      bool             // the call is encrypted: privacy LC or a PI header
+	data         packet.Assembler // the data packet of the call so far
+	firstPacket  bool             // true for the very first packet
 }
 
 // IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
@@ -270,8 +273,12 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 				slog.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
 				return nil
 			}
-			results = append(results, t.buildIPSCRate34Packet(pkt, ss, payload))
+			last := ss.lastDataBlock(pkt.DMRData)
+			results = append(results, t.buildIPSCRate34Packet(pkt, ss, payload, last))
 			ss.firstPacket = false
+			if last {
+				t.removeStreamLocked(uint32(streamID))
+			}
 		case enums.DataTypeCSBK, enums.DataTypePIHeader,
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
 			enums.DataTypeRate1,
@@ -291,9 +298,13 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 					"dtype", enums.DataType(dtypeOrVSeq).String())
 				return nil
 			}
-			data := t.buildIPSCDataPacket(pkt, ss, burstType, payload)
+			last := ss.lastDataBlock(pkt.DMRData)
+			data := t.buildIPSCDataPacket(pkt, ss, burstType, payload, last)
 			results = append(results, data)
 			ss.firstPacket = false
+			if last {
+				t.removeStreamLocked(uint32(streamID))
+			}
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
 			return nil
 		default:
@@ -446,18 +457,39 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	return buf
 }
 
+// lastDataBlock adds a data burst to the data packet of the call and
+// reports whether it completes the packet: a header with no blocks to
+// follow, or the last block. A packet whose CRC fails is complete too. Other
+// bursts, such as CSBKs, never complete a packet.
+func (ss *streamState) lastDataBlock(data [33]byte) bool {
+	b, err := layer2.NewBurstFromBytes(data)
+	if err != nil {
+		return false
+	}
+	_, done, err := ss.data.AddBurst(b)
+	return done || errors.Is(err, packet.ErrBlocksMissing)
+}
+
+// dataPayloadType returns the RTP payload type of a data packet: 0x5E for
+// the last packet of a data call, as for a voice terminator, and 0x5D
+// otherwise, as an XPR 8400 sends them.
+func dataPayloadType(last bool) byte {
+	if last {
+		return 0x5E
+	}
+	return 0x5D
+}
+
 // buildIPSCDataPacket builds a 54-byte IPSC packet for a burst with a
 // BPTC(196,96) payload, such as a CSBK or a data header. The structure is
 // identical to the voice header and terminator. Data bursts go in data
 // packets (0x83/0x84); a PI header belongs to a voice call, and an XPR 8400
 // sends it in a voice packet (0x80/0x81).
-func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte, payload [12]byte) []byte {
+func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte, payload [12]byte, last bool) []byte {
 	buf := make([]byte, 54)
 
-	t.buildIPSCHeader(buf, pkt, ss, false, burstType != ipscBurstPIHeader)
-
-	// RTP header: no marker, payload type 0x5D
-	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
+	t.buildIPSCHeader(buf, pkt, ss, last, burstType != ipscBurstPIHeader)
+	t.buildRTPHeader(buf, ss, ss.firstPacket, dataPayloadType(last))
 
 	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
 	writeIPSCDataBurst(buf, burstType, 0x40, payload[:], slotTypeColorCode(pkt.DMRData))
@@ -469,10 +501,10 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 // 8400 carries the 18 octets of a rate 3/4 block (ETSI TS 102 361-1 9.2.10)
 // rotated left by two: in a confirmed block the DBSN and CRC-9 octets go
 // after the 16 data octets, and an unconfirmed block is rotated the same way.
-func (t *IPSCTranslator) buildIPSCRate34Packet(pkt mmdvm.Packet, ss *streamState, payload [18]byte) []byte {
+func (t *IPSCTranslator) buildIPSCRate34Packet(pkt mmdvm.Packet, ss *streamState, payload [18]byte, last bool) []byte {
 	buf := make([]byte, 60)
-	t.buildIPSCHeader(buf, pkt, ss, false, true)
-	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
+	t.buildIPSCHeader(buf, pkt, ss, last, true)
+	t.buildRTPHeader(buf, ss, ss.firstPacket, dataPayloadType(last))
 	var rotated [18]byte
 	copy(rotated[:], payload[2:])
 	copy(rotated[16:], payload[:2])

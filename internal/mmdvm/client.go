@@ -740,18 +740,21 @@ func (h *MMDVMClient) forwardTX() {
 }
 
 // translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
-func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
+// It reports whether the packet ended a data call.
+func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) (dataEnd bool) {
 	handler := h.ipscHandler.Load()
 	if handler != nil && h.translator != nil {
 		ipscPackets := h.translator.TranslateToIPSC(packet)
 		ctx := stopContext{h.done}
 		for _, ipscData := range ipscPackets {
 			if ctx.Err() != nil {
-				return
+				return false
 			}
+			dataEnd = dataEnd || ipsc.EndsDataCall(ipscData[0], ipscData)
 			(*handler)(ctx, ipscData)
 		}
 	}
+	return dataEnd
 }
 
 // stopContext is a context.Context that is canceled when the client stops.
@@ -785,8 +788,7 @@ func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
 	end := isTerminator(packet)
 	switch h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet, end, h.forwardOutbound) {
 	case timeslot.Deliver:
-		h.translateAndForwardToIPSC(packet)
-		if end {
+		if h.translateAndForwardToIPSC(packet) || end {
 			h.outboundTSMgr.Release(packet.Slot, packet.StreamID)
 		}
 	case timeslot.Queued:
