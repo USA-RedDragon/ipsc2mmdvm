@@ -393,3 +393,98 @@ func TestTranslateToIPSCFullLCFollowsPacketFields(t *testing.T) {
 		t.Fatalf("terminator LC % X, want % X", out[0][38:50], want)
 	}
 }
+
+// withCRC returns p with the CRC that MMDVMHost checks in a burst of dt.
+func withCRC(p [12]byte, dt enums.DataType) [12]byte {
+	_ = layer2.MMDVMHostSeal(dt, &p)
+	return p
+}
+
+func rewriteBlock(t *testing.T, dataType enums.DataType, in [12]byte, src, dst uint) [12]byte {
+	t.Helper()
+	r := NewLCRewriter()
+	orig := lcPacket(dataType, src, dst, false, buildLCDataBurst(t, in, dataType, 1))
+	pkt := orig
+	pkt.Dst, pkt.GroupCall = 9, true
+	r.Rewrite(orig, &pkt)
+	got, ok := decodeBPTCPayload(pkt.DMRData)
+	if !ok {
+		t.Fatalf("%s: rewritten burst does not decode", dataType.String())
+	}
+	if !sameBits(orig.DMRData, pkt.DMRData, 98, 166) {
+		t.Fatalf("%s: slot type or sync changed", dataType.String())
+	}
+	return got
+}
+
+// TestLCRewriterRewritesCSBK checks a real preamble CSBK from a private call
+// (CSBKO 0x3D, dst 0x233863, src 0x23383B) rewritten into a group call to 9,
+// as DMRGateway's processCSBK and CDMRCSBK do, a NACK response, and a
+// P_PROTECT and a C_AHOY whose G/I bit follows the new call type. A C_ALOHA,
+// which carries no target and source pair, is left alone.
+func TestLCRewriterRewritesCSBK(t *testing.T) {
+	t.Parallel()
+	in := [12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b, 0x58, 0x89}
+	want := withCRC([12]byte{0xbd, 0x00, 0xC0, 0x1d, 0x00, 0x00, 0x09, 0x23, 0x38, 0x3b}, enums.DataTypeCSBK)
+	if got := rewriteBlock(t, enums.DataTypeCSBK, in, 0x23383B, 0x233863); got != want {
+		t.Fatalf("CSBK % X, want % X", got, want)
+	}
+
+	nack := withCRC([12]byte{0x26, 0x00, 0x00, 0x00, 0x00, 0x04, 0xD2, 0x00, 0x15, 0xB3}, enums.DataTypeCSBK)
+	want = withCRC([12]byte{0x26, 0x00, 0x00, 0x00, 0x00, 0x04, 0xD2, 0x00, 0x00, 0x09}, enums.DataTypeCSBK)
+	if got := rewriteBlock(t, enums.DataTypeCSBK, nack, 1234, 5555); got != want {
+		t.Fatalf("NACK CSBK % X, want % X", got, want)
+	}
+
+	protect := withCRC([12]byte{0x2F, 0x00, 0x00, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}, enums.DataTypeCSBK)
+	want = withCRC([12]byte{0x2F, 0x00, 0x00, 0x01, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}, enums.DataTypeCSBK)
+	if got := rewriteBlock(t, enums.DataTypeCSBK, protect, 1234, 5555); got != want {
+		t.Fatalf("P_PROTECT CSBK % X, want % X", got, want)
+	}
+
+	ahoy := withCRC([12]byte{0x1C, 0x00, 0x00, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}, enums.DataTypeCSBK)
+	want = withCRC([12]byte{0x1C, 0x00, 0x00, 0x40, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}, enums.DataTypeCSBK)
+	if got := rewriteBlock(t, enums.DataTypeCSBK, ahoy, 1234, 5555); got != want {
+		t.Fatalf("C_AHOY CSBK % X, want % X", got, want)
+	}
+
+	bad := in
+	bad[11] ^= 0x01
+	if got := rewriteBlock(t, enums.DataTypeCSBK, bad, 0x23383B, 0x233863); got != bad {
+		t.Fatalf("CSBK with a bad CRC changed: % X", got)
+	}
+
+	aloha := withCRC([12]byte{0x19, 0x00, 0x00, 0x00, 0x00, 0x04, 0xD2, 0x00, 0x15, 0xB3}, enums.DataTypeCSBK)
+	if got := rewriteBlock(t, enums.DataTypeCSBK, aloha, 1234, 5555); got != aloha {
+		t.Fatalf("C_ALOHA CSBK changed: % X", got)
+	}
+}
+
+// TestLCRewriterRewritesDataHeader checks an unconfirmed data header
+// rewritten into a group call to 9, as DMRGateway's processDataHeader and
+// CDMRDataHeader do. Proprietary and reserved format headers are left
+// alone, and a response header gets the addresses but no group flag.
+func TestLCRewriterRewritesDataHeader(t *testing.T) {
+	t.Parallel()
+	in := withCRC([12]byte{0x02, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2, 0x81, 0x00}, enums.DataTypeDataHeader)
+	want := withCRC([12]byte{0x82, 0x00, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2, 0x81, 0x00}, enums.DataTypeDataHeader)
+	if got := rewriteBlock(t, enums.DataTypeDataHeader, in, 1234, 5555); got != want {
+		t.Fatalf("data header % X, want % X", got, want)
+	}
+
+	prop := withCRC([12]byte{0x0F, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2, 0x81, 0x00}, enums.DataTypeDataHeader)
+	if got := rewriteBlock(t, enums.DataTypeDataHeader, prop, 1234, 5555); got != prop {
+		t.Fatalf("proprietary data header changed: % X", got)
+	}
+
+	reserved := withCRC([12]byte{0x04, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2, 0x81, 0x00}, enums.DataTypeDataHeader)
+	if got := rewriteBlock(t, enums.DataTypeDataHeader, reserved, 1234, 5555); got != reserved {
+		t.Fatalf("reserved format data header changed: % X", got)
+	}
+
+	rsp := withCRC([12]byte{0x01, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2, 0x10, 0x00}, enums.DataTypeDataHeader)
+	want = withCRC([12]byte{0x01, 0x00, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2, 0x10, 0x00}, enums.DataTypeDataHeader)
+	if got := rewriteBlock(t, enums.DataTypeDataHeader, rsp, 1234, 5555); got != want {
+		t.Fatalf("response header % X, want % X", got, want)
+	}
+}

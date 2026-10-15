@@ -178,3 +178,61 @@ func TestTGRewriteRewritesLinkControlToMMDVM(t *testing.T) {
 		t.Fatalf("terminator LC % X, want 00 10 20 00 00 5B 2F 9B E5 8A 3E 72", term[0][38:50])
 	}
 }
+
+// privateCSBK is an IPSC private data packet carrying a preamble CSBK from
+// 1234 to 5555 with a valid CRC.
+func privateCSBK(t *testing.T) []byte {
+	t.Helper()
+	b := make([]byte, 54)
+	b[0] = 0x84
+	b[8] = 0xD2
+	b[7] = 0x04
+	b[10], b[11] = 0x15, 0xB3
+	b[12] = 0x01
+	b[16] = 0x55
+	b[18] = 0x80
+	b[30] = 0x03
+	copy(b[38:50], mustHex(t, "BD0080010015B30004D2B4D5"))
+	return b
+}
+
+func TestSrcRewriteRewritesCSBKToIPSC(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t)
+	c.state.Store(uint32(STATE_READY))
+	c.netRewrites = []rewrite.Rule{&rewrite.SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 1, ToTG: 9, Range: 1}}
+	var got [][]byte
+	c.SetIPSCHandler(func(_ context.Context, d []byte) { got = append(got, d) })
+
+	src, err := ipsc.NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkts := src.TranslateToMMDVM(0x84, privateCSBK(t))
+	if len(pkts) != 1 {
+		t.Fatalf("expected 1 MMDVM packet, got %d", len(pkts))
+	}
+	c.handleReady(pkts[0].Encode())
+	if len(got) != 1 || got[0][0] != 0x83 || hex.EncodeToString(got[0][38:50]) != "bd00c0010000090004d2fc72" {
+		t.Fatalf("IPSC CSBK %v, want group data with BD 00 C0 01 00 00 09 00 04 D2 FC 72", got)
+	}
+}
+
+func TestPCRewriteRewritesCSBKToMMDVM(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t)
+	c.started.Store(true)
+	c.rfRewrites = []rewrite.Rule{&rewrite.PCRewrite{Name: testRuleName, FromSlot: 1, FromID: 5555, ToSlot: 1, ToID: 6666, Range: 1}}
+	c.HandleIPSCBurst(0x84, privateCSBK(t), &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234})
+	if len(c.tx_chan) != 1 {
+		t.Fatalf("expected 1 MMDVM packet, got %d", len(c.tx_chan))
+	}
+	check, err := ipsc.NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := check.TranslateToIPSC(<-c.tx_chan)
+	if len(out) != 1 || hex.EncodeToString(out[0][38:50]) != "bd008001001a0a0004d2d38a" {
+		t.Fatalf("MMDVM CSBK %v, want BD 00 80 01 00 1A 0A 00 04 D2 D3 8A", out)
+	}
+}
