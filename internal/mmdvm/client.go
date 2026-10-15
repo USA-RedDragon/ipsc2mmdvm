@@ -29,6 +29,7 @@ type MMDVMClient struct {
 	conn         net.Conn
 	connMu       sync.Mutex // protects conn
 	state        atomic.Uint32
+	stateSince   atomic.Int64 // UnixNano of the last state change
 	connRX       chan []byte
 	connTX       chan []byte
 	keepAlive    time.Duration
@@ -37,6 +38,9 @@ type MMDVMClient struct {
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
 	ipscHandler  atomic.Pointer[func(data []byte)]
 	translator   *ipsc.IPSCTranslator
+	dial         func(ctx context.Context, network, address string) (net.Conn, error)
+	sessMu       sync.Mutex // serializes handshake transitions with supervise
+	salt         []byte     // last RPTACK salt, guarded by sessMu
 
 	// Rewrite rules built from config, applied to packets
 	// flowing through this network.
@@ -89,6 +93,7 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		timeout:      15 * time.Second,
 		translator:   translator,
 		inboundTSMgr: timeslot.NewManager(),
+		dial:         (&net.Dialer{}).DialContext,
 	}
 	c.state.Store(uint32(STATE_IDLE))
 	c.buildRewriteRules()
@@ -197,7 +202,7 @@ func (h *MMDVMClient) Start() error {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
 	}
 
-	err := h.connect()
+	conn, err := h.connect()
 	if err != nil {
 		return err
 	}
@@ -205,29 +210,40 @@ func (h *MMDVMClient) Start() error {
 	h.started.Store(true)
 
 	h.wg.Add(5)
+	go h.rx(conn)
 	go h.handler()
-	go h.rx()
 	go h.tx()
 	go h.forwardTX()
-	go h.handshakeWatchdog()
+	go h.supervise()
 
-	h.state.Store(uint32(STATE_SENT_LOGIN))
-	h.sendLogin()
+	h.sessMu.Lock()
+	h.startLogin()
+	h.sessMu.Unlock()
 
 	return nil
 }
 
-func (h *MMDVMClient) connect() error {
-	var err error
-	var d net.Dialer
-	conn, err := d.DialContext(context.Background(), "udp", h.cfg.MasterServer)
+// connect dials the master and installs the new connection. It fails if
+// the client has been stopped. The caller starts rx for the connection.
+func (h *MMDVMClient) connect() (net.Conn, error) {
+	dial := h.dial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	conn, err := dial(context.Background(), "udp", h.cfg.MasterServer)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	select {
+	case <-h.done:
+		_ = conn.Close()
+		return nil, net.ErrClosed
+	default:
+	}
 	h.conn = conn
-	h.connMu.Unlock()
-	return nil
+	return conn, nil
 }
 
 const rptAck = "RPTACK"
@@ -249,23 +265,42 @@ func (h *MMDVMClient) handler() {
 	}
 }
 
+func (h *MMDVMClient) currentState() state {
+	return state(h.state.Load()) //nolint:gosec // only state values are stored
+}
+
+// setState records a state change and when it happened. Handshake states
+// time out relative to that moment.
+func (h *MMDVMClient) setState(s state) {
+	h.stateSince.Store(time.Now().UnixNano())
+	h.state.Store(uint32(s))
+}
+
 func (h *MMDVMClient) handleState(data []byte) {
-	currentState := h.state.Load()
-	switch currentState {
-	case uint32(STATE_IDLE):
-		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
-	case uint32(STATE_SENT_LOGIN):
-		h.handleSentLogin(data)
-	case uint32(STATE_SENT_AUTH):
-		h.handleSentAuth(data)
-	case uint32(STATE_SENT_RPTC):
-		h.handleSentRPTC(data)
-	case uint32(STATE_READY):
+	h.sessMu.Lock()
+	if h.currentState() == STATE_READY {
+		h.sessMu.Unlock()
 		h.handleReady(data)
-	case uint32(STATE_TIMEOUT):
+		return
+	}
+	defer h.sessMu.Unlock()
+	switch h.currentState() {
+	case STATE_IDLE:
+		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
+	case STATE_SENT_LOGIN:
+		h.handleSentLogin(data)
+	case STATE_SENT_AUTH:
+		h.handleSentAuth(data)
+	case STATE_SENT_RPTC:
+		h.handleSentRPTC(data)
+	case STATE_READY:
+	case STATE_TIMEOUT:
 		slog.Info("Got data from MMDVM server while in timeout state", "network", h.cfg.Name)
 	}
 }
+
+// The handleSent* functions run with sessMu held. A rejected step is not
+// resent here; supervise retries it on its next tick.
 
 func (h *MMDVMClient) handleSentLogin(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
@@ -274,45 +309,39 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 			return
 		}
 		slog.Info("Connected. Authenticating", "network", h.cfg.Name)
-		random := data[len(data)-4:]
-		h.sendRPTK(random)
-		h.state.Store(uint32(STATE_SENT_AUTH))
+		h.salt = append(h.salt[:0], data[len(data)-4:]...)
+		h.sendRPTK(h.salt)
+		h.setState(STATE_SENT_AUTH)
 	} else {
 		slog.Info("Server rejected login request", "network", h.cfg.Name)
-		time.Sleep(1 * time.Second)
-		h.sendLogin()
 	}
 }
 
 func (h *MMDVMClient) handleSentAuth(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
 		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
-		h.state.Store(uint32(STATE_SENT_RPTC))
+		h.setState(STATE_SENT_RPTC)
 		h.sendRPTC()
 	} else if len(data) >= 6 && string(data[:6]) == "RPTNAK" {
 		slog.Info("Password rejected", "network", h.cfg.Name)
 		if h.metrics != nil {
 			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
 		}
-		h.state.Store(uint32(STATE_SENT_LOGIN))
-		time.Sleep(1 * time.Second)
-		h.sendLogin()
+		h.setState(STATE_SENT_LOGIN)
 	}
 }
 
 func (h *MMDVMClient) handleSentRPTC(data []byte) {
 	if len(data) >= 6 && string(data[:6]) == rptAck {
-		slog.Info("Config accepted, starting ping routine", "network", h.cfg.Name)
-		h.state.Store(uint32(STATE_READY))
+		slog.Info("Config accepted, logged in", "network", h.cfg.Name)
+		h.lastPing.Store(time.Now().UnixNano())
+		h.setState(STATE_READY)
 		if h.metrics != nil {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
 		}
-		h.wg.Add(1)
-		go h.ping()
+		h.sendPing()
 	} else if len(data) >= 6 && string(data[:6]) == "MSTNAK" {
 		slog.Info("Configuration rejected", "network", h.cfg.Name)
-		time.Sleep(1 * time.Second)
-		h.sendRPTC()
 	}
 }
 
@@ -360,57 +389,73 @@ func (h *MMDVMClient) handleReady(data []byte) {
 	}
 }
 
-func (h *MMDVMClient) ping() {
+// supervise owns the connection for the whole run. Every keepalive
+// interval it pings when READY, resends the current handshake step
+// otherwise, and reconnects when the master has stopped answering, the
+// handshake has not progressed within the timeout, or there is no
+// connection at all.
+func (h *MMDVMClient) supervise() {
 	defer h.wg.Done()
 	ticker := time.NewTicker(h.keepAlive)
 	defer ticker.Stop()
-	h.sendPing()
-	h.lastPing.Store(time.Now().UnixNano())
 	for {
 		select {
 		case <-ticker.C:
-			lastPingTime := time.Unix(0, h.lastPing.Load())
-			if time.Now().After(lastPingTime.Add(h.timeout)) {
-				slog.Info("Connection timed out", "network", h.cfg.Name)
-				h.reconnect()
-				return
-			}
-			h.sendPing()
+			h.tick(time.Now())
 		case <-h.done:
 			return
 		}
 	}
 }
 
-// handshakeWatchdog monitors the login/auth/config handshake and
-// triggers a reconnect if the client doesn't reach STATE_READY
-// within the timeout period. Once STATE_READY is reached the ping()
-// goroutine takes over liveness monitoring.
-func (h *MMDVMClient) handshakeWatchdog() {
-	defer h.wg.Done()
-	ticker := time.NewTicker(h.timeout)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			st := state(h.state.Load() & 0xFF) //nolint:gosec
-			if st == STATE_READY {
-				// Handshake completed, ping() is now responsible.
-				return
-			}
+func (h *MMDVMClient) tick(now time.Time) {
+	h.sessMu.Lock()
+	defer h.sessMu.Unlock()
+	switch st := h.currentState(); st {
+	case STATE_READY:
+		if now.Sub(time.Unix(0, h.lastPing.Load())) > h.timeout {
+			slog.Info("Connection timed out", "network", h.cfg.Name)
+			h.reconnect()
+			return
+		}
+		h.sendPing()
+	case STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC:
+		if now.Sub(time.Unix(0, h.stateSince.Load())) > h.timeout {
 			slog.Warn("Handshake timed out, reconnecting", "network", h.cfg.Name, "state", st)
 			h.reconnect()
-			// Stay in the loop to watch the next handshake attempt.
-		case <-h.done:
 			return
 		}
+		h.resend(st)
+	case STATE_IDLE, STATE_TIMEOUT:
+		h.reconnect()
 	}
 }
 
-// reconnect closes the current connection, dials a new one, and
-// sends a fresh login. It is safe to call from any goroutine.
+// resend repeats the handshake step for st. Must be called with sessMu held.
+func (h *MMDVMClient) resend(st state) {
+	switch st {
+	case STATE_SENT_LOGIN:
+		h.sendLogin()
+	case STATE_SENT_AUTH:
+		h.sendRPTK(h.salt)
+	case STATE_SENT_RPTC:
+		h.sendRPTC()
+	case STATE_IDLE, STATE_READY, STATE_TIMEOUT:
+	}
+}
+
+// startLogin begins a new handshake on the current connection. Must be
+// called with sessMu held.
+func (h *MMDVMClient) startLogin() {
+	h.setState(STATE_SENT_LOGIN)
+	h.sendLogin()
+}
+
+// reconnect closes the current connection, dials a new one, and starts a
+// fresh login. If the dial fails the client stays in STATE_TIMEOUT and the
+// next tick tries again. Must be called with sessMu held.
 func (h *MMDVMClient) reconnect() {
-	h.state.Store(uint32(STATE_TIMEOUT))
+	h.setState(STATE_TIMEOUT)
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(0)
 		h.metrics.MMDVMReconnects.WithLabelValues(h.cfg.Name).Inc()
@@ -420,13 +465,20 @@ func (h *MMDVMClient) reconnect() {
 		if err := h.conn.Close(); err != nil {
 			slog.Error("Error closing connection", "network", h.cfg.Name, "error", err)
 		}
+		h.conn = nil
 	}
 	h.connMu.Unlock()
-	if err := h.connect(); err != nil {
-		slog.Error("Error reconnecting to MMDVM server", "network", h.cfg.Name, "error", err)
+	conn, err := h.connect()
+	if err != nil {
+		slog.Error("Error connecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		return
 	}
-	h.state.Store(uint32(STATE_SENT_LOGIN))
-	h.sendLogin()
+	h.wg.Add(1)
+	go h.rx(conn)
+	if h.metrics != nil {
+		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
+	}
+	h.startLogin()
 }
 
 func (h *MMDVMClient) tx() {
@@ -455,30 +507,20 @@ func (h *MMDVMClient) tx() {
 	}
 }
 
-func (h *MMDVMClient) rx() {
+// rx reads from one connection until it is closed.
+func (h *MMDVMClient) rx(conn net.Conn) {
 	defer h.wg.Done()
 	for {
-		h.connMu.Lock()
-		conn := h.conn
-		h.connMu.Unlock()
 		data := make([]byte, 512)
 		n, err := conn.Read(data)
 		if err != nil {
-			if !h.started.Load() {
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			// If the connection was closed (e.g. by ping() during
-			// reconnect), loop back and pick up the new h.conn
-			// instead of exiting the goroutine.
-			if errors.Is(err, net.ErrClosed) {
-				// Small sleep to avoid a tight loop while the
-				// reconnect in ping() replaces h.conn.
-				select {
-				case <-time.After(100 * time.Millisecond):
-					continue
-				case <-h.done:
-					return
-				}
+			select {
+			case <-h.done:
+				return
+			default:
 			}
 			slog.Error("Error reading from MMDVM server", "network", h.cfg.Name, "error", err)
 			continue
