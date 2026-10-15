@@ -49,31 +49,62 @@ type lcStream struct {
 	lastPos  int
 }
 
-// embeddedLCBuffer collects the four fragments of one received embedded LC,
-// as DMRGateway's CDMREmbeddedData::addData does.
-type embeddedLCBuffer struct {
-	raw   [4][4]byte
-	next  int // fragments collected so far in this superframe
-	valid bool
-	flco  enums.FLCO
+// embeddedFragments collects the four embedded LC fragments of voice bursts
+// B-E of one superframe, so the four always come from the same superframe.
+// Burst B starts a new collection. Any other break drops the fragments
+// collected so far: a burst out of order or after a lost burst, or an EMB
+// that does not decode or has the wrong LCSS for the burst. MMDVMHost's
+// CDMREmbeddedData::addData collects fragments by their LCSS, and MMDVMHost
+// empties the buffer at each voice sync (DMRSlot.cpp lines 664-667).
+// Dropping the fragments on a lost or out-of-order burst is stricter.
+type embeddedFragments struct {
+	raw  [4][4]byte
+	next int // fragments collected so far
 }
 
-func (b *embeddedLCBuffer) add(frag [4]byte, lcss enums.LCSS) {
-	switch {
-	case lcss == enums.LCSSFirstFragment:
-		b.next, b.valid = 0, false
-	case lcss == enums.LCSSContinuationFragment && (b.next == 1 || b.next == 2):
-	case lcss == enums.LCSSLastFragment && b.next == 3:
-	default:
+// add adds frag, the embedded fragment of the voice burst at pos (B-E) with
+// EMB emb, which decoded when embOK is set. lastPos is the position of the
+// burst before it. add reports whether frag completes the four fragments.
+func (f *embeddedFragments) add(frag [4]byte, emb pdu.EmbeddedSignalling, embOK bool, pos, lastPos int) bool {
+	if pos == burstB {
+		f.next = 0
+	}
+	lcss, _ := (enums.VoiceBurstA + enums.VoiceBurstType(pos)).LCSS() //nolint:gosec // pos is 1-4
+	if !embOK || emb.LCSS != lcss || pos-burstB != f.next ||
+		(pos != burstB && pos != lastPos+1) {
+		f.next = 0
+		return false
+	}
+	f.raw[f.next] = frag
+	f.next++
+	if f.next < 4 {
+		return false
+	}
+	f.next = 0
+	return true
+}
+
+// embeddedLCBuffer holds the embedded LC received in one superframe, as
+// DMRGateway's CDMREmbeddedData does.
+type embeddedLCBuffer struct {
+	fragments embeddedFragments
+	raw       [4][4]byte // the LC re-encoded, when valid
+	valid     bool
+	flco      enums.FLCO
+}
+
+// reset empties the buffer for a new superframe, as MMDVMHost's
+// CDMREmbeddedData::reset does.
+func (b *embeddedLCBuffer) reset() {
+	b.fragments.next = 0
+	b.valid = false
+}
+
+func (b *embeddedLCBuffer) add(frag [4]byte, emb pdu.EmbeddedSignalling, embOK bool, pos, lastPos int) {
+	if !b.fragments.add(frag, emb, embOK, pos, lastPos) {
 		return
 	}
-	b.raw[b.next] = frag
-	b.next++
-	if b.next < 4 {
-		return
-	}
-	b.next = 0
-	lc, result := layer2.DecodeEmbeddedLC(b.raw, true)
+	lc, result := layer2.DecodeEmbeddedLC(b.fragments.raw, true)
 	if result.Uncorrectable {
 		return
 	}
@@ -83,17 +114,20 @@ func (b *embeddedLCBuffer) add(frag [4]byte, lcss enums.LCSS) {
 }
 
 // swap moves to the next superframe, as DMRGateway's CRewrite::swap does
-// (Rewrite.cpp lines 125-145).
+// (Rewrite.cpp lines 125-145), and empties the buffer for it, as
+// MMDVMHost's CDMRSlot::writeModem does, so no fragment of an older
+// superframe is left in it.
 func (st *lcStream) swap() {
 	if st.lastPos == 0 {
 		return
 	}
 	if st.readNum == 0 && st.writeNum == 0 {
 		st.writeNum = 1
-		return
+	} else {
+		st.readNum ^= 1
+		st.writeNum ^= 1
 	}
-	st.readNum ^= 1
-	st.writeNum ^= 1
+	st.received[st.writeNum].reset()
 }
 
 // processEmbedded records the embedded LC fragment of voice burst pos (B-E)
@@ -108,7 +142,7 @@ func (st *lcStream) swap() {
 func (st *lcStream) processEmbedded(data *[33]byte, pos int) {
 	raw := layer2.RawBurst(*data)
 	emb := raw.EMB()
-	st.received[st.writeNum].add(raw.EmbeddedData(), emb.LCSS)
+	st.received[st.writeNum].add(raw.EmbeddedData(), emb, !emb.FEC.Uncorrectable, pos, st.lastPos)
 
 	out := st.embedded
 	if st.readNum != 0 || st.writeNum != 0 {

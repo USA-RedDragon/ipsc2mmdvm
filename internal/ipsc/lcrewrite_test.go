@@ -680,3 +680,119 @@ func TestLCRewriterRebuildsEMB(t *testing.T) {
 		}
 	}
 }
+
+// TestLCRewriterNeverMixesSuperframes sends a call whose superframes all
+// carry the same talker alias, with bursts lost: E of the first superframe,
+// and B to D of the third. The alias fragments B-D of the first superframe
+// and E of the third would decode to the alias, but they are from two
+// superframes, so the third superframe has no embedded LC and the fourth
+// carries the rewritten LC.
+func TestLCRewriterNeverMixesSuperframes(t *testing.T) {
+	t.Parallel()
+	r := NewLCRewriter()
+	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+	newLC := [9]byte{0x00, 0x00, 0x80, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
+	alias := layer2.EncodeEmbeddedLC([9]byte{0x04, 0x00, 0x44, 'N', '0', 'C', 'A', 'L', 'L'})
+
+	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
+	out := hdr
+	out.Dst, out.GroupCall = 9, true
+	r.Rewrite(hdr, &out)
+
+	var bursts [][33]byte
+	for sf, vseqs := range [][]uint{{0, 1, 2, 3, 5}, {0, 1, 2, 3, 4, 5}, {0, 4, 5}, {0, 1, 2, 3, 4, 5}} {
+		for _, vseq := range vseqs {
+			v := voicePacket(0, enums.LCSSSingleFragment)
+			if vseq > 0 {
+				v = voiceWithEmbeddedLC(vseq, alias)
+			}
+			o := v
+			o.Dst, o.GroupCall = 9, true
+			r.Rewrite(v, &o)
+			if sf == 3 && vseq >= 1 && vseq <= 4 {
+				bursts = append(bursts, o.DMRData)
+			}
+		}
+	}
+	if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != newLC {
+		t.Fatalf("embedded LC % X, want % X", lc, newLC)
+	}
+}
+
+// TestEmbeddedFragmentsChecks adds embedded fragments of bursts B-E in
+// sequences that each break one rule of embeddedFragments.add. Only the
+// unbroken sequences complete an LC at their last burst.
+func TestEmbeddedFragmentsChecks(t *testing.T) {
+	t.Parallel()
+	type burst struct {
+		pos, lastPos int
+		lcss         enums.LCSS
+		embOK        bool
+	}
+	ok := func(pos, lastPos int) burst {
+		lcss, _ := (enums.VoiceBurstA + enums.VoiceBurstType(pos)).LCSS() //nolint:gosec // pos is 1-4
+		return burst{pos, lastPos, lcss, true}
+	}
+	badEMB := ok(burstC, burstB)
+	badEMB.embOK = false
+	badLCSS := ok(burstC, burstB)
+	badLCSS.lcss = enums.LCSSFirstFragment
+	tests := []struct {
+		name   string
+		bursts []burst
+		want   bool
+	}{
+		{"complete", []burst{ok(burstB, burstA), ok(burstC, burstB), ok(burstD, burstC), ok(burstE, burstD)}, true},
+		{"EMB does not decode", []burst{ok(burstB, burstA), badEMB, ok(burstD, burstC), ok(burstE, burstD)}, false},
+		{"wrong LCSS", []burst{ok(burstB, burstA), badLCSS, ok(burstD, burstC), ok(burstE, burstD)}, false},
+		{"burst F between D and E", []burst{ok(burstB, burstA), ok(burstC, burstB), ok(burstD, burstC), ok(burstE, burstF)}, false},
+		{"B starts again", []burst{ok(burstB, burstA), ok(burstC, burstB), ok(burstB, burstA), ok(burstC, burstB), ok(burstD, burstC), ok(burstE, burstD)}, true},
+	}
+	for _, tc := range tests {
+		var f embeddedFragments
+		var got bool
+		for i, b := range tc.bursts {
+			got = f.add([4]byte{byte(i)}, pdu.EmbeddedSignalling{LCSS: b.lcss}, b.embOK, b.pos, b.lastPos)
+		}
+		if got != tc.want {
+			t.Errorf("%s: complete %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLCRewriterForgetsOldSuperframes sends a call whose superframes carry a
+// talker alias, with burst E of the third lost. The third superframe's
+// buffer still holds the alias of the first, two superframes earlier, so
+// the fourth superframe must not take it for the third's: it carries the
+// rewritten LC.
+func TestLCRewriterForgetsOldSuperframes(t *testing.T) {
+	t.Parallel()
+	r := NewLCRewriter()
+	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+	newLC := [9]byte{0x00, 0x00, 0x80, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
+	alias := layer2.EncodeEmbeddedLC([9]byte{0x04, 0x00, 0x44, 'N', '0', 'C', 'A', 'L', 'L'})
+
+	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
+	out := hdr
+	out.Dst, out.GroupCall = 9, true
+	r.Rewrite(hdr, &out)
+
+	var bursts [][33]byte
+	for sf, vseqs := range [][]uint{{0, 1, 2, 3, 4, 5}, {0, 1, 2, 3, 4, 5}, {0, 1, 2, 3, 5}, {0, 1, 2, 3, 4, 5}} {
+		for _, vseq := range vseqs {
+			v := voicePacket(0, enums.LCSSSingleFragment)
+			if vseq > 0 {
+				v = voiceWithEmbeddedLC(vseq, alias)
+			}
+			o := v
+			o.Dst, o.GroupCall = 9, true
+			r.Rewrite(v, &o)
+			if sf == 3 && vseq >= 1 && vseq <= 4 {
+				bursts = append(bursts, o.DMRData)
+			}
+		}
+	}
+	if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != newLC {
+		t.Fatalf("embedded LC % X, want % X", lc, newLC)
+	}
+}
