@@ -362,6 +362,29 @@ func TestLCRewriterPrunesIdleStreams(t *testing.T) {
 	}
 }
 
+// A stream left without a terminator is pruned even when no later packet
+// needs a rewrite.
+func TestLCRewriterPrunesWithoutRewrites(t *testing.T) {
+	t.Parallel()
+	r := NewLCRewriter()
+	clock := &fakeClock{t: time.Unix(1000, 0)}
+	r.now = clock.now
+	v := voicePacket(1, enums.LCSSFirstFragment)
+	out := v
+	out.Dst = 9
+	r.Rewrite(v, &out)
+	clock.t = clock.t.Add(streamIdleTimeout + pruneInterval + time.Second)
+	v.StreamID = 8
+	out = v
+	r.Rewrite(v, &out)
+	r.mu.Lock()
+	n := len(r.streams)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("idle stream not pruned: %d streams", n)
+	}
+}
+
 // TestTranslateToIPSCFullLCFollowsPacketFields checks that the translator
 // takes the call type, destination, and source of the IPSC full LC from the
 // packet fields, which a rewrite rule may have changed, and keeps the

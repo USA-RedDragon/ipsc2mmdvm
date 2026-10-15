@@ -125,13 +125,13 @@ func NewLCRewriter() *LCRewriter {
 // Rewrite updates pkt.DMRData to match pkt when a rewrite rule changed the
 // source, destination, or call type of orig. Other packets are not changed.
 func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
-	if orig.Src == pkt.Src && orig.Dst == pkt.Dst && orig.GroupCall == pkt.GroupCall {
-		return
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
 	r.pruneLocked(now)
+	if orig.Src == pkt.Src && orig.Dst == pkt.Dst && orig.GroupCall == pkt.GroupCall {
+		return
+	}
 
 	switch pkt.FrameType {
 	case mmdvmFrameTypeDataSync:
