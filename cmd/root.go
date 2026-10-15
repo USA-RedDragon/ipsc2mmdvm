@@ -31,6 +31,7 @@ func NewCommand(version, commit string) *cobra.Command {
 		},
 		RunE:              runRoot,
 		SilenceErrors:     true,
+		SilenceUsage:      true,
 		DisableAutoGenTag: true,
 	}
 	return cmd
