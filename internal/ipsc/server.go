@@ -237,7 +237,11 @@ func (s *IPSCServer) handler() {
 
 		packet, err := s.handlePacket(data, addr)
 		if err != nil {
-			if !errors.Is(err, ErrPacketIgnored) {
+			switch {
+			case errors.Is(err, ErrPacketIgnored):
+			case errors.Is(err, ErrUnregisteredPeer):
+				slog.Debug("dropped packet from unregistered peer", "peer", addr, "error", err)
+			default:
 				slog.Warn("error parsing packet", "peer", addr, "error", err, "length", len(data), "packet", data)
 			}
 			continue
