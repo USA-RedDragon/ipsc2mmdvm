@@ -30,9 +30,14 @@ jobs:
 
       - name: Unit tests
         if: '!inputs.coverage'
+        env:
+          # renovate: datasource=go depName=github.com/jstemmer/go-junit-report/v2
+          GO_JUNIT_REPORT_VERSION: v2.1.0
+          # renovate: datasource=go depName=github.com/vakenbolt/go-test-report
+          GO_TEST_REPORT_VERSION: v0.9.3
         run: |
-          go install github.com/jstemmer/go-junit-report/v2@latest
-          go install github.com/vakenbolt/go-test-report@latest
+          go install "github.com/jstemmer/go-junit-report/v2@${GO_JUNIT_REPORT_VERSION}"
+          go install "github.com/vakenbolt/go-test-report@${GO_TEST_REPORT_VERSION}"
           env CGO_ENABLED=0 go test -v ./... > out.txt 2>&1 || true
           env CGO_ENABLED=0 go test -v ./... -json > json-out.txt 2>&1 || true
           cat out.txt | go-junit-report -out report.xml -iocopy
