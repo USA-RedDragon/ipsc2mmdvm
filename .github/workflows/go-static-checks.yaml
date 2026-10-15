@@ -14,6 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  generate:
+    name: go generate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go generate ./...
+      - name: Check for generated file drift
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git --no-pager diff
+            git status --short
+            echo "::error::go generate changed files. Run go generate ./... and commit the result."
+            exit 1
+          fi
+
   golangci:
     name: lint
     runs-on: ubuntu-24.04
