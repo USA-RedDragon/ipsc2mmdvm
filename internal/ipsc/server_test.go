@@ -1284,16 +1284,15 @@ func TestPacePeerEnforcesInterval(t *testing.T) {
 	cfg := testConfig(false, "")
 	s := NewIPSCServer(cfg, nil)
 
-	// First call establishes the timestamp
 	s.pacePeer(t.Context(), 1)
+	first := s.lastSend[1]
 
-	// Second call immediately after should sleep ~30ms
-	start := time.Now()
 	s.pacePeer(t.Context(), 1)
-	elapsed := time.Since(start)
-
-	if elapsed < s.pace*2/3 {
-		t.Fatalf("expected pacePeer to sleep %v, only waited %v", s.pace, elapsed)
+	if gap := s.lastSend[1].Sub(first); gap < s.pace {
+		t.Fatalf("second send claimed %v after the first, want at least %v", gap, s.pace)
+	}
+	if elapsed := time.Since(first); elapsed < s.pace {
+		t.Fatalf("pacePeer returned %v after the first send, want at least %v", elapsed, s.pace)
 	}
 }
 
@@ -1724,18 +1723,23 @@ func TestHandlerDeliversBurstsInOrder(t *testing.T) {
 	t.Parallel()
 	s, srvAddr := newTestServerWithUDP(t, false, "")
 
-	const total = 3000
-	var mu sync.Mutex
-	var got []uint32
+	const (
+		total  = 3000
+		window = 32
+	)
+	delivered := make(chan uint32, total)
 	s.SetBurstHandler(func(_ byte, data []byte, _ *net.UDPAddr) {
-		mu.Lock()
-		got = append(got, binary.BigEndian.Uint32(data[20:24]))
-		mu.Unlock()
+		delivered <- binary.BigEndian.Uint32(data[20:24])
 	})
 
 	registerPeer(t, s, 1)
 	s.wg.Add(1)
 	go s.handler()
+	defer func() {
+		s.stopped.Store(true)
+		s.udp.Close()
+		s.wg.Wait()
+	}()
 
 	client, err := net.DialUDP("udp", nil, srvAddr)
 	if err != nil {
@@ -1743,42 +1747,29 @@ func TestHandlerDeliversBurstsInOrder(t *testing.T) {
 	}
 	defer client.Close()
 
-	for i := range total {
-		data := make([]byte, 54)
-		data[0] = byte(PacketType_GroupVoice)
-		binary.BigEndian.PutUint32(data[1:5], 1)
-		binary.BigEndian.PutUint32(data[20:24], uint32(i))
-		if _, err := client.Write(data); err != nil {
-			t.Fatalf("write: %v", err)
+	want := uint32(0)
+	for sent := 0; sent < total; {
+		batch := min(window, total-sent)
+		for range batch {
+			data := make([]byte, 54)
+			data[0] = byte(PacketType_GroupVoice)
+			binary.BigEndian.PutUint32(data[1:5], 1)
+			binary.BigEndian.PutUint32(data[20:24], uint32(sent))
+			if _, err := client.Write(data); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			sent++
 		}
-		if i%50 == 0 {
-			time.Sleep(time.Millisecond)
-		}
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		done := len(got) > 0 && got[len(got)-1] == total-1
-		mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	s.stopped.Store(true)
-	s.udp.Close()
-	s.wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) < total/2 {
-		t.Fatalf("delivered only %d of %d bursts", len(got), total)
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i] <= got[i-1] {
-			t.Fatalf("burst %d delivered after burst %d", got[i], got[i-1])
+		for range batch {
+			select {
+			case got := <-delivered:
+				if got != want {
+					t.Fatalf("got burst %d, want burst %d", got, want)
+				}
+				want++
+			case <-time.After(5 * time.Second):
+				t.Fatalf("burst %d was not delivered", want)
+			}
 		}
 	}
 }
