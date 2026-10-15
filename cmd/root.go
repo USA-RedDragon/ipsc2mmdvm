@@ -84,6 +84,8 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		}()
 	}
 
+	ipscServer := ipsc.NewIPSCServer(cfg, m)
+
 	// Create one MMDVM client per configured network (DMR master).
 	// All clients share a single outbound timeslot manager so that
 	// only one master can feed a given timeslot toward IPSC at a time.
@@ -95,14 +97,13 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	for i := range cfg.MMDVM {
 		client := mmdvm.NewMMDVMClient(&cfg.MMDVM[i], m)
 		client.SetOutboundTSManager(outboundTSMgr)
+		client.SetIPSCHandler(ipscServer.SendUserPacket)
 		err = client.Start()
 		if err != nil {
 			return fmt.Errorf("failed to start MMDVM client %q: %w", cfg.MMDVM[i].Name, err)
 		}
 		mmdvmClients = append(mmdvmClients, client)
 	}
-
-	ipscServer := ipsc.NewIPSCServer(cfg, m)
 
 	ipscServer.SetBurstHandler(func(packetType byte, data []byte, addr *net.UDPAddr) {
 		for _, client := range mmdvmClients {
@@ -122,11 +123,6 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	})
-
-	// Wire all MMDVM clients' inbound data to the IPSC server.
-	for _, client := range mmdvmClients {
-		client.SetIPSCHandler(ipscServer.SendUserPacket)
-	}
 
 	err = ipscServer.Start()
 	if err != nil {
