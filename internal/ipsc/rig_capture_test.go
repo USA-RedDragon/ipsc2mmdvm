@@ -246,6 +246,88 @@ func rigDataToIPSC(t *testing.T, c rigDataCall) [][]byte {
 	return all
 }
 
+// checkDataEndPacket checks that p is the packet that ends a data call
+// when its last block is dropped, in the form an XPR 8400 sends it on
+// losing the signal: the 0x13 packet the repeater sent after the confirmed
+// rate 3/4 packet of rigRate34Calls, apart from the peer, byte 5, the call
+// control and RTP sequence and timestamp.
+func checkDataEndPacket(t *testing.T, p []byte) {
+	t.Helper()
+	r, _ := hex.DecodeString(rigRate34Calls()[1].packets[2])
+	if len(p) != len(r) || p[0] != r[0] || p[12] != r[12] || p[17] != r[17] ||
+		hex.EncodeToString(p[18:20]) != hex.EncodeToString(r[18:20]) ||
+		hex.EncodeToString(p[26:]) != hex.EncodeToString(r[26:]) {
+		t.Errorf("end packet\n got %x\nwant %x", p, r)
+	}
+}
+
+// TestUndecodableLastBlockEndsCall sends the confirmed rate 3/4 packet of
+// rigRate34Calls with its block damaged beyond trellis correction. The
+// block is dropped, but it is still the last block of the packet, so the
+// call ends with an end packet in its place.
+func TestUndecodableLastBlockEndsCall(t *testing.T) {
+	t.Parallel()
+	tr, err := NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.SetColorCode(7)
+	c := rigRate34Calls()[1]
+	for i, h := range c.bursts {
+		w, _ := hex.DecodeString(h)
+		if i == 1 {
+			for j := 0; j < 13; j++ {
+				w[j] ^= 0xA5
+			}
+		}
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, Slot: true,
+			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 80, DMRData: [33]byte(w),
+		})
+		if len(out) != 1 {
+			t.Fatalf("burst %d: got %d packets, want 1", i, len(out))
+		}
+		if i == 1 {
+			checkDataEndPacket(t, out[0])
+		}
+	}
+	if len(tr.streams) != 0 {
+		t.Fatalf("call still open after its last block: %d streams", len(tr.streams))
+	}
+}
+
+// TestRate1LastBlockEndsCall sends a confirmed rate 1 packet from 3191868
+// to 3140598 on TS2, as an MMDVM master sent it on the rig. IPSC cannot
+// carry the rate 1 block, so it is dropped, and an end packet ends the call
+// in its place.
+func TestRate1LastBlockEndsCall(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	bursts := []string{
+		"202d367370eee0d191d3dd2fddadff57d75df5de68e8f94673e020ae89c2082cfb",
+		"0050444d52474f20544553541ebdff57d75df5d32c0000000000000000d1d4302d",
+	}
+	types := []enums.DataType{enums.DataTypeDataHeader, enums.DataTypeRate1}
+	got := make([][]byte, 0, len(bursts))
+	for i, h := range bursts {
+		w, _ := hex.DecodeString(h)
+		got = append(got, tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 3140598, Slot: true,
+			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(types[i]), StreamID: 84, DMRData: [33]byte(w),
+		})...)
+	}
+	if len(got) != 2 || got[0][30] != ipscBurstDataHeader {
+		t.Fatalf("got %x, want the data header and an end packet", got)
+	}
+	checkDataEndPacket(t, got[1])
+	if string(got[1][13:17]) != string(got[0][13:17]) || got[1][5] != got[0][5] {
+		t.Errorf("end packet is not in the call of the header:\n%x\n%x", got[0], got[1])
+	}
+	if len(tr.streams) != 0 {
+		t.Fatalf("call still open after its last block: %d streams", len(tr.streams))
+	}
+}
+
 func TestRigRate34ToIPSC(t *testing.T) {
 	t.Parallel()
 	for _, c := range rigRate34Calls() {

@@ -270,12 +270,15 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			results = append(results, data)
 			t.removeStreamLocked(uint32(streamID))
 		case enums.DataTypeRate34:
+			last := ss.lastDataBlock(pkt.DMRData)
 			payload, res := layer2.RawBurst(pkt.DMRData).Rate34Payload()
 			if res.Uncorrectable {
 				slog.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
-				return nil
+				if last {
+					results = t.endDataCall(pkt, ss, uint32(streamID))
+				}
+				break
 			}
-			last := ss.lastDataBlock(pkt.DMRData)
 			results = append(results, t.buildIPSCRate34Packet(pkt, ss, payload, last))
 			ss.firstPacket = false
 			if last {
@@ -285,22 +288,23 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
 			enums.DataTypeRate1,
 			enums.DataTypeMBCHeader, enums.DataTypeMBCContinuation:
+			last := ss.lastDataBlock(pkt.DMRData)
 			burstType, ok := ipscDataBurstType(enums.DataType(dtypeOrVSeq))
 			if ok && burstType == ipscBurstPIHeader {
 				ss.privacy = true
 			}
-			if !ok {
-				slog.Debug("IPSCTranslator: dropping data burst with no verified IPSC encoding",
-					"dtype", enums.DataType(dtypeOrVSeq).String())
-				return nil
+			var payload [12]byte
+			if ok {
+				payload, ok = decodeBPTCPayload(pkt.DMRData, enums.DataType(dtypeOrVSeq))
 			}
-			payload, ok := decodeBPTCPayload(pkt.DMRData, enums.DataType(dtypeOrVSeq))
 			if !ok {
-				slog.Debug("IPSCTranslator: dropping data burst with uncorrectable BPTC errors",
+				slog.Debug("IPSCTranslator: dropping data burst with no IPSC encoding or uncorrectable BPTC errors",
 					"dtype", enums.DataType(dtypeOrVSeq).String())
-				return nil
+				if last {
+					results = t.endDataCall(pkt, ss, uint32(streamID))
+				}
+				break
 			}
-			last := ss.lastDataBlock(pkt.DMRData)
 			data := t.buildIPSCDataPacket(pkt, ss, burstType, payload, last)
 			results = append(results, data)
 			ss.firstPacket = false
@@ -461,8 +465,9 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 
 // lastDataBlock adds a data burst to the data packet of the call and
 // reports whether it completes the packet: a header with no blocks to
-// follow, or the last block. A packet whose CRC fails is complete too. Other
-// bursts, such as CSBKs, never complete a packet.
+// follow, or the last block. A packet whose CRC fails is complete too, and
+// a block that does not decode still counts. Other bursts, such as CSBKs,
+// never complete a packet.
 func (ss *streamState) lastDataBlock(data [33]byte) bool {
 	b, err := layer2.NewBurstFromBytes(data)
 	if err != nil {
@@ -496,6 +501,31 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
 	writeIPSCDataBurst(buf, burstType, 0x40, payload[:], slotTypeColorCode(pkt.DMRData))
 
+	return buf
+}
+
+// endDataCall ends the data call of stream streamID when no packet of it
+// carries the end flag, such as when its last block was dropped, and
+// returns the end packet that tells the IPSC peers, or nothing when no
+// packet of the call was sent.
+func (t *IPSCTranslator) endDataCall(pkt mmdvm.Packet, ss *streamState, streamID uint32) [][]byte {
+	t.removeStreamLocked(streamID)
+	if ss.firstPacket {
+		return nil
+	}
+	return [][]byte{t.buildIPSCDataEndPacket(pkt, ss)}
+}
+
+// buildIPSCDataEndPacket builds the 34-byte packet that an XPR 8400 sends
+// to end a data call when it loses the signal: a "sync not detected"
+// placeholder (burst type 0x13) with the end flag and RTP payload type
+// 0x5E, and the timeslot in bit 7 of byte 31.
+func (t *IPSCTranslator) buildIPSCDataEndPacket(pkt mmdvm.Packet, ss *streamState) []byte {
+	buf := make([]byte, 34)
+	t.buildIPSCHeader(buf, pkt, ss, true, true)
+	t.buildRTPHeader(buf, ss, false, 0x5E)
+	buf[30] = ipscBurstSyncUndetect
+	buf[31] = (buf[17] & 0x20) << 2
 	return buf
 }
 
