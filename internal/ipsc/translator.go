@@ -41,7 +41,9 @@ type streamState struct {
 	rtpSeq       uint16
 	rtpTimestamp uint32
 	ipscSeq      uint8
-	headersSent  int  // number of voice headers sent (3 required)
+	headersSent  int // number of voice headers sent (3 required)
+	lc           [9]byte
+	hasLC        bool // lc holds the full LC from the voice header
 	burstIndex   int  // 0-5 → A-F
 	firstPacket  bool // true for the very first packet
 }
@@ -142,16 +144,19 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		// Voice LC Header, Terminator, or Data
 		switch enums.DataType(dtypeOrVSeq) {
 		case enums.DataTypeVoiceLCHeader:
+			lc := fullLCFromBurst(pkt, enums.DataTypeVoiceLCHeader)
+			copy(ss.lc[:], lc[:9])
+			ss.hasLC = true
 			// Send voice header (IPSC sends 3 copies)
 			for i := 0; i < 3; i++ {
-				data := t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket)
+				data := t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket, lc)
 				results = append(results, data)
 			}
 			ss.headersSent = 3
 			ss.firstPacket = false
 			ss.burstIndex = 0
 		case enums.DataTypeTerminatorWithLC:
-			data := t.buildVoiceTerminator(pkt, ss)
+			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(pkt, enums.DataTypeTerminatorWithLC))
 			results = append(results, data)
 			// Clean up stream state
 			delete(t.streams, uint32(streamID))
@@ -292,7 +297,7 @@ func (t *IPSCTranslator) buildRTPHeader(buf []byte, ss *streamState, marker bool
 
 // buildVoiceHeader builds a 54-byte IPSC voice header packet.
 // Voice headers embed the Full LC (link control) data.
-func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isFirst bool) []byte {
+func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isFirst bool, lc [12]byte) []byte {
 	buf := make([]byte, 54)
 
 	t.buildIPSCHeader(buf, pkt, ss, false, false)
@@ -321,15 +326,14 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	// Bytes 38-49: Full LC data (12 bytes)
 	// Extract from the DMR burst data — the header burst carries a Voice LC Header
 	// which contains FLCO, FID, ServiceOpt, Dst, Src, CRC
-	flcBytes := extractFullLCBytes(pkt)
-	copy(buf[38:50], flcBytes[:12])
+	copy(buf[38:50], lc[:])
 
 	// Bytes 50-53: unknown trailing (zeros)
 	return buf
 }
 
 // buildVoiceTerminator builds a 54-byte IPSC voice terminator packet.
-func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState) []byte {
+func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState, lc [12]byte) []byte {
 	buf := make([]byte, 54)
 
 	t.buildIPSCHeader(buf, pkt, ss, true, false)
@@ -350,8 +354,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState)
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
 
 	// Full LC data
-	flcBytes := extractFullLCBytes(pkt)
-	copy(buf[38:50], flcBytes[:12])
+	copy(buf[38:50], lc[:])
 
 	ss.ipscSeq++
 	return buf
@@ -463,7 +466,14 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 			copy(buf[52:56], embData[:])
 		}
 
-		// Bytes 56-58 or 59-61: Destination repeated
+		// Bytes 56-58: FLCO, FID, and service options of the call's full LC
+		lc := ss.lc
+		if !ss.hasLC {
+			lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
+		}
+		copy(buf[56:59], lc[0:3])
+
+		// Bytes 59-61: Destination repeated
 		buf[59] = byte((pkt.Dst >> 16) & 0xFF)
 		buf[60] = byte((pkt.Dst >> 8) & 0xFF)
 		buf[61] = byte(pkt.Dst & 0xFF)
@@ -502,16 +512,27 @@ func decodeBPTCPayload(data [33]byte) ([12]byte, bool) {
 	return payload, !result.Uncorrectable
 }
 
-// extractFullLCBytes builds 12 bytes of Full Link Control data from the
-// packet fields: the LC octets and their masked RS(12,9) parity.
-func extractFullLCBytes(pkt mmdvm.Packet) [12]byte {
+// constructFullLC builds a 12-byte voice full LC (9 LC bytes plus masked
+// RS(12,9) parity) from call fields. It is the fallback when no valid LC is
+// available from the source. dataType is a voice LC header or terminator.
+func constructFullLC(src, dst uint, groupCall bool, dataType enums.DataType) [12]byte {
+	lc := constructLC(src, dst, groupCall)
+	if dataType != enums.DataTypeTerminatorWithLC {
+		dataType = enums.DataTypeVoiceLCHeader
+	}
+	cw, _ := lc.Codeword(dataType) // never fails for a voice LC header or terminator
+	return cw
+}
+
+// constructLC builds the 9-byte LC of a group or unit-to-unit voice call
+// with the standard feature set ID and the default service options.
+func constructLC(src, dst uint, groupCall bool) pdu.LCBytes {
 	var lc pdu.LCBytes
-	lc.SetGroup(pkt.GroupCall)
+	lc.SetGroup(groupCall)
 	lc.SetFID(enums.FIDStandardized)
 	lc.SetServiceOptions(0x20) // the default reserved bit
-	lc.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src))
-	cw, _ := lc.Codeword(enums.DataTypeVoiceLCHeader) // never fails for a voice LC header
-	return cw
+	lc.SetAddresses(lcAddress(dst), lcAddress(src))
+	return lc
 }
 
 // lcAddress returns the low 24 bits of id, the part of it that the DMRD and
@@ -532,6 +553,19 @@ func mmdvmVoiceDecodeOptions(pkt mmdvm.Packet) *layer2.DecodeOptions {
 		opts.VoiceBurst = enums.VoiceBurstA + enums.VoiceBurstType(pkt.DTypeOrVSeq)
 	}
 	return opts
+}
+
+// fullLCFromBurst returns the full LC carried by an MMDVM voice LC header or
+// terminator burst. If the burst does not decode to a valid LC, it returns
+// one built from the packet fields.
+func fullLCFromBurst(pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
+	lc, ok := decodeBPTCPayload(pkt.DMRData)
+	if ok && layer2.MMDVMHostAccepts(dataType, lc) {
+		return lc
+	}
+	slog.Debug("IPSCTranslator: invalid full LC in burst, constructing from packet fields",
+		"dtype", dataType.String())
+	return constructFullLC(pkt.Src, pkt.Dst, pkt.GroupCall, dataType)
 }
 
 // reverseStreamState tracks per-call state for IPSC→MMDVM translation.
@@ -692,16 +726,14 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	var lcBytes [12]byte
 	copy(lcBytes[:], ipscData[38:50])
 
-	// For voice LC headers and terminators, override the FLCO byte to match
-	// the group/private flag from the IPSC packet type.
-	if dataType == enums.DataTypeVoiceLCHeader || dataType == enums.DataTypeTerminatorWithLC {
-		if groupCall {
-			lcBytes[0] = byte(enums.FLCOGroupVoiceChannelUser)
-		} else {
-			lcBytes[0] = byte(enums.FLCOUnitToUnitVoiceChannelUser)
-		}
+	// Voice LC headers and terminators pass through when their parity is
+	// valid, so flags such as emergency, privacy, and the protect flag survive.
+	if (dataType == enums.DataTypeVoiceLCHeader || dataType == enums.DataTypeTerminatorWithLC) &&
+		!layer2.MMDVMHostAccepts(dataType, lcBytes) {
+		slog.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
+			"dtype", dataType.String())
+		lcBytes = constructFullLC(src, dst, groupCall, dataType)
 	}
-	// For CSBK/data types, preserve the payload bytes as-is from the radio
 
 	// Build the 33-byte DMR data burst
 	dmrData, err := layer2.BuildDataBurst(lcBytes, dataType, 0, layer2.SyncSourceBS)

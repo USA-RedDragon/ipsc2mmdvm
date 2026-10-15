@@ -21,6 +21,15 @@ func rawEMB(t *testing.T, raw *layer2.RawBurst) pdu.EmbeddedSignalling {
 	return emb
 }
 
+func testFullLC(t *testing.T, lc [9]byte, dt enums.DataType) [12]byte {
+	t.Helper()
+	full, err := pdu.LCBytes(lc).Codeword(dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return full
+}
+
 func newTestTranslator(t *testing.T) *IPSCTranslator {
 	t.Helper()
 	tr, err := NewIPSCTranslator()
@@ -417,34 +426,6 @@ func TestTranslateToMMDVMCSBK(t *testing.T) {
 	}
 	if result[0].DTypeOrVSeq != 3 { // DataTypeCSBK = 3
 		t.Fatalf("expected dtype 3 (CSBK), got %d", result[0].DTypeOrVSeq)
-	}
-}
-
-func TestExtractFullLCBytesGroupCall(t *testing.T) {
-	t.Parallel()
-	pkt := mmdvm.Packet{
-		GroupCall: true,
-		Src:       100,
-		Dst:       200,
-	}
-	lc := extractFullLCBytes(pkt)
-	// First byte should be FLCO for group call (0x00)
-	if lc[0] != 0x00 {
-		t.Fatalf("expected FLCO 0x00 (group), got 0x%02X", lc[0])
-	}
-}
-
-func TestExtractFullLCBytesPrivateCall(t *testing.T) {
-	t.Parallel()
-	pkt := mmdvm.Packet{
-		GroupCall: false,
-		Src:       100,
-		Dst:       200,
-	}
-	lc := extractFullLCBytes(pkt)
-	// First byte should be FLCO for unit-to-unit (0x03)
-	if lc[0] != 0x03 {
-		t.Fatalf("expected FLCO 0x03 (unit-to-unit), got 0x%02X", lc[0])
 	}
 }
 
@@ -1356,5 +1337,138 @@ func TestTranslateToIPSCDataPayloadDependsOnBurst(t *testing.T) {
 	}
 	if string(oa[0][38:50]) == string(ob[0][38:50]) {
 		t.Fatalf("different CSBKs produced the same IPSC payload % X", oa[0][38:50])
+	}
+}
+
+func TestFullLCMatchesCapturedIPSC(t *testing.T) {
+	t.Parallel()
+	// Voice headers and terminators captured from MOTOTRBO repeaters
+	// (DMRlink documents/voice_burst_decoding.txt, bytes 38-49).
+	vectors := []struct {
+		lc       [12]byte
+		dataType enums.DataType
+	}{
+		{[12]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x92, 0xaf, 0x70}, enums.DataTypeVoiceLCHeader},
+		{[12]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x9d, 0xa0, 0x7f}, enums.DataTypeTerminatorWithLC},
+		{[12]byte{0x00, 0x10, 0x20, 0x00, 0x0c, 0x30, 0x2f, 0x9b, 0xe5, 0xda, 0xd4, 0x5a}, enums.DataTypeVoiceLCHeader},
+		{[12]byte{0x00, 0x10, 0x20, 0x00, 0x0c, 0x30, 0x2f, 0x9b, 0xe5, 0xd5, 0xdb, 0x55}, enums.DataTypeTerminatorWithLC},
+	}
+	for _, v := range vectors {
+		if !layer2.MMDVMHostAccepts(v.dataType, v.lc) {
+			t.Fatalf("captured LC % X rejected", v.lc)
+		}
+		var lc9 [9]byte
+		copy(lc9[:], v.lc[:9])
+		if got := testFullLC(t, lc9, v.dataType); got != v.lc {
+			t.Fatalf("parity mismatch: got % X want % X", got, v.lc)
+		}
+		bad := v.lc
+		bad[2] ^= 0x80
+		if layer2.MMDVMHostAccepts(v.dataType, bad) {
+			t.Fatalf("corrupted LC % X accepted", bad)
+		}
+	}
+}
+
+func TestConstructFullLCIsValid(t *testing.T) {
+	t.Parallel()
+	for _, dt := range []enums.DataType{enums.DataTypeVoiceLCHeader, enums.DataTypeTerminatorWithLC} {
+		lc := constructFullLC(0x123456, 0x00ABCD, true, dt)
+		if !layer2.MMDVMHostAccepts(dt, lc) {
+			t.Fatalf("%s: constructed LC % X fails parity", dt.String(), lc)
+		}
+		if lc[0] != byte(enums.FLCOGroupVoiceChannelUser) || lc[2] != 0x20 {
+			t.Fatalf("%s: unexpected LC % X", dt.String(), lc)
+		}
+	}
+	if lc := constructFullLC(1, 2, false, enums.DataTypeVoiceLCHeader); lc[0] != byte(enums.FLCOUnitToUnitVoiceChannelUser) {
+		t.Fatalf("expected unit-to-unit FLCO, got 0x%02X", lc[0])
+	}
+}
+
+func TestTranslateToIPSCVoiceUsesDecodedFullLC(t *testing.T) {
+	t.Parallel()
+	// Protect flag, Motorola FID, emergency + privacy + broadcast service options.
+	lc9 := [9]byte{0x80, 0x10, 0xC8, 0x00, 0x00, 0xC8, 0x00, 0x00, 0x64}
+	header := testFullLC(t, lc9, enums.DataTypeVoiceLCHeader)
+	term := testFullLC(t, lc9, enums.DataTypeTerminatorWithLC)
+
+	tr := newTestTranslator(t)
+	hdr := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader))
+	hdr.DMRData = buildLCDataBurst(t, header, enums.DataTypeVoiceLCHeader, 1)
+	out := tr.TranslateToIPSC(hdr)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 headers, got %d", len(out))
+	}
+	for i, p := range out {
+		if string(p[38:50]) != string(header[:]) {
+			t.Fatalf("header %d LC % X, want % X", i, p[38:50], header)
+		}
+	}
+
+	for vseq := uint(0); vseq <= 4; vseq++ {
+		ft := mmdvmFrameTypeVoice
+		if vseq == 0 {
+			ft = mmdvmFrameTypeVoiceSync
+		}
+		v := makeTestMMDVMPacket(true, false, ft, vseq)
+		v.DMRData = makeVoiceDMRData(vseq == 0)
+		out = tr.TranslateToIPSC(v)
+	}
+	if len(out) != 1 || len(out[0]) != 66 {
+		t.Fatalf("expected one 66-byte burst E, got %d packets", len(out))
+	}
+	if string(out[0][56:59]) != string(lc9[0:3]) {
+		t.Fatalf("burst E LC prefix % X, want % X", out[0][56:59], lc9[0:3])
+	}
+
+	tm := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC))
+	tm.DMRData = buildLCDataBurst(t, term, enums.DataTypeTerminatorWithLC, 1)
+	out = tr.TranslateToIPSC(tm)
+	if len(out) != 1 || string(out[0][38:50]) != string(term[:]) {
+		t.Fatalf("terminator LC % X, want % X", out[0][38:50], term)
+	}
+}
+
+func TestTranslateToIPSCVoiceHeaderFallsBackOnBadLC(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	hdr := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader))
+	out := tr.TranslateToIPSC(hdr)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 headers, got %d", len(out))
+	}
+	want := constructFullLC(hdr.Src, hdr.Dst, true, enums.DataTypeVoiceLCHeader)
+	if string(out[0][38:50]) != string(want[:]) {
+		t.Fatalf("fallback LC % X, want % X", out[0][38:50], want)
+	}
+}
+
+func TestTranslateToMMDVMVoicePassesThroughFullLC(t *testing.T) {
+	t.Parallel()
+	lc9 := [9]byte{0x80, 0x10, 0xC8, 0x00, 0x00, 0xC8, 0x00, 0x00, 0x64}
+	for _, dt := range []enums.DataType{enums.DataTypeVoiceLCHeader, enums.DataTypeTerminatorWithLC} {
+		lc := testFullLC(t, lc9, dt)
+		burstType := ipscBurstVoiceHead
+		if dt == enums.DataTypeTerminatorWithLC {
+			burstType = ipscBurstVoiceTerm
+		}
+		data := makeTestIPSCPacket(0x80, burstType, true, false)
+		copy(data[38:50], lc[:])
+		out := newTestTranslator(t).TranslateToMMDVM(0x80, data)
+		if len(out) != 1 {
+			t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
+		}
+		got, ok := decodeBPTCPayload(out[0].DMRData)
+		if !ok || got != lc {
+			t.Fatalf("%s: MMDVM LC % X, want % X", dt.String(), got, lc)
+		}
+
+		bad := makeTestIPSCPacket(0x80, burstType, true, false)
+		out = newTestTranslator(t).TranslateToMMDVM(0x80, bad)
+		got, _ = decodeBPTCPayload(out[0].DMRData)
+		if want := constructFullLC(100, 200, true, dt); got != want {
+			t.Fatalf("%s: fallback LC % X, want % X", dt.String(), got, want)
+		}
 	}
 }
