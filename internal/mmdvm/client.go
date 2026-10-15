@@ -69,6 +69,8 @@ const (
 
 const (
 	packetTypeMstack = "MSTACK"
+	packetTypeMstnak = "MSTNAK"
+	packetTypeMstcl  = "MSTCL"
 )
 
 // DMR frame type and data type constants for call termination detection.
@@ -299,6 +301,11 @@ func (h *MMDVMClient) handleState(data []byte) {
 		return
 	}
 	defer h.sessMu.Unlock()
+	if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
+		slog.Warn("Master closed the connection, reconnecting", "network", h.cfg.Name)
+		h.reconnect()
+		return
+	}
 	switch h.currentState() {
 	case STATE_IDLE:
 		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
@@ -328,7 +335,7 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 		h.sendRPTK(h.salt)
 		h.setState(STATE_SENT_AUTH)
 	} else {
-		slog.Info("Server rejected login request", "network", h.cfg.Name)
+		slog.Warn("Server rejected login request", "network", h.cfg.Name)
 	}
 }
 
@@ -337,8 +344,8 @@ func (h *MMDVMClient) handleSentAuth(data []byte) {
 		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
 		h.setState(STATE_SENT_RPTC)
 		h.sendRPTC()
-	} else if len(data) >= 6 && string(data[:6]) == "RPTNAK" {
-		slog.Info("Password rejected", "network", h.cfg.Name)
+	} else if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+		slog.Warn("Password rejected", "network", h.cfg.Name)
 		if h.metrics != nil {
 			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
 		}
@@ -355,8 +362,9 @@ func (h *MMDVMClient) handleSentRPTC(data []byte) {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
 		}
 		h.sendPing()
-	} else if len(data) >= 6 && string(data[:6]) == "MSTNAK" {
-		slog.Info("Configuration rejected", "network", h.cfg.Name)
+	} else if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+		slog.Warn("Configuration rejected, logging in again", "network", h.cfg.Name)
+		h.setState(STATE_SENT_LOGIN)
 	}
 }
 
@@ -372,6 +380,17 @@ func (h *MMDVMClient) handleReady(data []byte) {
 				}
 			}
 			h.lastPing.Store(now.UnixNano())
+		}
+	case "MSTN":
+		if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+			h.relogin()
+		}
+	case "MSTC":
+		if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
+			slog.Warn("Master closed the connection, reconnecting", "network", h.cfg.Name)
+			h.sessMu.Lock()
+			h.reconnect()
+			h.sessMu.Unlock()
 		}
 	case "RPTS":
 		if len(data) >= 7 && string(data[:7]) == "RPTSBKN" {
@@ -460,6 +479,21 @@ func (h *MMDVMClient) resend(st state) {
 		h.sendRPTC()
 	case STATE_IDLE, STATE_READY, STATE_TIMEOUT:
 	}
+}
+
+// relogin starts a new login on the current connection after the master
+// rejected an established session.
+func (h *MMDVMClient) relogin() {
+	h.sessMu.Lock()
+	defer h.sessMu.Unlock()
+	if h.currentState() != STATE_READY {
+		return
+	}
+	slog.Warn("Master rejected the session, logging in again", "network", h.cfg.Name)
+	if h.metrics != nil {
+		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
+	}
+	h.startLogin()
 }
 
 // startLogin begins a new handshake on the current connection. Must be

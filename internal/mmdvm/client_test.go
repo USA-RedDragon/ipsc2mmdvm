@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 )
@@ -629,13 +632,19 @@ func TestHandlerSentAuthMSTACK(t *testing.T) {
 func TestHandlerSentAuthMSTNAK(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.metrics = metrics.NewMetrics()
 	client.keepAlive = time.Hour
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_AUTH)
 
-	client.handleState([]byte("RPTNAK__________"))
+	client.handleState([]byte(testMSTNAK))
 	if st := client.currentState(); st != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
+	}
+	rec := httptest.NewRecorder()
+	client.metrics.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
+	if want := `mmdvm_auth_failures_total{network="TestNet"} 1`; !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("expected %q in metrics output", want)
 	}
 
 	client.tick(time.Now())
@@ -705,15 +714,58 @@ func TestHandlerSentRPTCRejected(t *testing.T) {
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_RPTC)
 
-	client.handleState([]byte("MSTNAK__________"))
-	if len(client.connTX) != 0 {
-		t.Fatal("expected no immediate resend after rejection")
+	client.handleState([]byte(testMSTNAK))
+	if st := client.currentState(); st != STATE_SENT_LOGIN {
+		t.Fatalf("expected STATE_SENT_LOGIN after config rejection, got %d", st)
 	}
 
 	client.tick(time.Now())
 	data := <-client.connTX
-	if string(data[:4]) != tagRPTC {
-		t.Fatalf("expected RPTC retry, got %q", string(data[:4]))
+	if string(data[:4]) != tagRPTL {
+		t.Fatalf("expected RPTL after config rejection, got %q", string(data[:4]))
+	}
+}
+
+func TestHandlerReadyMSTNAKLogsInAgain(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.setState(STATE_READY)
+
+	client.handleState([]byte(testMSTNAK))
+	if st := client.currentState(); st != STATE_SENT_LOGIN {
+		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
+	}
+	select {
+	case data := <-client.connTX:
+		if string(data[:4]) != tagRPTL {
+			t.Fatalf("expected RPTL, got %q", string(data[:4]))
+		}
+	default:
+		t.Fatal("expected an immediate RPTL")
+	}
+}
+
+func TestHandlerMSTCLReconnects(t *testing.T) {
+	t.Parallel()
+	for _, st := range []state{STATE_READY, STATE_SENT_AUTH} {
+		serverConn, client := udpPair(t)
+		client.setState(st)
+		oldConn := client.conn
+
+		client.handleState(append([]byte(packetTypeMstcl), 0, 4, 0xC2, 0x34))
+
+		if got := client.currentState(); got != STATE_SENT_LOGIN {
+			t.Fatalf("state %d: expected STATE_SENT_LOGIN, got %d", st, got)
+		}
+		if client.conn == oldConn {
+			t.Fatalf("state %d: expected a new connection", st)
+		}
+		data := <-client.connTX
+		if string(data[:4]) != tagRPTL {
+			t.Fatalf("state %d: expected RPTL, got %q", st, string(data[:4]))
+		}
+		client.Stop()
+		serverConn.Close()
 	}
 }
 
