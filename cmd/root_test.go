@@ -6,7 +6,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -59,6 +62,48 @@ func TestStartMetricsServerServes(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestWaitForShutdownRunsStop(t *testing.T) {
+	t.Parallel()
+	sigCh := make(chan os.Signal, 2)
+	sigCh <- syscall.SIGTERM
+	stopped := false
+	if err := waitForShutdown(sigCh, func() { stopped = true }); err != nil {
+		t.Fatalf("expected clean shutdown, got %v", err)
+	}
+	if !stopped {
+		t.Fatal("expected stop to run")
+	}
+}
+
+func TestWaitForShutdownSecondSignalForcesExit(t *testing.T) {
+	t.Parallel()
+	sigCh := make(chan os.Signal, 2)
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+
+	result := make(chan error, 1)
+	go func() {
+		result <- waitForShutdown(sigCh, func() {
+			close(started)
+			<-release
+		})
+	}()
+
+	sigCh <- syscall.SIGINT
+	<-started
+	sigCh <- syscall.SIGINT
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, errForcedShutdown) {
+			t.Fatalf("expected %v, got %v", errForcedShutdown, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second signal did not interrupt a hung shutdown")
 	}
 }
 

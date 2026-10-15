@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"syscall"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 	"github.com/lmittmann/tint"
 	"github.com/spf13/cobra"
-	"github.com/ztrue/shutdown"
 )
+
+const metricsShutdownTimeout = 5 * time.Second
+
+var errForcedShutdown = errors.New("received a second signal, forcing exit")
 
 func NewCommand(version, commit string) *cobra.Command {
 	cmd := &cobra.Command{
@@ -65,7 +69,10 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	}
 	slog.SetDefault(logger)
 
-	// Create metrics and optionally start the metrics HTTP server.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+
 	var m *metrics.Metrics
 	var metricsSrv *http.Server
 	if cfg.Metrics.Enabled {
@@ -123,11 +130,11 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to start IPSC server: %w", err)
 	}
 
-	stop := func(sig os.Signal) {
-		slog.Info("received signal, shutting down...", "signal", sig.String())
-
+	return waitForShutdown(sigCh, func() {
 		if metricsSrv != nil {
-			if err := metricsSrv.Shutdown(context.Background()); err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+			defer cancel()
+			if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
 				slog.Error("Error shutting down metrics server", "error", err)
 			}
 		}
@@ -136,12 +143,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		for _, client := range mmdvmClients {
 			client.Stop()
 		}
-	}
-
-	shutdown.AddWithParam(stop)
-	shutdown.Listen(syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
-
-	return nil
+	})
 }
 
 // startMetricsServer binds addr before it returns, so a bind failure stops
@@ -164,4 +166,24 @@ func startMetricsServer(ctx context.Context, addr string, handler http.Handler) 
 		}
 	}()
 	return srv, nil
+}
+
+// waitForShutdown blocks until a signal arrives on sigCh, then runs stop.
+// A second signal while stop runs returns errForcedShutdown at once.
+func waitForShutdown(sigCh <-chan os.Signal, stop func()) error {
+	sig := <-sigCh
+	slog.Info("received signal, shutting down...", "signal", sig.String())
+
+	done := make(chan struct{})
+	go func() {
+		stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case sig := <-sigCh:
+		return fmt.Errorf("%w: %s", errForcedShutdown, sig)
+	}
 }
