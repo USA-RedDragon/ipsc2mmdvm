@@ -1421,6 +1421,16 @@ func TestStopWithNilConn(t *testing.T) {
 	s.Stop()
 }
 
+func TestStartAfterStopFails(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	s.Stop()
+	if err := s.Start(); !errors.Is(err, ErrServerStopped) {
+		t.Fatalf("Start after Stop returned %v, want %v", err, ErrServerStopped)
+	}
+	requireReturns(t, "Stop", s.Stop)
+}
+
 func TestHandlerLoopWithBurstHandler(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(false, "")

@@ -35,6 +35,7 @@ type IPSCServer struct {
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
 	bursts       chan burst
 
+	lifeMu   sync.Mutex
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
 	stopOnce sync.Once
@@ -90,6 +91,7 @@ var (
 	ErrPacketIgnored    = errors.New("packet ignored")
 	ErrUnregisteredPeer = errors.New("peer is not registered")
 	ErrTooManyPeers     = errors.New("too many registered peers")
+	ErrServerStopped    = errors.New("server stopped")
 )
 
 // maxPeers bounds the peer map so registrations with random peer IDs cannot
@@ -146,7 +148,15 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 	}
 }
 
+// Start configures the interface and starts serving. It returns
+// ErrServerStopped once Stop has been called.
 func (s *IPSCServer) Start() error {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.stopped.Load() {
+		return ErrServerStopped
+	}
+
 	if err := s.netlink(); err != nil {
 		return fmt.Errorf("error configuring network: %w", err)
 	}
@@ -171,6 +181,8 @@ func (s *IPSCServer) Start() error {
 func (s *IPSCServer) Stop() {
 	s.stopOnce.Do(func() {
 		slog.Info("Stopping IPSC server")
+		s.lifeMu.Lock()
+		defer s.lifeMu.Unlock()
 		s.stopped.Store(true)
 		close(s.done)
 		if s.udp != nil {
