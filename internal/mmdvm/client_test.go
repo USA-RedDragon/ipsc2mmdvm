@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -1747,6 +1749,7 @@ type fakeMaster struct {
 	pings        atomic.Int32
 	peer         atomic.Pointer[net.UDPAddr]
 	pongsEnabled atomic.Bool
+	dmrd         chan proto.Packet
 }
 
 func newFakeMaster(t *testing.T) *fakeMaster {
@@ -1755,7 +1758,7 @@ func newFakeMaster(t *testing.T) *fakeMaster {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	m := &fakeMaster{conn: conn}
+	m := &fakeMaster{conn: conn, dmrd: make(chan proto.Packet, 64)}
 	m.answer.Store(true)
 	m.pongsEnabled.Store(true)
 	t.Cleanup(func() { conn.Close() })
@@ -1774,6 +1777,13 @@ func newFakeMaster(t *testing.T) *fakeMaster {
 				m.pings.Add(1)
 				if m.pongsEnabled.Load() {
 					reply = []byte("MSTPONG\x00\x00\x00\x01")
+				}
+			case bytes.HasPrefix(data, []byte(tagDMRD)):
+				if pkt, ok := proto.Decode(data); ok {
+					select {
+					case m.dmrd <- pkt:
+					default:
+					}
 				}
 			case bytes.HasPrefix(data, []byte(tagRPTCL)):
 			case bytes.HasPrefix(data, []byte(tagRPTL)):
@@ -1851,6 +1861,66 @@ func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("IPSC handler was not called")
 	}
+}
+
+func TestStartSetsTranslatorColorCode(t *testing.T) {
+	t.Parallel()
+	m := newFakeMaster(t)
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = m.addr()
+	cfg.ColorCode = 9
+	cfg.PassAllTG = []int{1, 2}
+	c := NewMMDVMClient(cfg, nil)
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(c.Stop)
+	waitFor(t, 2*time.Second, "READY", isReady(c))
+
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
+	burst := func(burstType byte, seq uint16, length int) []byte {
+		data := ipscVoiceHeader(1)
+		data = append(data, make([]byte, max(0, length-len(data)))...)[:length]
+		data[30] = burstType
+		binary.BigEndian.PutUint16(data[20:22], seq)
+		return data
+	}
+	c.HandleIPSCBurst(0x80, burst(0x01, 0, 54), addr)
+	a := burst(0x0A, 1, 52)
+	a[32] = 0x40
+	c.HandleIPSCBurst(0x80, a, addr)
+	b := burst(0x0A, 2, 57)
+	b[56] = 0xE8
+	c.HandleIPSCBurst(0x80, b, addr)
+
+	var sawHeader, sawEMB bool
+	for !sawHeader || !sawEMB {
+		select {
+		case pkt := <-m.dmrd:
+			switch {
+			case pkt.FrameType == 2:
+				if cc := testSlotTypeColorCode(pkt.DMRData); cc != 9 {
+					t.Fatalf("header slot type color code %d, want 9", cc)
+				}
+				sawHeader = true
+			case pkt.FrameType == 0 && pkt.DTypeOrVSeq == 1:
+				if emb := testBurstEMB(pkt.DMRData); emb.FEC.Uncorrectable || emb.ColorCode != 9 {
+					t.Fatalf("voice burst B EMB %s, want color code 9", emb.String())
+				}
+				sawEMB = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("master did not get the bursts: header %v, burst B %v", sawHeader, sawEMB)
+		}
+	}
+}
+
+func testSlotTypeColorCode(data [33]byte) uint8 {
+	return uint8(layer2.RawBurst(data).SlotType().ColorCode)
+}
+
+func testBurstEMB(data [33]byte) pdu.EmbeddedSignalling {
+	return layer2.RawBurst(data).EMB()
 }
 
 func TestStopReturnsWhileSendBlockedOnFullQueue(t *testing.T) {

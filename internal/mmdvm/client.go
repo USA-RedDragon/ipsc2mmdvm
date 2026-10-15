@@ -224,6 +224,7 @@ func (h *MMDVMClient) Start() error {
 
 	if h.translator != nil {
 		h.translator.SetPeerID(h.cfg.ID)
+		h.translator.SetColorCode(h.cfg.ColorCode)
 	}
 
 	slog.Info("Connecting to MMDVM server", "network", h.cfg.Name)
