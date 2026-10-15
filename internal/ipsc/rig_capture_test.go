@@ -8,6 +8,108 @@ import (
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
+// rigPICall is a TS2 group call from 3191868 to 9 with a PI header (ALGID
+// 0x21, MFID 0x10, key ID 1, MI 0x12345678) and the privacy service option,
+// one superframe long, as the XPR 8400 relayed it.
+func rigPICall() []string {
+	return []string{
+		"800004ce2e7130b43c0000090200007113a080dd690838d06ae70000000001c0000a800a006000004000000930b43ce175ec00714970",
+		"800004ce2e7130b43c0000090200007113a0805d690938d06cc70000000000c0000a800a006021100112345678000009246e0070494f",
+		"800004ce2e7130b43c0000090200007113a0805d690a38d06ea7000000008a1440541cbd8ee6d793cd54372cbe82e8c4004a2a78",
+		"800004ce2e7130b43c0000090200007113a0805d690b38d07087000000008a1906dc54392640f6312d4a350e936cf863a3f517500000090072",
+		"800004ce2e7130b43c0000090200007113a0805d690c38d07267000000008a19064d5f0fa2997082675922d5678bc4820e4c5618060a470676",
+		"800004ce2e7130b43c0000090200007113a0805d690d38d07447000000008a190624461b4658531d9ba79627a12937002adef7b0090c280c76",
+		"800004ce2e7130b43c0000090200007113a0805d690e38d07627000000008a2216d01ff05dedbdaeaab3075525e078b0066268c84d27666900004000000930b43c74",
+		"800004ce2e7130b43c0000090200007113a0805d690f38d07807000000008a19069fcbcb8ec055b04b8eaa424aa8b8815bfbfc300000000070",
+		"800004ce2e7130b43c0000090200007113e0805e691038d079e70000000002c0000a800a006000004000000930b43cee7ae300724957",
+	}
+}
+
+// rigPICallBursts are the bursts dmrgo encodes for rigPICall, and
+// rigPICallKinds their DMRD frame types and data types or voice sequences.
+func rigPICallBursts() []string {
+	return []string{
+		"00954a5e05c80e003f504540dc4dff57d75df5d361841570380037642389b60041",
+		"147c924d38a402b9736085831c2dff57d75df5d0cd3f7018e1204ca60f58001603",
+		"6f7d2c51611e1813bb0927dee94755fd7df75f71bbfd6724638188a7a161c49575",
+		"8a3e8c022d191619eeaa053b03c73000009003849ea5bcfdf812bca894359e323a",
+		"4922df4c3e3bd60c0f3432b218977060a4706dd16e595bc6c5fc8e707c1726043d",
+		"62b67b404c70f4053a0dca5bf7077090c280cddf8428b241d17b05dd18bf1b0b70",
+		"9d3b07147149793a31b2bcd2f0c754d276669ae3805c3f7964072cffc3606f58eb",
+		"e7588ce8e83658da7b9e26672e171000000004b0e3074705b103f7dff1760aabbe",
+		"00fa4a8a05780e783f2045e0dc8dff57d75df5d4349016483f603b242b89af0072",
+	}
+}
+
+func rigPICallKinds() [][2]uint {
+	return [][2]uint{
+		{mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader)},
+		{mmdvmFrameTypeDataSync, uint(enums.DataTypePIHeader)},
+		{mmdvmFrameTypeVoiceSync, 0},
+		{mmdvmFrameTypeVoice, 1}, {mmdvmFrameTypeVoice, 2}, {mmdvmFrameTypeVoice, 3},
+		{mmdvmFrameTypeVoice, 4}, {mmdvmFrameTypeVoice, 5},
+		{mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC)},
+	}
+}
+
+func TestRigPICallToMMDVM(t *testing.T) {
+	t.Parallel()
+	got := translateRig(t, rigPICall())
+	checkRigBursts(t, got, rigPICallBursts())
+	for i, k := range rigPICallKinds() {
+		if got[i].FrameType != k[0] || got[i].DTypeOrVSeq != k[1] {
+			t.Errorf("packet %d: frame type %d dtype/vseq %d, want %d %d", i, got[i].FrameType, got[i].DTypeOrVSeq, k[0], k[1])
+		}
+	}
+}
+
+// rigVoiceToIPSC sends bursts with kinds to IPSC as a TS2 group call from
+// 3191868 to 9 and returns, for each packet the repeater sent in ref, the
+// one the translator built in its place. The three voice headers the
+// translator sends stand for the repeater's one.
+func rigVoiceToIPSC(t *testing.T, ref, bursts []string, kinds [][2]uint) [][]byte {
+	t.Helper()
+	tr, err := NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.SetPeerID(3149999)
+	tr.SetColorCode(7)
+	got := make([][]byte, 0, len(bursts))
+	for i, b := range bursts {
+		w, _ := hex.DecodeString(b)
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 9, GroupCall: true, Slot: true,
+			FrameType: kinds[i][0], DTypeOrVSeq: kinds[i][1], StreamID: 78, DMRData: [33]byte(w),
+		})
+		if len(out) == 0 {
+			t.Fatalf("burst %d: no packets", i)
+		}
+		got = append(got, out[len(out)-1])
+	}
+	if len(got) != len(ref) {
+		t.Fatalf("got %d packets, want %d", len(got), len(ref))
+	}
+	return got
+}
+
+// TestRigPICallToIPSC checks the packet type and the burst of each packet
+// the translator sends for rigPICall, apart from the RSSI.
+func TestRigPICallToIPSC(t *testing.T) {
+	t.Parallel()
+	ref := rigPICall()
+	for i, g := range rigVoiceToIPSC(t, ref, rigPICallBursts(), rigPICallKinds()) {
+		r, _ := hex.DecodeString(ref[i])
+		n := len(r)
+		if r[30] < ipscBurstSlot1 {
+			n -= 2
+		}
+		if g[0] != r[0] || len(g) != len(r) || hex.EncodeToString(g[32:n]) != hex.EncodeToString(r[32:n]) {
+			t.Errorf("packet %d:\n got %x\nwant %x", i, g, r)
+		}
+	}
+}
+
 // rigDataCall is a data packet "DMRGO TEST" that the XPR 8400 relayed on
 // TS2 from 3191868, the bursts dmrgo encodes for it, and their data types.
 type rigDataCall struct {

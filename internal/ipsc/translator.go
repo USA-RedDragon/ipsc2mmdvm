@@ -423,12 +423,15 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	return buf
 }
 
-// buildIPSCDataPacket builds a 54-byte IPSC data packet for CSBK, Data Header, etc.
-// The structure is identical to voice header/terminator but with data packet types (0x83/0x84).
+// buildIPSCDataPacket builds a 54-byte IPSC packet for a burst with a
+// BPTC(196,96) payload, such as a CSBK or a data header. The structure is
+// identical to the voice header and terminator. Data bursts go in data
+// packets (0x83/0x84); a PI header belongs to a voice call, and an XPR 8400
+// sends it in a voice packet (0x80/0x81).
 func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte, payload [12]byte) []byte {
 	buf := make([]byte, 54)
 
-	t.buildIPSCHeader(buf, pkt, ss, false, true)
+	t.buildIPSCHeader(buf, pkt, ss, false, burstType != ipscBurstPIHeader)
 
 	// RTP header: no marker, payload type 0x5D
 	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
