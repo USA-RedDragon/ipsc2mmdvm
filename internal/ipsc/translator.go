@@ -598,7 +598,15 @@ func (t *IPSCTranslator) buildIPSCRate34Packet(pkt mmdvm.Packet, ss *streamState
 // node-dmr-lib's DMRDataPayload, and an XPR 8400 on the test rig):
 //
 //	30     burst type (the DMR data type)
-//	31     bit 7: timeslot 2, the rest: RSSI and parity status flags
+//	31     bit 7: timeslot 2. Bit 6: RSSI status (node-dmr-lib's
+//	       rssiStatus). An XPR 8400 sets it only on packets that carry a
+//	       nonzero RSSI reading (0xC0/0x40 on its voice headers and
+//	       terminators), and clears it on the 50-byte voice headers it
+//	       sends with no RSSI. The bridge has no RSSI to report, so its
+//	       voice headers and terminators leave it clear, as node-dmr-lib's
+//	       IPSCPeer does. Its data packets set it with a zero RSSI, which
+//	       an XPR 8400 never sends. Bits 2-0: RS, CRC, and embedded LC
+//	       parity status.
 //	32-33  length to follow in 16-bit words (bytes 34 to the end)
 //	34     0x80: RSSI present
 //	35     0x0A: slot type present, data sync

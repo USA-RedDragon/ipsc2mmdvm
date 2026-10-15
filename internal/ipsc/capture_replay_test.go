@@ -343,3 +343,21 @@ func TestIPSCEmbeddedSignallingFromCapture(t *testing.T) {
 		}
 	}
 }
+
+// TestVoiceHeaderAndTerminatorRSSIStatusClear checks that byte 31 of a voice
+// header and terminator holds only the timeslot: the bridge has no RSSI
+// reading, so the RSSI status bit 6 stays clear.
+func TestVoiceHeaderAndTerminatorRSSIStatusClear(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []bool{false, true} {
+		want := byte(0x00)
+		if slot {
+			want = 0x80
+		}
+		for _, p := range headerTermDataPackets(t, true, slot) {
+			if (p[30] == ipscBurstVoiceHead || p[30] == ipscBurstVoiceTerm) && p[31] != want {
+				t.Errorf("slot %t burst type 0x%02X: byte 31 0x%02X, want 0x%02X", slot, p[30], p[31], want)
+			}
+		}
+	}
+}
