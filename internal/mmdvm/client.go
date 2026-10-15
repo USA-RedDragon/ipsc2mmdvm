@@ -369,8 +369,8 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 		}
 		slog.Info("Connected. Authenticating", "network", h.cfg.Name)
 		h.salt = append(h.salt[:0], data[len(data)-4:]...)
-		h.sendRPTK(h.salt)
 		h.setState(STATE_SENT_AUTH)
+		h.sendRPTK(h.salt)
 	} else {
 		slog.Warn("Server rejected login request", "network", h.cfg.Name)
 	}
