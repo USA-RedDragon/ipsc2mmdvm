@@ -352,7 +352,9 @@ func validateRewrites(h *MMDVM) error {
 			return ErrInvalidRewriteRange
 		}
 		if r.ToTG < 1 {
-			return fmt.Errorf("%w; src-rewrite: to-id was renamed to to-tg", ErrInvalidRewriteTG)
+			return fmt.Errorf("%w; src-rewrite: to-id was renamed to to-tg, and the rule changed: "+
+				"it no longer rewrites the source ID of any call, it now matches only private calls "+
+				"from the source IDs and turns them into group calls to to-tg, like DMRGateway SrcRewrite", ErrInvalidRewriteTG)
 		}
 	}
 	return nil

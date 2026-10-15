@@ -293,3 +293,5 @@ Each MMDVM entry can have these rule lists (fields are in the table above):
 - `pc-rewrite`: remap private calls by destination ID
 - `type-rewrite`: convert group TG calls to private calls
 - `src-rewrite`: convert private calls from a range of source IDs into group calls to one talkgroup (`to-tg`), keeping the source ID
+
+`src-rewrite` changed meaning. It used to rewrite the source ID of any call from the source range to `to-id`. It now matches only private calls from the source range and turns them into group calls to `to-tg`, like DMRGateway `SrcRewrite`. If your configuration has a `src-rewrite` rule with `to-id`, rename the key to `to-tg` and make sure the new behavior is what you want.

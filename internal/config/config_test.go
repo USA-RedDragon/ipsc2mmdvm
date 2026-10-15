@@ -399,6 +399,9 @@ func TestValidateSrcRewriteRequiresTG(t *testing.T) {
 	if !strings.Contains(err.Error(), "src-rewrite: to-id was renamed to to-tg") {
 		t.Fatalf("error %q does not name the to-id rename", err)
 	}
+	if !strings.Contains(err.Error(), "matches only private calls") || !strings.Contains(err.Error(), "group calls to to-tg") {
+		t.Fatalf("error %q does not explain the new src-rewrite meaning", err)
+	}
 	c.MMDVM[0].SrcRewrites[0].ToTG = 9
 	if err := c.Validate(); err != nil {
 		t.Fatalf("expected valid config, got %v", err)
