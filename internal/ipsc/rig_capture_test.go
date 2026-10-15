@@ -6,6 +6,8 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
@@ -438,6 +440,53 @@ func TestRigBadFramesAreSilence(t *testing.T) {
 		}
 		if frames != want {
 			t.Errorf("burst %c: frames %v, want %v", 'A'+i, frames, want)
+		}
+	}
+}
+
+// TestRigSACKResponseToMMDVM uses a selective retry response from 3140598
+// to 3191868 on TS2 that the XPR 8400 relayed: a response header and one
+// C_RDATA block asking again for blocks 1, 4 and 6 of an 8-block packet.
+// The bursts sent to MMDVM must decode to the same response with dmrgo.
+func TestRigSACKResponseToMMDVM(t *testing.T) {
+	t.Parallel()
+	got := translateRig(t, []string{
+		"840004ce2e742febf630b43c0100006bc22080ddd7133445d8f20000000006c0000a800a006001a030b43c2febf681800a520076496f",
+		"840004ce2e742febf630b43c0100006bc260805ed7143445dad20000000007c0000a800a0060b5ffffffffffffff0f341fd70077497f",
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d packets, want 2", len(got))
+	}
+	hb, err := layer2.NewBurstFromBytes(got[0].DMRData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, ok := hb.Data.(*pdu.DataHeader)
+	if !ok || h.ResponsePacketHeader == nil || hb.FEC.PDU.Uncorrectable {
+		t.Fatalf("header burst decodes to %T %+v, fec %+v", hb.Data, hb.Data, hb.FEC)
+	}
+	r := h.ResponsePacketHeader
+	if r.LLIDSource != 3140598 || r.LLIDDestination != 3191868 || r.ResponseClass != 2 || r.BlocksToFollow != 1 {
+		t.Errorf("response header %+v", r)
+	}
+	db, err := layer2.NewBurstFromBytes(got[1].DMRData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, ok := db.Data.(*pdu.Rate12Data)
+	if !ok {
+		t.Fatalf("C_RDATA burst decodes to %T", db.Data)
+	}
+	rd, err := packet.DecodeResponseData(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry := rd.RetryBlocks(); len(retry) != 3 || retry[0] != 1 || retry[1] != 4 || retry[2] != 6 {
+		t.Errorf("retry blocks %v, want [1 4 6]", retry)
+	}
+	for i, p := range got {
+		if p.Src != 3140598 || p.Dst != 3191868 || p.GroupCall || !p.Slot || p.FrameType != mmdvmFrameTypeDataSync {
+			t.Errorf("packet %d: %+v", i, p)
 		}
 	}
 }
