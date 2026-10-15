@@ -369,30 +369,8 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	// RTP header: marker on first header, payload type 0x5D
 	t.buildRTPHeader(buf, ss, isFirst, 0x5D)
 
-	// RTP Payload — voice header
-	burstType := ipscBurstSlot2
-	if !pkt.Slot {
-		burstType = ipscBurstSlot1
-	}
-	_ = burstType
-
-	buf[30] = ipscBurstVoiceHead                   // Burst type
-	buf[31] = 0x80                                 // RSSI threshold / parity
-	binary.BigEndian.PutUint16(buf[32:34], 0x000A) // Length to follow (10 words = 20 bytes)
-	buf[34] = 0x80                                 // RSSI status
-	if pkt.Slot {
-		buf[35] = ipscBurstSlot2 // Slot type/sync
-	} else {
-		buf[35] = ipscBurstSlot1
-	}
-	binary.BigEndian.PutUint16(buf[36:38], 0x0060) // Data size (96 bits = 12 bytes)
-
-	// Bytes 38-49: Full LC data (12 bytes)
-	// Extract from the DMR burst data — the header burst carries a Voice LC Header
-	// which contains FLCO, FID, ServiceOpt, Dst, Src, CRC
-	copy(buf[38:50], lc[:])
-
-	// Bytes 50-53: unknown trailing (zeros)
+	// RTP Payload — voice header with the full LC
+	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x80, lc, slotTypeColorCode(pkt.DMRData))
 	return buf
 }
 
@@ -406,19 +384,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	t.buildRTPHeader(buf, ss, false, 0x5E)
 
 	// RTP Payload — voice terminator (same structure as header)
-	buf[30] = ipscBurstVoiceTerm
-	buf[31] = 0x80
-	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
-	buf[34] = 0x80
-	if pkt.Slot {
-		buf[35] = ipscBurstSlot2
-	} else {
-		buf[35] = ipscBurstSlot1
-	}
-	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
-
-	// Full LC data
-	copy(buf[38:50], lc[:])
+	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x80, lc, slotTypeColorCode(pkt.DMRData))
 
 	ss.ipscSeq++
 	return buf
@@ -434,24 +400,49 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	// RTP header: no marker, payload type 0x5D
 	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
 
-	// RTP Payload — data burst
-	buf[30] = burstType
-	buf[31] = 0xC0 // RSSI threshold / parity
-	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
-	buf[34] = 0x80 // RSSI status
-	if pkt.Slot {
-		buf[35] = ipscBurstSlot2 // Slot type/sync
-	} else {
-		buf[35] = ipscBurstSlot1
-	}
-	binary.BigEndian.PutUint16(buf[36:38], 0x0060) // Data size (96 bits = 12 bytes)
+	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
+	writeIPSCDataBurst(buf, burstType, 0xC0, payload, slotTypeColorCode(pkt.DMRData))
 
-	// Bytes 38-49: BPTC(196,96)-decoded payload of the DMR burst
-	copy(buf[38:50], payload[:])
-
-	// Bytes 50-53: trailing (zeros)
 	ss.ipscSeq++
 	return buf
+}
+
+// writeIPSCDataBurst writes the 24-byte RTP payload (bytes 30-53) of an IPSC
+// voice header, terminator, or data packet. The layout follows MOTOTRBO
+// captures (DMRlink voice_burst_decoding.txt) and node-dmr-lib's
+// DMRDataPayload:
+//
+//	30     burst type (the DMR data type)
+//	31     RSSI threshold and parity flags
+//	32-33  length to follow in 16-bit words (10: bytes 34-53)
+//	34     0x80: RSSI present
+//	35     0x0A: slot type present, data sync
+//	36-37  payload size in bits (96)
+//	38-49  BPTC(196,96)-decoded payload
+//	50-51  slot type: color code (high nibble of 51) and DMR data type
+//	52-53  RSSI (left zero)
+func writeIPSCDataBurst(buf []byte, burstType, rssiParity byte, payload [12]byte, colorCode enums.ColorCode) {
+	buf[30] = burstType
+	buf[31] = rssiParity
+	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
+	buf[34] = 0x80
+	buf[35] = 0x0A
+	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
+	copy(buf[38:50], payload[:])
+	var slotType pdu.SlotTypeInfo
+	slotType.SetColorCode(colorCode)
+	slotType.SetDataType(enums.DataType(burstType))
+	buf[51] = byte(slotType)
+}
+
+// slotTypeColorCode returns the color code from the slot type of a DMR data
+// burst, or 0 when the slot type cannot be decoded.
+func slotTypeColorCode(data [33]byte) enums.ColorCode {
+	st := layer2.RawBurst(data).SlotType()
+	if st.FEC.Uncorrectable {
+		return 0
+	}
+	return st.ColorCode
 }
 
 // Superframe positions of the six voice bursts.

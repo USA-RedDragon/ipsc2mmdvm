@@ -551,7 +551,7 @@ func makeVoiceDMRData(syncBurst bool) [33]byte {
 	return data
 }
 
-// buildLCDataBurst returns layer2.BuildLCDataBurst(payload, dataType,
+// buildLCDataBurst returns buildLCDataBurst(t, payload, dataType,
 // colorCode) and fails the test on an error.
 func buildLCDataBurst(tb testing.TB, payload [12]byte, dataType enums.DataType, colorCode enums.ColorCode) [33]byte {
 	tb.Helper()
@@ -1782,5 +1782,56 @@ func TestEndFlagAfterTerminatorKeepsGaugeAccurate(t *testing.T) {
 	tr.TranslateToMMDVM(0x80, term)
 	if got := activeStreams(t, m, "ipsc_to_mmdvm"); got != 0 {
 		t.Fatalf("ipsc_to_mmdvm gauge %v, want 0", got)
+	}
+}
+
+func TestTranslateToIPSCMatchesCapturedHeaderAndTerminator(t *testing.T) {
+	t.Parallel()
+	// TS2 group call captured from a MOTOTRBO repeater (DMRlink
+	// documents/voice_burst_decoding.txt), bytes 30-51 of the header and
+	// terminator. Bytes 52-53 carry RSSI and are not compared.
+	lc := [9]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca}
+	captured := map[enums.DataType][]byte{
+		enums.DataTypeVoiceLCHeader: {
+			0x01, 0x80, 0x00, 0x0a, 0x80, 0x0a, 0x00, 0x60,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x92, 0xaf, 0x70, 0x00, 0x11,
+		},
+		enums.DataTypeTerminatorWithLC: {
+			0x02, 0x80, 0x00, 0x0a, 0x80, 0x0a, 0x00, 0x60,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x9d, 0xa0, 0x7f, 0x00, 0x12,
+		},
+	}
+	tr := newTestTranslator(t)
+	for _, dt := range []enums.DataType{enums.DataTypeVoiceLCHeader, enums.DataTypeTerminatorWithLC} {
+		p := makeTestMMDVMPacket(true, true, mmdvmFrameTypeDataSync, uint(dt))
+		p.Src = 0x2f7cca
+		p.Dst = 2
+		p.DMRData = buildLCDataBurst(t, testFullLC(t, lc, dt), dt, 1)
+		out := tr.TranslateToIPSC(p)
+		if len(out) == 0 || len(out[0]) != 54 {
+			t.Fatalf("%s: expected a 54-byte packet", dt.String())
+		}
+		if got := out[0][30:52]; string(got) != string(captured[dt]) {
+			t.Fatalf("%s:\n got % X\nwant % X", dt.String(), got, captured[dt])
+		}
+	}
+}
+
+func TestTranslateToIPSCDataSlotType(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []bool{false, true} {
+		tr := newTestTranslator(t)
+		p := makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
+		p.DMRData = buildLCDataBurst(t, [12]byte{0xBD}, enums.DataTypeCSBK, 7)
+		out := tr.TranslateToIPSC(p)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 packet, got %d", len(out))
+		}
+		if out[0][35] != 0x0A {
+			t.Fatalf("slot %t: byte 35 0x%02X, want 0x0A", slot, out[0][35])
+		}
+		if out[0][51] != 0x73 {
+			t.Fatalf("slot %t: slot type byte 0x%02X, want 0x73 (CC 7, CSBK)", slot, out[0][51])
+		}
 	}
 }
