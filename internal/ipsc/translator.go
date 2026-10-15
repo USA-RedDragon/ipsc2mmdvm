@@ -44,7 +44,6 @@ type streamState struct {
 	headersSent  int // number of voice headers sent (3 required)
 	lc           [9]byte
 	hasLC        bool // lc holds the full LC from the voice header
-	burstIndex   int  // 0-5 → A-F
 	firstPacket  bool // true for the very first packet
 }
 
@@ -154,7 +153,6 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 			}
 			ss.headersSent = 3
 			ss.firstPacket = false
-			ss.burstIndex = 0
 		case enums.DataTypeTerminatorWithLC:
 			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(pkt, enums.DataTypeTerminatorWithLC))
 			results = append(results, data)
@@ -195,8 +193,6 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 		if data != nil {
 			results = append(results, data)
 		}
-		// Advance burst index (A=0 through F=5, then wrap)
-		ss.burstIndex = (ss.burstIndex + 1) % 6
 
 	default:
 		slog.Debug("IPSCTranslator: unknown frame type", "frameType", frameType)
@@ -390,6 +386,56 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	return buf
 }
 
+// Superframe positions of the six voice bursts.
+const (
+	burstA = iota
+	burstB
+	burstC
+	burstD
+	burstE
+	burstF
+)
+
+// mmdvmVoiceBurstPosition returns the superframe position (0-5 for A-F) of
+// an MMDVM voice packet. A voice sync frame is always burst A; other voice
+// frames carry their position in the voice sequence field.
+func mmdvmVoiceBurstPosition(pkt mmdvm.Packet) (int, bool) {
+	if pkt.FrameType == mmdvmFrameTypeVoiceSync {
+		return burstA, true
+	}
+	if pkt.DTypeOrVSeq < burstB || pkt.DTypeOrVSeq > burstF {
+		return 0, false
+	}
+	return int(pkt.DTypeOrVSeq), true
+}
+
+// defaultLCSS is the embedded LC start/stop value a voice superframe uses at
+// each burst position.
+func defaultLCSS(pos int) enums.LCSS {
+	switch pos {
+	case burstB:
+		return enums.LCSSFirstFragment
+	case burstC, burstD:
+		return enums.LCSSContinuationFragment
+	case burstE:
+		return enums.LCSSLastFragment
+	default:
+		return enums.LCSSSingleFragment
+	}
+}
+
+// embByte encodes the IPSC EMB byte (color code, PI, and LCSS, FEC removed)
+// that follows the embedded data in bursts B-F. It uses the burst's decoded
+// EMB when available, otherwise the LCSS for the burst position.
+func embByte(burst *layer2.Burst, pos int) byte {
+	emb := pdu.EmbeddedSignalling{LCSS: defaultLCSS(pos)}
+	if burst.HasEmbeddedSignalling() && !burst.EmbeddedSignalling.FEC.Uncorrectable {
+		emb = burst.EmbeddedSignalling
+	}
+	info := emb.Info()
+	return byte(info)
+}
+
 // ipscDataBurstType maps a DMR data type to its IPSC burst type byte. It
 // reports false for data types that IPSC cannot carry: rate 3/4 and rate 1
 // payloads do not fit the verified 12-byte layout, and rate 1 (0x0A) would
@@ -434,7 +480,12 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		slotBurst = ipscBurstSlot1
 	}
 
-	burstIdx := ss.burstIndex % 6
+	burstIdx, ok := mmdvmVoiceBurstPosition(pkt)
+	if !ok {
+		slog.Debug("IPSCTranslator: invalid voice sequence", "frameType", pkt.FrameType, "vseq", pkt.DTypeOrVSeq)
+		return nil
+	}
+	emb := embByte(&t.burst, burstIdx)
 
 	var buf []byte
 	switch burstIdx {
@@ -481,7 +532,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		buf[62] = byte((pkt.Src >> 16) & 0xFF)
 		buf[63] = byte((pkt.Src >> 8) & 0xFF)
 		buf[64] = byte(pkt.Src & 0xFF)
-		buf[65] = 0x14 // Unknown trailer
+		buf[65] = emb
 
 	default: // Bursts B, C, D, F — 57 bytes with embedded signalling
 		buf = make([]byte, 57)
@@ -493,12 +544,13 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 		buf[32] = 0x06 // Unknown field
 		copy(buf[33:52], ambeData[:])
 
-		// Bytes 52-56: Embedded signalling data (5 bytes)
+		// Bytes 52-55: embedded signalling data, byte 56: EMB
 		if t.burst.HasEmbeddedSignalling() {
 			raw := layer2.RawBurst(pkt.DMRData)
 			embData := raw.EmbeddedData()
 			copy(buf[52:56], embData[:])
 		}
+		buf[56] = emb
 	}
 
 	return buf
@@ -542,15 +594,12 @@ func lcAddress(id uint) uint32 {
 }
 
 // mmdvmVoiceDecodeOptions returns the decode options for the burst of an
-// MMDVM voice packet: a voice burst at the superframe position that the
-// frame type and voice sequence give.
+// MMDVM voice packet: a voice burst at the superframe position that
+// mmdvmVoiceBurstPosition gives.
 func mmdvmVoiceDecodeOptions(pkt mmdvm.Packet) *layer2.DecodeOptions {
 	opts := &layer2.DecodeOptions{Kind: layer2.KindVoice}
-	switch {
-	case pkt.FrameType == mmdvmFrameTypeVoiceSync:
-		opts.VoiceBurst = enums.VoiceBurstA
-	case pkt.DTypeOrVSeq >= 1 && pkt.DTypeOrVSeq <= 5:
-		opts.VoiceBurst = enums.VoiceBurstA + enums.VoiceBurstType(pkt.DTypeOrVSeq)
+	if pos, ok := mmdvmVoiceBurstPosition(pkt); ok {
+		opts.VoiceBurst = enums.VoiceBurstA + enums.VoiceBurstType(pos) //nolint:gosec // pos is 0-5
 	}
 	return opts
 }
@@ -572,7 +621,9 @@ func fullLCFromBurst(pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
 type reverseStreamState struct {
 	streamID   uint32
 	seq        uint8
-	burstIndex int  // 0-5 → A-F within a superframe
+	lastPos    int    // superframe position of the last voice burst
+	lastRTPSeq uint16 // RTP sequence number of the last voice burst
+	hasLast    bool
 	started    bool // whether we've seen a voice header
 }
 
@@ -651,7 +702,6 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 				enums.DataTypeVoiceLCHeader, data)
 			results = append(results, pkt)
 			rss.started = true
-			rss.burstIndex = 0
 		}
 		// Skip duplicate headers
 
@@ -760,8 +810,14 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	// Unpack into 3 VocoderFrames (49 bits each)
 	frames := vocoder.UnpackAMBEVoice(ambeBytes)
 
-	// Determine if this is a sync burst (A) or embedded signalling burst (B-F)
-	burstIdx := rss.burstIndex % 6
+	burstIdx, ok := ipscVoiceBurstPosition(rss, ipscData)
+	if !ok {
+		slog.Debug("IPSCTranslator: cannot place voice burst in superframe", "length", len(ipscData))
+		return nil
+	}
+	rss.lastPos = burstIdx
+	rss.lastRTPSeq = binary.BigEndian.Uint16(ipscData[20:22])
+	rss.hasLast = true
 
 	burst := layer2.Burst{Kind: layer2.KindVoice}
 	burst.SetAMBEFrames(frames)
@@ -824,29 +880,61 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 		DMRData:     dmrData,
 	}
 	rss.seq++
-	rss.burstIndex = (rss.burstIndex + 1) % 6
 
 	return []mmdvm.Packet{pkt}
+}
+
+// ipscVoiceBurstPosition returns the superframe position (0-5 for A-F) of an
+// IPSC voice burst. Burst A is 52 bytes and burst E is 66 bytes. Bursts B, C,
+// D, and F are 57 bytes and are told apart by the LCSS in the EMB byte at
+// offset 56: B starts the embedded LC, F is a single fragment, and C and D
+// are both continuations. C and D are resolved from the RTP sequence distance
+// to the previous burst, so a lost packet does not shift later positions.
+func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
+	expected := -1
+	if rss.hasLast {
+		delta := binary.BigEndian.Uint16(data[20:22]) - rss.lastRTPSeq
+		if delta > 0 && delta < 6 {
+			expected = (rss.lastPos + int(delta)) % 6
+		}
+	}
+
+	switch len(data) {
+	case 52:
+		return burstA, true
+	case 66:
+		return burstE, true
+	case 57:
+		switch pdu.EMBInfo(data[56]).LCSS() {
+		case enums.LCSSFirstFragment:
+			return burstB, true
+		case enums.LCSSSingleFragment:
+			return burstF, true
+		case enums.LCSSContinuationFragment:
+			if expected == burstC || expected == burstD {
+				return expected, true
+			}
+			if rss.hasLast && rss.lastPos == burstC {
+				return burstD, true
+			}
+			return burstC, true
+		case enums.LCSSLastFragment:
+		}
+	}
+	return expected, expected >= 0
 }
 
 // populateEmbeddedSignalling fills in the embedded signalling fields
 // for voice bursts B-F from the IPSC packet's trailing data.
 func (t *IPSCTranslator) populateEmbeddedSignalling(raw *layer2.RawBurst, burstIdx int, ipscData []byte) {
-	// Set up a basic embedded signalling with color code 0
 	emb := pdu.EmbeddedSignalling{
-		ColorCode:                          0,
-		PreemptionAndPowerControlIndicator: false,
-		LCSS:                               enums.LCSSContinuationFragment,
+		LCSS: defaultLCSS(burstIdx),
 	}
 
-	// Set LCSS based on burst position
-	switch burstIdx {
-	case 1: // Burst B — first fragment
-		emb.LCSS = enums.LCSSFirstFragment
-	case 4: // Burst E — last fragment
-		emb.LCSS = enums.LCSSLastFragment
-	default: // Bursts C, D, F — continuation
-		emb.LCSS = enums.LCSSContinuationFragment
+	// The EMB byte follows the embedded data: offset 56 in the 57-byte
+	// bursts B, C, D, and F, offset 65 in the 66-byte burst E.
+	if len(ipscData) == 57 || len(ipscData) == 66 {
+		emb = pdu.EMBInfo(ipscData[len(ipscData)-1]).EmbeddedSignalling()
 	}
 	raw.SetEMB(emb)
 
