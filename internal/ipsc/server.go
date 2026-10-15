@@ -80,6 +80,11 @@ const (
 	PacketType_PeerListReply         PacketType = 0x93
 	PacketType_MasterAliveRequest    PacketType = 0x96
 	PacketType_MasterAliveReply      PacketType = 0x97
+	// PacketType_RepeaterStatus is sent by an XPR 8400 right after each
+	// master register or keepalive reply: the peer ID and four more bytes,
+	// zero or a value like 56 63 11 00. Its meaning is unknown and it needs
+	// no reply.
+	PacketType_RepeaterStatus PacketType = 0xF0
 )
 
 var (
@@ -345,6 +350,9 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 		if err := s.handlePeerListRequest(data, addr); err != nil {
 			return nil, err
 		}
+	case PacketType_RepeaterStatus:
+		s.countReceived("repeater_status")
+		return nil, ErrPacketIgnored
 	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply:
 		// These are reply packets, we shouldn't receive them as a server, keeping quiet.
 		return nil, ErrPacketIgnored

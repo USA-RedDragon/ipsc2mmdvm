@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1" //nolint:gosec
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"sync"
@@ -436,6 +437,25 @@ func TestHandlePacketReplyTypesIgnored(t *testing.T) {
 		_, err := s.handlePacket(data, addr)
 		if !errors.Is(err, ErrPacketIgnored) {
 			t.Fatalf("expected ErrPacketIgnored for type 0x%02X, got %v", pt, err)
+		}
+	}
+}
+
+// TestHandlePacketRepeaterStatusIgnored uses the 0xF0 packets an XPR 8400
+// (peer 314926) sent after keepalive replies on the test rig.
+func TestHandlePacketRepeaterStatusIgnored(t *testing.T) {
+	t.Parallel()
+	cfg := testConfig(false, "")
+	s := NewIPSCServer(cfg, nil)
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 0, 231), Port: 50000}
+
+	for _, h := range []string{"f00004ce2e00000000", "f00004ce2e56631100", "f00004ce2ea4631100"} {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.handlePacket(data, addr); !errors.Is(err, ErrPacketIgnored) {
+			t.Fatalf("%s: got %v, want ErrPacketIgnored", h, err)
 		}
 	}
 }
