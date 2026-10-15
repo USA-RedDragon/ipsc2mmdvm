@@ -31,6 +31,7 @@ type IPSCServer struct {
 	lastSend map[uint32]time.Time
 
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
+	bursts       chan burst
 
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
@@ -40,6 +41,16 @@ type IPSCServer struct {
 type Packet struct {
 	data []byte
 }
+
+type burst struct {
+	packetType byte
+	data       []byte
+	addr       *net.UDPAddr
+}
+
+// burstQueueSize bounds the user packets waiting for the burst handler, so a
+// stalled MMDVM side drops voice instead of blocking keepalive replies.
+const burstQueueSize = 256
 
 type Peer struct {
 	ID                 uint32
@@ -105,6 +116,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		authKey:  authKey,
 		peers:    map[uint32]*Peer{},
 		lastSend: map[uint32]time.Time{},
+		bursts:   make(chan burst, burstQueueSize),
 	}
 }
 
@@ -174,6 +186,18 @@ func (s *IPSCServer) netlink() error {
 
 func (s *IPSCServer) handler() {
 	defer s.wg.Done()
+
+	quit := make(chan struct{})
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		s.burstWorker(quit)
+	}()
+	defer func() {
+		close(quit)
+		<-workerDone
+	}()
+
 	buf := make([]byte, 1500)
 	for {
 		n, addr, err := s.udp.ReadFromUDP(buf)
@@ -190,20 +214,29 @@ func (s *IPSCServer) handler() {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 
-		s.wg.Add(1)
-		go func(packetData []byte, packetAddr *net.UDPAddr) {
-			defer s.wg.Done()
-			packet, err := s.handlePacket(packetData, packetAddr)
-			if err != nil {
-				if errors.Is(err, ErrPacketIgnored) {
-					return
-				}
-				slog.Warn("error parsing packet", "peer", packetAddr, "error", err, "length", len(packetData), "packet", packetData)
-				return
+		packet, err := s.handlePacket(data, addr)
+		if err != nil {
+			if !errors.Is(err, ErrPacketIgnored) {
+				slog.Warn("error parsing packet", "peer", addr, "error", err, "length", len(data), "packet", data)
 			}
+			continue
+		}
+		slog.Debug("received packet", "peer", addr, "length", len(data), "packet", packet)
+	}
+}
 
-			slog.Debug("received packet", "peer", packetAddr, "length", len(packetData), "packet", packet)
-		}(data, addr)
+// burstWorker delivers queued user packets to the burst handler one at a time,
+// in the order they were received, until quit is closed.
+func (s *IPSCServer) burstWorker(quit <-chan struct{}) {
+	for {
+		select {
+		case <-quit:
+			return
+		case b := <-s.bursts:
+			if s.burstHandler != nil {
+				s.burstHandler(b.packetType, b.data, b.addr)
+			}
+		}
 	}
 }
 
@@ -360,7 +393,11 @@ func (s *IPSCServer) handleUserPacket(packetType PacketType, data []byte, addr *
 	if s.burstHandler != nil {
 		packetCopy := make([]byte, len(data))
 		copy(packetCopy, data)
-		go s.burstHandler(byte(packetType), packetCopy, addr)
+		select {
+		case s.bursts <- burst{packetType: byte(packetType), data: packetCopy, addr: addr}:
+		default:
+			slog.Warn("IPSC burst queue full, dropping packet", "peer", addr, "peerID", peerID)
+		}
 	}
 	return nil
 }

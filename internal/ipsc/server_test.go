@@ -492,6 +492,21 @@ func newTestServerWithUDP(t *testing.T, authEnabled bool, authKey string) (*IPSC
 	return s, addr
 }
 
+// startBurstWorker runs the burst worker for tests that call handlePacket directly.
+func startBurstWorker(t *testing.T, s *IPSCServer) {
+	t.Helper()
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.burstWorker(quit)
+	}()
+	t.Cleanup(func() {
+		close(quit)
+		<-done
+	})
+}
+
 // readUDP reads one datagram from the given conn with a timeout.
 func readUDP(t *testing.T, conn *net.UDPConn) []byte {
 	t.Helper()
@@ -811,6 +826,7 @@ func TestHandleUserPacketCallsBurstHandler(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(false, "")
 	s := NewIPSCServer(cfg, nil)
+	startBurstWorker(t, s)
 
 	var received atomic.Bool
 	var gotType atomic.Uint32
@@ -911,6 +927,7 @@ func TestHandleUserPacketBurstHandlerReceivesDataCopy(t *testing.T) {
 	t.Parallel()
 	cfg := testConfig(false, "")
 	s := NewIPSCServer(cfg, nil)
+	startBurstWorker(t, s)
 
 	var receivedData []byte
 	var wg sync.WaitGroup
@@ -1644,5 +1661,153 @@ func TestErrPacketIgnoredIsSentinel(t *testing.T) {
 	_, err := s.handlePacket(data, addr)
 	if !errors.Is(err, ErrPacketIgnored) {
 		t.Fatalf("expected ErrPacketIgnored, got %v", err)
+	}
+}
+
+func TestHandlerDeliversBurstsInOrder(t *testing.T) {
+	t.Parallel()
+	s, srvAddr := newTestServerWithUDP(t, false, "")
+
+	const total = 3000
+	var mu sync.Mutex
+	var got []uint32
+	s.SetBurstHandler(func(_ byte, data []byte, _ *net.UDPAddr) {
+		mu.Lock()
+		got = append(got, binary.BigEndian.Uint32(data[20:24]))
+		mu.Unlock()
+	})
+
+	s.wg.Add(1)
+	go s.handler()
+
+	client, err := net.DialUDP("udp", nil, srvAddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	for i := range total {
+		data := make([]byte, 54)
+		data[0] = byte(PacketType_GroupVoice)
+		binary.BigEndian.PutUint32(data[1:5], 1)
+		binary.BigEndian.PutUint32(data[20:24], uint32(i))
+		if _, err := client.Write(data); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if i%50 == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := len(got) > 0 && got[len(got)-1] == total-1
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	s.stopped.Store(true)
+	s.udp.Close()
+	s.wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) < total/2 {
+		t.Fatalf("delivered only %d of %d bursts", len(got), total)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Fatalf("burst %d delivered after burst %d", got[i], got[i-1])
+		}
+	}
+}
+
+func TestSlowBurstHandlerDoesNotBlockKeepalives(t *testing.T) {
+	t.Parallel()
+	s, srvAddr := newTestServerWithUDP(t, false, "")
+
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	s.SetBurstHandler(func(byte, []byte, *net.UDPAddr) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+	})
+
+	s.wg.Add(1)
+	go s.handler()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer client.Close()
+
+	const peerID = 4242
+	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterRegisterRequest, peerID), srvAddr); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterRegisterReply) {
+		t.Fatalf("expected register reply, got 0x%02X", reply[0])
+	}
+
+	voice := make([]byte, 54)
+	voice[0] = byte(PacketType_GroupVoice)
+	binary.BigEndian.PutUint32(voice[1:5], peerID)
+	if _, err := client.WriteToUDP(voice, srvAddr); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("burst handler was not called")
+	}
+
+	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterAliveRequest, peerID), srvAddr); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterAliveReply) {
+		t.Fatalf("expected alive reply, got 0x%02X", reply[0])
+	}
+
+	close(release)
+	s.stopped.Store(true)
+	s.udp.Close()
+	s.wg.Wait()
+}
+
+func TestBurstQueueFullDropsInsteadOfBlocking(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	s.SetBurstHandler(func(byte, []byte, *net.UDPAddr) {})
+
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
+	data := make([]byte, 54)
+	data[0] = byte(PacketType_GroupVoice)
+	binary.BigEndian.PutUint32(data[1:5], 42)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range burstQueueSize + 10 {
+			if _, err := s.handlePacket(data, addr); err != nil {
+				t.Errorf("handlePacket error: %v", err)
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handlePacket blocked on a full burst queue")
+	}
+	if len(s.bursts) != burstQueueSize {
+		t.Fatalf("expected %d queued bursts, got %d", burstQueueSize, len(s.bursts))
 	}
 }
