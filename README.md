@@ -29,7 +29,7 @@ Your repeater connects directly via Ethernet cable to the box running ipsc2mmdvm
 
 ### 1. Download ipsc2mmdvm
 
-Download the latest release tarball for your platform from the [GitHub Releases](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest) page. For a Raspberry Pi, grab the [`linux_arm64`](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest) build, for desktop Linux use [`linux_amd64`](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest). Extract it and move the binary to your PATH:
+Download the latest release tarball for your platform from the [GitHub Releases](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest) page. For a Raspberry Pi with 64-bit Raspberry Pi OS, grab the [`linux_arm64`](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest) build. For 32-bit Raspberry Pi OS, use `linux_armv7` (or `linux_armv6` on a Pi 1 or Pi Zero). For desktop Linux, use [`linux_amd64`](https://github.com/USA-RedDragon/ipsc2mmdvm/releases/latest). Run `uname -m` if you are not sure: `aarch64` means `linux_arm64`, `armv7l` means `linux_armv7`, and `armv6l` means `linux_armv6`. Extract it and move the binary to your PATH:
 
 ```bash
 tar xzf ipsc2mmdvm_*_linux_arm64.tar.gz
@@ -86,7 +86,12 @@ mmdvm:
     # description: ""
     # url: ""
 
-    # Rewrite rules (optional, DMRGateway-compatible)
+    # Routing rules (DMRGateway-compatible). A master with no rules gets no
+    # traffic. These pass all group and private calls on both slots:
+    pass-all-tg: [1, 2]
+    pass-all-pc: [1, 2]
+
+    # More specific rewrite rules, for example:
     # tg-rewrite:
     #   - from-slot: 1
     #     from-tg: 9
@@ -119,7 +124,8 @@ mmdvm:
 - **`ipsc.port`** - The UDP port to listen on. The default `50000` works fine. Must match the "Master UDP Port" in CPS.
 - **`mmdvm`** - A YAML array of DMR master connections. Each entry is a separate master. You can connect to as many masters as you like.
 - **`mmdvm[].name`** - A friendly name for this network, used in log messages (e.g. `"BrandMeister"`, `"TGIF"`).
-- **`mmdvm[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62030`).
+- **`mmdvm[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62031`). BrandMeister masters accept MMDVM connections on UDP port 62031.
+- **`mmdvm[].pass-all-tg`, `mmdvm[].pass-all-pc`, and the rewrite lists** - Choose which traffic goes to this master. A master with no rules gets no traffic. See [Rewrite Rules](#rewrite-rules-per-mmdvm-entry).
 - **`mmdvm[].password`** - Your hotspot security password, such as the one set in your BrandMeister self-care dashboard.
 - **`mmdvm[].radio-id`** - Your repeater's DMR ID, registered at [radioid.net](https://radioid.net/).
 
@@ -158,17 +164,13 @@ Write the codeplug to the repeater.
 
 ### 5. Run ipsc2mmdvm
 
-ipsc2mmdvm requires root privileges to configure the network interface. Run it from the directory containing your config file, or copy the config to the working directory:
+ipsc2mmdvm requires root privileges to configure the network interface. Give it the config file from step 2 with `--config`:
 
 ```bash
-sudo ipsc2mmdvm
+sudo ipsc2mmdvm --config /etc/ipsc2mmdvm.yaml
 ```
 
-By default, ipsc2mmdvm looks for `config.yaml` in the current directory. You can also place the config at a known location and run from that directory:
-
-```bash
-cd /etc && sudo ipsc2mmdvm
-```
+Without `--config`, ipsc2mmdvm reads `config.yaml` from the current directory.
 
 On startup you should see the repeater register and traffic will begin flowing to BrandMeister.
 
@@ -273,9 +275,11 @@ Settings can be given in the config file, as environment variables, or as comman
 
 <!-- configulator:end -->
 
-### Rewrite Rules (per MMDVM entry, optional)
+### Rewrite Rules (per MMDVM entry)
 
-Rewrite rules control how DMR traffic is routed between the repeater and each master. They follow the same semantics as [DMRGateway](https://github.com/g4klx/DMRGateway): the first matching rule wins. If no rewrite rules are configured for a master, all traffic passes through unmodified.
+Rewrite rules control how DMR traffic is routed between the repeater and each master. They follow the same semantics as [DMRGateway](https://github.com/g4klx/DMRGateway): the first matching rule wins. A master only gets the traffic that its rules match. If a master has no rules, no traffic passes to or from it. To pass everything on a slot without changes, use `pass-all-tg` and `pass-all-pc`.
+
+For traffic from the repeater, ipsc2mmdvm checks the rewrite rules of every master first, then the pass-all rules. So a specific rule on one master wins over a pass-all rule on another.
 
 Each MMDVM entry can have these rule lists (fields are in the table above):
 
