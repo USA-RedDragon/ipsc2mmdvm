@@ -198,6 +198,41 @@ func TestSubmit_Timeout(t *testing.T) {
 	}
 }
 
+func TestTimeoutKeepsReclaimingStreamsBufferedPackets(t *testing.T) {
+	m := NewManager()
+	m.timeout = 20 * time.Millisecond
+	a, b := &recorder{}, &recorder{}
+	submit(m, false, 1, "A", "A-hdr", a)
+	submit(m, false, 2, "B", "B-hdr", b)
+	submit(m, false, 2, "B", "B-v1", b)
+	time.Sleep(40 * time.Millisecond)
+
+	if submit(m, false, 2, "B", "B-v2", b) {
+		b.sink("B-v2")
+	}
+	b.waitPackets(t, "B-hdr", "B-v1", "B-v2")
+}
+
+func TestTimeoutPromotesPendingInOrder(t *testing.T) {
+	m := NewManager()
+	m.timeout = 20 * time.Millisecond
+	a, b, c := &recorder{}, &recorder{}, &recorder{}
+	submit(m, false, 1, "A", "A-hdr", a)
+	submit(m, false, 2, "B", "B-hdr", b)
+	submit(m, false, 3, "C", "C-hdr", c)
+	time.Sleep(40 * time.Millisecond)
+
+	if submit(m, false, 3, "C", "C-v1", c) {
+		t.Fatal("C must wait behind B, which was queued first")
+	}
+	b.waitPackets(t, "B-hdr")
+	if !submitEnd(m, false, 2, "B", "B-end", b) {
+		t.Fatal("B should be active after the reclaim")
+	}
+	m.Release(false, 2)
+	c.waitPackets(t, "C-hdr", "C-v1")
+}
+
 func TestSubmit_NotYetTimedOut(t *testing.T) {
 	m := NewManager()
 	m.timeout = 1 * time.Second
@@ -226,9 +261,10 @@ func TestSubmit_TouchExtendsTimeout(t *testing.T) {
 	}
 
 	time.Sleep(20 * time.Millisecond)
-	if !submit(m, false, 300, "net3", "c1", r) {
-		t.Fatal("should reclaim slot after extended timeout expires")
+	if submit(m, false, 300, "net3", "c1", r) {
+		t.Fatal("stream 300 should wait behind stream 200 after the reclaim")
 	}
+	r.waitPackets(t, "b1")
 }
 
 func TestRelease_NoOp_EmptySlot(t *testing.T) {

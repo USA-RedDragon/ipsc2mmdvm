@@ -125,8 +125,9 @@ func (ss *slotState) findPending(streamID uint) *stream {
 // it must call Release after the delivery. On Queued the manager owns
 // the packet.
 //
-// When the active call has timed out, all pending streams are discarded
-// (they're stale) and the new stream becomes active.
+// When the active call has timed out, the oldest pending call takes over
+// the slot with its buffered packets, or the submitting stream claims the
+// slot if no call is waiting.
 func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, end bool, sink Sink) Verdict {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -136,6 +137,10 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 
 	ss := &m.slots[slotIndex(slot)]
 	now := time.Now()
+
+	if ss.active != nil && ss.active.id != streamID {
+		m.reclaimStaleLocked(slot, ss, now)
+	}
 
 	if ss.active == nil {
 		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
@@ -156,21 +161,6 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		return Queued
 	}
 
-	if now.Sub(ss.active.lastSeen) > m.timeout {
-		slog.Info("timeslot call timed out, reclaiming slot",
-			"slot", slot,
-			"oldStream", ss.active.id, "oldNetwork", ss.active.network,
-			"newStream", streamID, "newNetwork", network,
-			"pendingDiscarded", len(ss.pending))
-		if m.metrics != nil {
-			m.metrics.TimeslotTimeouts.WithLabelValues(slotLabel(slot), m.direction).Inc()
-		}
-		ss.pending = nil
-		ss.draining = false
-		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
-		return Deliver
-	}
-
 	ps := ss.findPending(streamID)
 	if ps == nil {
 		ps = &stream{id: streamID, network: network, sink: sink}
@@ -182,6 +172,23 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 	ps.lastSeen = now
 	m.enqueueLocked(slot, ps, packet, end)
 	return Queued
+}
+
+// reclaimStaleLocked ends the active call if no packet has arrived for
+// it within the timeout, which happens when its terminator is lost.
+// The oldest pending call takes over the slot with its buffer intact.
+func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
+	if ss.active == nil || ss.draining || now.Sub(ss.active.lastSeen) <= m.timeout {
+		return
+	}
+	slog.Info("timeslot call timed out, reclaiming slot",
+		"slot", slot,
+		"oldStream", ss.active.id, "oldNetwork", ss.active.network,
+		"pendingCount", len(ss.pending))
+	if m.metrics != nil {
+		m.metrics.TimeslotTimeouts.WithLabelValues(slotLabel(slot), m.direction).Inc()
+	}
+	m.advanceLocked(slot, ss)
 }
 
 func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) {
