@@ -1010,8 +1010,10 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	burst.SetAMBEFrames(frames)
 
 	if burstIdx == 0 {
-		// Burst A — voice sync burst
-		burst.SyncPattern = enums.SyncMSSourcedVoice
+		// Burst A carries the BS-sourced voice SYNC, as the data bursts
+		// carry BS-sourced data SYNC: the repeater is a BS, and a duplex
+		// MMDVMHost sends BS-sourced SYNC to the network too.
+		burst.SyncPattern = enums.SyncBSSourcedVoice
 		burst.VoiceBurst = enums.VoiceBurstA
 	} else {
 		// Bursts B-F — embedded signalling
