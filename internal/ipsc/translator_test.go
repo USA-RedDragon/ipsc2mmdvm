@@ -564,6 +564,17 @@ func makeVoiceDMRData(syncBurst bool) [33]byte {
 	return data
 }
 
+// buildLCDataBurst returns layer2.BuildLCDataBurst(payload, dataType,
+// colorCode) and fails the test on an error.
+func buildLCDataBurst(tb testing.TB, payload [12]byte, dataType enums.DataType, colorCode enums.ColorCode) [33]byte {
+	tb.Helper()
+	burst, err := layer2.BuildDataBurst(payload, dataType, colorCode, layer2.SyncSourceBS)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return burst
+}
+
 func TestBuildVoiceBurstA(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
@@ -1297,5 +1308,53 @@ func TestTranslateToMMDVMDropsUnsupportedDataBurstTypes(t *testing.T) {
 		if out := tr.TranslateToMMDVM(0x83, data); out != nil {
 			t.Fatalf("burst 0x%02X: expected nil, got %d packets", burstType, len(out))
 		}
+	}
+}
+
+func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
+	t.Parallel()
+	for _, dt := range []enums.DataType{
+		enums.DataTypePIHeader, enums.DataTypeCSBK, enums.DataTypeMBCHeader,
+		enums.DataTypeMBCContinuation, enums.DataTypeDataHeader, enums.DataTypeRate12,
+	} {
+		payload := [12]byte{0xBD, 0x00, 0x80, 0x12, 0x34, 0x56, 0x00, 0xAB, 0xCD, 0xEF, 0x5A, 0xA5}
+		payload[11] ^= byte(dt)
+		tr := newTestTranslator(t)
+		pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(dt))
+		pkt.DMRData = buildLCDataBurst(t, payload, dt, 1)
+		out := tr.TranslateToIPSC(pkt)
+		if len(out) != 1 {
+			t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
+		}
+		if got := out[0][38:50]; string(got) != string(payload[:]) {
+			t.Fatalf("%s: payload\n got % X\nwant % X", dt.String(), got, payload)
+		}
+
+		back := newTestTranslator(t).TranslateToMMDVM(out[0][0], out[0])
+		if len(back) != 1 {
+			t.Fatalf("%s: expected 1 packet back, got %d", dt.String(), len(back))
+		}
+		got, ok := decodeBPTCPayload(back[0].DMRData)
+		if !ok || got != payload {
+			t.Fatalf("%s: round trip payload % X (ok=%t), want % X", dt.String(), got, ok, payload)
+		}
+	}
+}
+
+func TestTranslateToIPSCDataPayloadDependsOnBurst(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	a := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
+	a.DMRData = buildLCDataBurst(t, [12]byte{1, 2, 3}, enums.DataTypeCSBK, 0)
+	b := a
+	b.StreamID = 0x9999
+	b.DMRData = buildLCDataBurst(t, [12]byte{4, 5, 6}, enums.DataTypeCSBK, 0)
+	oa := tr.TranslateToIPSC(a)
+	ob := tr.TranslateToIPSC(b)
+	if len(oa) != 1 || len(ob) != 1 {
+		t.Fatal("expected one packet each")
+	}
+	if string(oa[0][38:50]) == string(ob[0][38:50]) {
+		t.Fatalf("different CSBKs produced the same IPSC payload % X", oa[0][38:50])
 	}
 }

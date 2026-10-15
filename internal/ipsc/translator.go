@@ -168,7 +168,13 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 					"dtype", enums.DataType(dtypeOrVSeq).String())
 				return nil
 			}
-			data := t.buildIPSCDataPacket(pkt, ss, burstType)
+			payload, ok := decodeBPTCPayload(pkt.DMRData)
+			if !ok {
+				slog.Debug("IPSCTranslator: dropping data burst with uncorrectable BPTC errors",
+					"dtype", enums.DataType(dtypeOrVSeq).String())
+				return nil
+			}
+			data := t.buildIPSCDataPacket(pkt, ss, burstType, payload)
 			results = append(results, data)
 			ss.firstPacket = false
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
@@ -353,7 +359,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState)
 
 // buildIPSCDataPacket builds a 54-byte IPSC data packet for CSBK, Data Header, etc.
 // The structure is identical to voice header/terminator but with data packet types (0x83/0x84).
-func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte) []byte {
+func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte, payload [12]byte) []byte {
 	buf := make([]byte, 54)
 
 	t.buildIPSCHeader(buf, pkt, ss, false, true)
@@ -373,10 +379,8 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	}
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060) // Data size (96 bits = 12 bytes)
 
-	// Bytes 38-49: Extract data from DMR burst via BPTC decode
-	// Use extractFullLCBytes which constructs from packet fields
-	flcBytes := extractFullLCBytes(pkt)
-	copy(buf[38:50], flcBytes[:12])
+	// Bytes 38-49: BPTC(196,96)-decoded payload of the DMR burst
+	copy(buf[38:50], payload[:])
 
 	// Bytes 50-53: trailing (zeros)
 	ss.ipscSeq++
@@ -488,6 +492,14 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 	}
 
 	return buf
+}
+
+// decodeBPTCPayload returns the 12-byte BPTC(196,96) payload of a 33-byte
+// DMR data burst. It reports false when the FEC cannot correct the errors.
+func decodeBPTCPayload(data [33]byte) ([12]byte, bool) {
+	raw := layer2.RawBurst(data)
+	payload, result := raw.BPTCPayload()
+	return payload, !result.Uncorrectable
 }
 
 // extractFullLCBytes builds 12 bytes of Full Link Control data from the
