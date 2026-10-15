@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func testConfig(authEnabled bool, authKey string) *config.Config {
@@ -1810,4 +1812,31 @@ func TestBurstQueueFullDropsInsteadOfBlocking(t *testing.T) {
 	if len(s.bursts) != burstQueueSize {
 		t.Fatalf("expected %d queued bursts, got %d", burstQueueSize, len(s.bursts))
 	}
+}
+
+func TestPeersRegisteredGaugeCountsOnlyRegisteredPeers(t *testing.T) {
+	t.Parallel()
+	m := metrics.NewMetrics()
+	s := NewIPSCServer(testConfig(false, ""), m)
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
+
+	if _, err := s.handlePacket(makeControlPacket(PacketType_RepeaterWakeUp, 42), addr); err != nil {
+		t.Fatalf("handlePacket error: %v", err)
+	}
+	s.upsertPeer(7, addr, 0x6A, [4]byte{})
+
+	if got := gaugeValue(t, m.IPSCPeersRegistered); got != 1 {
+		t.Fatalf("expected 1 registered peer, gauge is %v", got)
+	}
+}
+
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(g)
+	families, err := reg.Gather()
+	if err != nil || len(families) != 1 || len(families[0].GetMetric()) != 1 {
+		t.Fatalf("reading gauge: %v", err)
+	}
+	return families[0].GetMetric()[0].GetGauge().GetValue()
 }

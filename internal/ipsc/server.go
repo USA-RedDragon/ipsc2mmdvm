@@ -420,10 +420,21 @@ func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, fla
 	peer.Flags = flags
 	peer.LastSeen = time.Now()
 	peer.RegistrationStatus = true
+	s.updatePeersGaugeLocked()
+}
 
-	if s.metrics != nil {
-		s.metrics.IPSCPeersRegistered.Set(float64(len(s.peers)))
+// updatePeersGaugeLocked sets the registered-peers gauge. s.mu must be held.
+func (s *IPSCServer) updatePeersGaugeLocked() {
+	if s.metrics == nil {
+		return
 	}
+	registered := 0
+	for _, peer := range s.peers {
+		if peer.RegistrationStatus {
+			registered++
+		}
+	}
+	s.metrics.IPSCPeersRegistered.Set(float64(registered))
 }
 
 func (s *IPSCServer) markPeerAlive(peerID uint32, addr *net.UDPAddr) {
@@ -438,6 +449,7 @@ func (s *IPSCServer) markPeerAlive(peerID uint32, addr *net.UDPAddr) {
 	peer.Addr = cloneUDPAddr(addr)
 	peer.LastSeen = time.Now()
 	peer.KeepAliveReceived++
+	s.updatePeersGaugeLocked()
 }
 
 func (s *IPSCServer) buildMasterRegisterReply() []byte {
