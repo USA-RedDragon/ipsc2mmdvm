@@ -89,6 +89,33 @@ func TestRigVoiceCallBursts(t *testing.T) {
 	checkRigBursts(t, translateRig(t, rigVoiceCall()), rigVoiceCallBursts())
 }
 
+// TestRigLostBurstAAfterHeader uses a call where the XPR 8400 missed burst A
+// after the voice header: it sent two headers, then bursts B to F with no
+// gap in the RTP sequence, a terminator, and two 0x26 packets.
+func TestRigLostBurstAAfterHeader(t *testing.T) {
+	t.Parallel()
+	got := translateRig(t, []string{
+		"800004ce2e3230b43c00000902000058f320805dfea03bc583a40000000001c0000a800a006000000000000930b43ce9f8ed00714751",
+		"800004ce2e3230b43c00000902000058f320805dfea13bc585840000000001c0000a800a006000000000000930b43ce9f8ed00714751",
+		"800004ce2e3230b43c00000902000058f320805dfea23bc58764000000008a1906dc54392640f6312d4a350e936cf863a3f517500000090072",
+		"800004ce2e3230b43c00000902000058f320805dfea33bc58944000000008a19064d5f0fa2997082675922d5678bc4820e4c5618060a060676",
+		"800004ce2e3230b43c00000902000058f320805dfea43bc58b24000000008a190624461b4658531d9ba79627a12937002adef7b0090c240c76",
+		"800004ce2e3230b43c00000902000058f320805dfea53bc58d04000000008a2216d01ff05dedbdaeaab3075525e078b0066268c80c2b2b2400000000000930b43c74",
+		"800004ce2e3230b43c00000902000058f320805dfea63bc58ee4000000008a19069fcbcb8ec055b04b8eaa424aa8b8815bfbfc300000000070",
+		"800004ce2e3230b43c00000902000058f360805efea73bc590c40000000002c0000a800a006000000000000930b43ce6f7e20072470e",
+		"800004ce2e3230b43c00000902000058f320805dfea83bc592a40000000026c000038002000046f9",
+		"800004ce2e3230b43c00000902000058f320805dfea93bc594840000000026c0000380020000472d",
+	})
+	all := rigVoiceCallBursts()
+	want := append([]string{all[0]}, all[2:]...)
+	checkRigBursts(t, got, want)
+	for i, p := range got[1:6] {
+		if p.FrameType != mmdvmFrameTypeVoice || p.DTypeOrVSeq != uint(burstB+i) {
+			t.Errorf("voice packet %d: frame type %d vseq %d, want voice burst %c", i, p.FrameType, p.DTypeOrVSeq, 'B'+i)
+		}
+	}
+}
+
 // TestRigLateEntryHeader uses a voice header the XPR 8400 built from the
 // embedded LC of a TS2 group call from 3191868 to 91 that it joined late:
 // the LC octets with zero RS parity. The header sent to MMDVM must carry

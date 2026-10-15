@@ -1101,13 +1101,14 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 // ipscVoiceBurstPosition returns the superframe position (0-5 for A-F) of an
 // IPSC voice burst. Only bursts A and E can be told from the packet alone:
 // A is 52 bytes or carries the voice sync flag, and E is 66 bytes when the
-// repeater reassembled the embedded LC. The repeater numbers every burst in
-// the RTP sequence, including the ones it lost, so every other burst is
-// placed by its RTP sequence distance to the last A or E, or to the voice
-// header, which burst A follows. The LCSS in the EMB byte is not used: on
+// repeater reassembled the embedded LC. Within a superframe the repeater
+// numbers every burst in the RTP sequence, including the ones it lost, so
+// every other burst is placed by its RTP sequence distance to the last A or
+// E, or to the voice header, which burst A follows. The LCSS in the EMB byte is not used: on
 // a weak signal the repeater sends it wrong. A burst that comes before any
 // header, A, or E cannot be placed and is dropped, so a late entry starts
-// at the next A or E. A repeated burst is dropped.
+// at the next A or E. A repeated burst is dropped. A burst that is not A is
+// never placed at A.
 func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 	seq := binary.BigEndian.Uint16(data[20:22])
 	if rss.hasLast && seq == rss.lastRTPSeq {
@@ -1128,6 +1129,13 @@ func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 		delta := seq - rss.anchorRTPSeq
 		ok = delta != 0 && delta < 0x8000
 		pos = (rss.anchorPos + int(delta%6)) % 6
+		if ok && pos == burstA {
+			// Only burst A is a 52-byte burst. A repeater that misses burst
+			// A right after a voice header or a lost sync does not count it
+			// in the RTP sequence, so this burst is B.
+			pos = burstB
+			rss.anchorPos, rss.anchorRTPSeq = burstB, seq
+		}
 	}
 	if data[17]&ipscCallInfoEnd != 0 {
 		superframeRestartsAfter(rss, seq)
