@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
@@ -384,6 +386,59 @@ func TestLateEntryLCRejectsMismatch(t *testing.T) {
 	payload[11] = 1
 	if _, ok := lateEntryLC(payload, 3191868, 91, true); ok {
 		t.Fatal("LC with nonzero parity accepted")
+	}
+}
+
+// TestRigBadFramesAreSilence uses a late-entry call to group 91 where the
+// XPR 8400 flagged the first AMBE frame of burst E as bad (byte 32 0x17).
+// That frame differs from the frame dmrrf sent (0x152ee72f3454f) in 11
+// bits, so it goes to MMDVM as silence. The test also flags the second frame
+// of burst B and the third frame of burst C in bits 49 and 99 of their AMBE
+// payloads, which go to MMDVM as silence too. The other frames pass as they
+// are.
+func TestRigBadFramesAreSilence(t *testing.T) {
+	t.Parallel()
+	ipsc := []string{
+		"800004ce2e4130b43c00005b0200007f1d2080dd1b0e75c81ced00000000018000081000006000000000005b30b43c000000",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b0f75c81ecd00000000018000081000006000000000005b30b43c000000",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1075c820ad000000008a144074d041c867b211a56b4890b58b0158805cf6b8",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1175c8228d000000008a1906c5490c12f886be3b21b945ed4b56b3de931a600009090072",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1275c8246d000000008a190600ea7aa07934905e3b6989ef6175e4911998000f0a060676",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1375c8264d000000008a19064f5abef16a8813b5768b8c62c0ebd07a69c390091d0f0576",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1475c8282d000000008a221779f72e7862a7a6bbd51c8044af40324b1dd5801d18001e00000000005b30b43c74",
+		"800004ce2e4130b43c00005b0200007f1d20805d1b1575c82a0d000000008a1906169b888cc2948e83eb33b8dee87bac9e8846180000000070",
+		"800004ce2e4130b43c00005b0200007f1d60805e1b1675c82bed0000000002c0000a800a006000000000005b30b43c4c735c007246f9",
+	}
+	flagged := map[int][3]bool{burstB: {false, true, false}, burstC: {false, false, true}}
+	for pos, bad := range flagged {
+		p, _ := hex.DecodeString(ipsc[pos+2])
+		frames := vocoder.UnpackAMBEVoice([19]byte(p[33:52]))
+		ambe := vocoder.PackAMBEVoiceFlags(frames, bad)
+		copy(p[33:52], ambe[:])
+		ipsc[pos+2] = hex.EncodeToString(p)
+	}
+	got := translateRig(t, ipsc)
+	if len(got) != 8 {
+		t.Fatalf("got %d packets, want 8", len(got))
+	}
+	for i, h := range ipsc[2:8] {
+		p := got[i+1]
+		var b layer2.Burst
+		_ = b.DecodeFromBytesWith(p.DMRData, mmdvmVoiceDecodeOptions(p))
+		frames, _ := b.AMBEFrames()
+		in, _ := hex.DecodeString(h)
+		want := vocoder.UnpackAMBEVoice([19]byte(in[33:52]))
+		if i == burstE {
+			want[0] = vocoder.AMBESilence()
+		}
+		for f, bad := range flagged[i] {
+			if bad {
+				want[f] = vocoder.AMBESilence()
+			}
+		}
+		if frames != want {
+			t.Errorf("burst %c: frames %v, want %v", 'A'+i, frames, want)
+		}
 	}
 }
 

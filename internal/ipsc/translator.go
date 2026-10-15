@@ -102,6 +102,14 @@ const (
 // a burst carrying voice sync, which is burst A.
 const ipscVoiceCtrlSync = 0x40
 
+// ipscVoiceCtrlBadFrame1 is the flag in byte 32 of an IPSC voice burst that
+// marks its first AMBE frame as uncorrectable on RF receive. An XPR 8400 set
+// it only on frames that differed from what was sent. Bits 49 and 99 of the
+// AMBE payload flag the second and third frames the same way
+// (vocoder.UnpackAMBEVoiceFlags). A flagged frame is replaced with silence,
+// as ipsc2hbpc does.
+const ipscVoiceCtrlBadFrame1 = 0x01
+
 // ipscCallInfoEnd is the call end flag in byte 17 of an IPSC user packet.
 const ipscCallInfoEnd = 0x40
 
@@ -1117,7 +1125,13 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	copy(ambeBytes[:], ipscData[33:52])
 
 	// Unpack into 3 VocoderFrames (49 bits each)
-	frames := vocoder.UnpackAMBEVoice(ambeBytes)
+	frames, bad := vocoder.UnpackAMBEVoiceFlags(ambeBytes)
+	bad[0] = ipscData[32]&ipscVoiceCtrlBadFrame1 != 0
+	for i := range frames {
+		if bad[i] {
+			frames[i] = vocoder.AMBESilence()
+		}
+	}
 
 	burstIdx, ok := ipscVoiceBurstPosition(rss, ipscData)
 	if !ok {
