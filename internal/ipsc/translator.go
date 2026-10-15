@@ -464,16 +464,23 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 }
 
 // lastDataBlock adds a data burst to the data packet of the call and
-// reports whether it completes the packet: a header with no blocks to
-// follow, or the last block. A packet whose CRC fails is complete too, and
-// a block that does not decode still counts. Other bursts, such as CSBKs,
-// never complete a packet.
+// reports whether it completes the packet (see DataBurstEndsCall).
 func (ss *streamState) lastDataBlock(data [33]byte) bool {
+	return DataBurstEndsCall(&ss.data, data)
+}
+
+// DataBurstEndsCall adds the data burst data, a data header or a rate 1/2,
+// 3/4 or 1 block, to asm, which holds the data packet of one call so far,
+// and reports whether the burst completes the packet: a header with no
+// blocks to follow, or the last block. A packet whose CRC fails is complete
+// too, and a block that does not decode still counts. Other bursts, such as
+// CSBKs, never complete a packet.
+func DataBurstEndsCall(asm *packet.Assembler, data [33]byte) bool {
 	b, err := layer2.NewBurstFromBytes(data)
 	if err != nil {
 		return false
 	}
-	_, done, err := ss.data.AddBurst(b)
+	_, done, err := asm.AddBurst(b)
 	return done || errors.Is(err, packet.ErrBlocksMissing)
 }
 

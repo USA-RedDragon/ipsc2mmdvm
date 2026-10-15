@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
@@ -174,7 +177,7 @@ func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
 	mgr := timeslot.NewManager()
 	t.Cleanup(mgr.Stop)
 	c := newSlotTestClient(t, "net1", mgr)
-	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: "net1", Slot: 2}}
+	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: c.cfg.Name, Slot: 2}}
 	rec := &ipscRecorder{}
 	c.SetIPSCHandler(rec.handler("net1"))
 
@@ -191,7 +194,7 @@ func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p := proto.Packet{Signature: "DMRD", Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
+			p := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
 				DTypeOrVSeq: dtypes[i], StreamID: stream, DMRData: [33]byte(b)}
 			c.handleReady(p.Encode())
 		}
@@ -199,6 +202,111 @@ func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
 	rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 6 })
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("second data call went out after %v", d)
+	}
+}
+
+// outboundDataBursts are a confirmed rate 1/2 data packet from 3191868 to
+// 3140598, as dmrgo encodes it, with their data types.
+func outboundDataBursts() ([]string, []uint) {
+	return []string{
+		"20f7370570bee26393b7cda7ddadff57d75df5de6accf9067160278e89420a3c95",
+		"06dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
+		"403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
+	}, []uint{6, 7, 7}
+}
+
+func outboundPacket(t *testing.T, stream uint, h string, dtype uint) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
+		DTypeOrVSeq: dtype, StreamID: stream, DMRData: [33]byte(b)}
+	return p.Encode()
+}
+
+// TestQueuedOutboundDataCallsEnd queues two data calls behind a voice call
+// on TS2. When the voice call ends, both data calls must go out at once:
+// the first must not hold the slot until the timeout.
+func TestQueuedOutboundDataCallsEnd(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c := newSlotTestClient(t, "net1", mgr)
+	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: c.cfg.Name, Slot: 2}}
+	rec := &ipscRecorder{}
+	c.SetIPSCHandler(rec.handler("net1"))
+
+	voice := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 0xA}
+	c.handleReady(voice.Encode())
+	bursts, dtypes := outboundDataBursts()
+	for _, stream := range []uint{0xB, 0xC} {
+		for i, h := range bursts {
+			c.handleReady(outboundPacket(t, stream, h, dtypes[i]))
+		}
+	}
+	start := time.Now()
+	voice.FrameType, voice.DTypeOrVSeq = 2, 2
+	c.handleReady(voice.Encode())
+	rec.waitFor(t, func(recs []ipscRecord) bool {
+		n := 0
+		for _, r := range recs {
+			if r.burstType == 0x06 || r.burstType == 0x07 {
+				n++
+			}
+		}
+		return n == 6
+	})
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("queued data calls went out after %v", d)
+	}
+}
+
+// nonPreambleCSBK returns the first preamble CSBK of rigPreambleCall with
+// its opcode changed to UU_V_Req (ETSI TS 102 361-2 7.1.2.2), a CSBK that
+// nothing of its call follows.
+func nonPreambleCSBK(t *testing.T) string {
+	t.Helper()
+	b, err := hex.DecodeString(rigPreambleCall()[8][40:106])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := layer2.RawBurst(b).BPTCPayload()
+	csbk := pdu.CSBKBytes(p)
+	csbk[0] = 0x80 | byte(pdu.CSBKUnitToUnitVoiceServiceRequest)
+	csbk.Reseal()
+	burst, err := layer2.BuildDataBurst(csbk, enums.DataTypeCSBK, 1, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(burst[:])
+}
+
+// TestOutboundCSBKEndsCall sends two CSBKs that are not preambles and a
+// data packet on TS2, each with its own stream ID, as MMDVMHost does.
+// Nothing follows such a CSBK in its call, so each CSBK ends its call and
+// the data packet goes out at once.
+func TestOutboundCSBKEndsCall(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c := newSlotTestClient(t, "net1", mgr)
+	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: c.cfg.Name, Slot: 2}}
+	rec := &ipscRecorder{}
+	c.SetIPSCHandler(rec.handler("net1"))
+
+	csbk := nonPreambleCSBK(t)
+	start := time.Now()
+	c.handleReady(outboundPacket(t, 1, csbk, 3))
+	c.handleReady(outboundPacket(t, 2, csbk, 3))
+	bursts, dtypes := outboundDataBursts()
+	for i, h := range bursts {
+		c.handleReady(outboundPacket(t, 3, h, dtypes[i]))
+	}
+	rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 5 })
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("data packet went out after %v", d)
 	}
 }
 
@@ -370,5 +478,125 @@ func TestInboundTimeslotMetricsArePerNetwork(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("want %s, got:\n%s", want, grepLines(body, "timeslot_active_calls"))
 		}
+	}
+}
+
+// rigPreambleCall is a TS1 voice call from 3191868 to group 9 with stream
+// ID 5, then a data call from 3191868 to 3140598 with stream ID 7: four
+// preamble CSBKs, a confirmed data header and two rate 1/2 blocks, all
+// with one stream ID, as the bridge sent them to an MMDVM master on the rig
+// (runs/rf-cycle-2/dmrd.txt).
+func rigPreambleCall() []string {
+	return []string{
+		"444d52440030b43c000009003010af210000000500d40ada05cc0e703f004d80dc4dff57d75df5d36194140039c03be02f01b20054",
+		"444d52440130b43c000009003010af1000000005298d0a33fd2bbc43cc28124ac5a755fd7df75f7138d2514ab1ba41155039c90579",
+		"444d52440230b43c000009003010af0100000005cb375d2a6f00ccf547faacd653f730000090038be3fa9874d4cd7a0a1be7a21f8c",
+		"444d52440330b43c000009003010af0200000005626757029ce3de90092c67627b577060a0606dddeb9fd47377687f8c79688c6888",
+		"444d52440430b43c000009003010af03000000056b57cba90b6aefecc02847dea2b77090c240cddd28430f7625469dd2c4af5b44b2",
+		"444d52440530b43c000009003010af0400000005f1a3e06b49ade23799e66aa4a4b750c2b2b24ae8a07221c799fa5f3614369fac04",
+		"444d52440630b43c000009003010af0500000005125d0cc5c54a901ae901dbc4c1171000000004b437fd4bbba5262cb8c2dba64259",
+		"444d52440730b43c000009003010af220000000500bb0a0e057c0e083f704d20dc8dff57d75df5d4348017383ea037a02701ab0067",
+		"444d52440030b43c2febf6003010af63000000074a540cd5a14c3b5472e8ce721cedff57d75df5d798be5488f5a8f961b8df2c96d9",
+		"444d52440130b43c2febf6003010af63000000074a300c55a0543b6c7689c6d01cedff57d75df5d798767428f568f9a1b05f3616dd",
+		"444d52440230b43c2febf6003010af63000000074a700cd7a148397474b84a901cedff57d75df5d798065418b588fa01b59f3f16eb",
+		"444d52440330b43c2febf6003010af63000000074a710c1da05c394474894e121cedff57d75df5d7985235883528fa81b9db3f16c8",
+		"444d52440430b43c2febf6003010af660000000720f7370570bee26393b7cda7ddadff57d75df5de6accf9067160278e89420a3c95",
+		"444d52440530b43c2febf6003010af670000000706dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
+		"444d52440630b43c2febf6003010af6700000007403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
+	}
+}
+
+// TestQueuedPreambleDataCall sends the data call of rigPreambleCall while
+// its voice call holds TS1. The preamble CSBKs do not end the data call, so
+// all of it goes out when the voice call ends.
+func TestQueuedPreambleDataCall(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c := newSlotTestClient(t, "net1", mgr)
+	c.netRewrites = []rewrite.Rule{
+		&rewrite.TGRewrite{Name: c.cfg.Name, FromSlot: 1, FromTG: 9, ToSlot: 1, ToTG: 9, Range: 1},
+		&rewrite.PassAllPC{Name: c.cfg.Name, Slot: 1},
+	}
+	rec := &ipscRecorder{}
+	c.SetIPSCHandler(rec.handler("net1"))
+
+	call := rigPreambleCall()
+	order := append(append([]string{call[0]}, call[8:]...), call[1:8]...)
+	for _, h := range order {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.handleReady(b)
+	}
+	start := time.Now()
+	rec.waitFor(t, func(recs []ipscRecord) bool {
+		n := 0
+		for _, r := range recs {
+			if r.burstType == 0x03 || r.burstType == 0x06 || r.burstType == 0x07 {
+				n++
+			}
+		}
+		return n == 7
+	})
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("queued data call went out after %v", d)
+	}
+}
+
+// TestCSBKInsideDataPacketKeepsCall queues a data packet on TS2 behind a
+// voice call, with a CSBK that is not a preamble between its header and
+// its blocks, all with one stream ID. The data packet has blocks to follow,
+// so the CSBK does not end the call, and the blocks go out after it.
+func TestCSBKInsideDataPacketKeepsCall(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c := newSlotTestClient(t, "net1", mgr)
+	c.netRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: c.cfg.Name, Slot: 2}}
+	rec := &ipscRecorder{}
+	c.SetIPSCHandler(rec.handler("net1"))
+
+	voice := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 0xA}
+	c.handleReady(voice.Encode())
+	bursts, dtypes := outboundDataBursts()
+	c.handleReady(outboundPacket(t, 0xB, bursts[0], dtypes[0]))
+	c.handleReady(outboundPacket(t, 0xB, nonPreambleCSBK(t), 3))
+	for i := 1; i < len(bursts); i++ {
+		c.handleReady(outboundPacket(t, 0xB, bursts[i], dtypes[i]))
+	}
+	voice.FrameType, voice.DTypeOrVSeq = 2, 2
+	c.handleReady(voice.Encode())
+	rec.waitFor(t, func(recs []ipscRecord) bool {
+		var types []byte
+		for _, r := range recs {
+			if r.callControl != recs[0].callControl {
+				types = append(types, r.burstType)
+			}
+		}
+		return string(types) == "\x06\x03\x07\x07"
+	})
+}
+
+// TestIdleOutboundDataCallsArePruned leaves two outbound data packets
+// unfinished, one idle for longer than outDataIdle. A new data call drops
+// the idle one only.
+func TestIdleOutboundDataCallsArePruned(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t)
+	now := time.Now()
+	c.outData = map[uint]*outboundDataCall{
+		1: {lastSeen: now.Add(-outDataIdle - time.Second)},
+		2: {lastSeen: now.Add(-outDataIdle + time.Second)},
+	}
+	bursts, dtypes := outboundDataBursts()
+	b, _ := hex.DecodeString(bursts[0])
+	c.outboundCallEnds(proto.Packet{FrameType: 2, DTypeOrVSeq: dtypes[0], StreamID: 3, DMRData: [33]byte(b)})
+	if _, ok := c.outData[1]; ok {
+		t.Error("idle data call was kept")
+	}
+	if _, ok := c.outData[2]; !ok {
+		t.Error("data call that is not idle was dropped")
 	}
 }

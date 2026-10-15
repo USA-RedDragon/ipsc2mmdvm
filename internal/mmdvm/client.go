@@ -11,6 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -61,7 +65,21 @@ type MMDVMClient struct {
 	// direction. inboundTSMgr is per-client for the IPSC→MMDVM direction.
 	outboundTSMgr *timeslot.Manager
 	inboundTSMgr  *timeslot.Manager
+
+	// outData holds the data packet so far of each outbound data call,
+	// to find the block that ends it.
+	outDataMu sync.Mutex
+	outData   map[uint]*outboundDataCall
 }
+
+// outboundDataCall is the data packet so far of one MMDVM data call.
+type outboundDataCall struct {
+	asm      packet.Assembler
+	lastSeen time.Time
+}
+
+// outDataIdle is how long an unfinished outbound data call is kept.
+const outDataIdle = 30 * time.Second
 
 // rxPacket is a datagram read from the connection of generation gen.
 type rxPacket struct {
@@ -740,21 +758,83 @@ func (h *MMDVMClient) forwardTX() {
 }
 
 // translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
-// It reports whether the packet ended a data call.
-func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) (dataEnd bool) {
+func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
 	handler := h.ipscHandler.Load()
 	if handler != nil && h.translator != nil {
 		ipscPackets := h.translator.TranslateToIPSC(packet)
 		ctx := stopContext{h.done}
 		for _, ipscData := range ipscPackets {
 			if ctx.Err() != nil {
-				return false
+				return
 			}
-			dataEnd = dataEnd || ipsc.EndsDataCall(ipscData[0], ipscData)
 			(*handler)(ctx, ipscData)
 		}
 	}
-	return dataEnd
+}
+
+// outboundCallEnds reports whether pkt ends its call on the outbound
+// timeslot: a voice terminator, a CSBK that nothing of its call follows, or
+// the burst that completes a data packet. Data calls have no terminator, so
+// without this they hold the slot until it times out.
+func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
+	if pkt.FrameType != frameTypeDataSync {
+		return false
+	}
+	switch enums.DataType(pkt.DTypeOrVSeq) { //nolint:exhaustive,gosec // other data types never end a call; the data type has 4 bits
+	case enums.DataTypeTerminatorWithLC:
+		return true
+	case enums.DataTypeCSBK:
+		return h.csbkEndsCall(pkt)
+	case enums.DataTypeDataHeader, enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
+	default:
+		return false
+	}
+	h.outDataMu.Lock()
+	defer h.outDataMu.Unlock()
+	now := time.Now()
+	call := h.outData[pkt.StreamID]
+	if call == nil {
+		for id, c := range h.outData {
+			if now.Sub(c.lastSeen) > outDataIdle {
+				delete(h.outData, id)
+			}
+		}
+		if h.outData == nil {
+			h.outData = make(map[uint]*outboundDataCall)
+		}
+		call = &outboundDataCall{}
+		h.outData[pkt.StreamID] = call
+	}
+	call.lastSeen = now
+	if !ipsc.DataBurstEndsCall(&call.asm, pkt.DMRData) {
+		return false
+	}
+	delete(h.outData, pkt.StreamID)
+	return true
+}
+
+// csbkEndsCall reports whether the CSBK pkt ends its call, which it does
+// unless more of the call can follow it: a preamble CSBK announces data or
+// CSBKs to follow, and a data packet in progress on the stream has blocks
+// to follow. MMDVMHost sends each CSBK and data header with a new stream
+// ID, so its CSBKs other than preambles end their call; ipsc2mmdvm sends a
+// whole call, preambles and data, with one stream ID.
+func (h *MMDVMClient) csbkEndsCall(pkt proto.Packet) bool {
+	if isPreambleCSBK(pkt.DMRData) {
+		return false
+	}
+	h.outDataMu.Lock()
+	defer h.outDataMu.Unlock()
+	call, ok := h.outData[pkt.StreamID]
+	return !ok || time.Since(call.lastSeen) > outDataIdle
+}
+
+// isPreambleCSBK reports whether data, a CSBK burst, is a preamble CSBK
+// (ETSI TS 102 361-2 7.1.2.5).
+func isPreambleCSBK(data [33]byte) bool {
+	payload, _ := layer2.RawBurst(data).BPTCPayload()
+	csbk := pdu.CSBKBytes(payload)
+	return csbk.FID() == enums.FIDStandardized && csbk.Opcode() == pdu.CSBKPreamble
 }
 
 // stopContext is a context.Context that is canceled when the client stops.
@@ -785,10 +865,11 @@ func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
 		h.translateAndForwardToIPSC(packet)
 		return
 	}
-	end := isTerminator(packet)
+	end := h.outboundCallEnds(packet)
 	switch h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet, end, h.forwardOutbound) {
 	case timeslot.Deliver:
-		if h.translateAndForwardToIPSC(packet) || end {
+		h.translateAndForwardToIPSC(packet)
+		if end {
 			h.outboundTSMgr.Release(packet.Slot, packet.StreamID)
 		}
 	case timeslot.Queued:
