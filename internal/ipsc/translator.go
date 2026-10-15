@@ -62,9 +62,11 @@ type streamState struct {
 
 // IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
 // terminator, and data bursts carry the DMR data type (ETSI TS 102 361-1
-// 9.3.6) in this byte; voice bursts use 0x0A (TS1) and 0x8A (TS2). Rate 3/4
-// (0x08) and rate 1 (0x0A) data are not carried: rate 1 is indistinguishable
-// from a TS1 voice burst.
+// 9.3.6) in this byte; voice bursts use 0x0A (TS1) and 0x8A (TS2). Rate 1
+// (0x0A) data is not carried: it would read as a TS1 voice burst, and an
+// XPR 8400 does not relay it either. It sends a rate 1 block it received
+// cleanly as a 0x06 packet with a meaningless BPTC(196,96) decode, and a
+// marginal one as a 0x1F packet with the raw 196 information bits.
 const (
 	ipscBurstPIHeader        byte = 0x00
 	ipscBurstVoiceHead       byte = 0x01
@@ -74,6 +76,7 @@ const (
 	ipscBurstMBCContinuation byte = 0x05
 	ipscBurstDataHeader      byte = 0x06
 	ipscBurstRate12          byte = 0x07
+	ipscBurstRate34          byte = 0x08
 	ipscBurstSlot1           byte = 0x0A
 	ipscBurstSlot2           byte = 0x8A
 )
@@ -89,6 +92,7 @@ const (
 const (
 	ipscMinUserPacketLen = 31 // through the burst type byte at offset 30
 	ipscMinLCPacketLen   = 50 // through the 12-byte LC/data payload at 38-49
+	ipscMinRate34Len     = 56 // through the 18-byte rate 3/4 payload at 38-55
 	ipscMinVoicePktLen   = 52 // through the 19-byte AMBE payload at 33-51
 )
 
@@ -243,9 +247,17 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(pkt, enums.DataTypeTerminatorWithLC))
 			results = append(results, data)
 			t.removeStreamLocked(uint32(streamID))
+		case enums.DataTypeRate34:
+			payload, res := layer2.RawBurst(pkt.DMRData).Rate34Payload()
+			if res.Uncorrectable {
+				slog.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
+				return nil
+			}
+			results = append(results, t.buildIPSCRate34Packet(pkt, ss, payload))
+			ss.firstPacket = false
 		case enums.DataTypeCSBK, enums.DataTypePIHeader,
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
-			enums.DataTypeRate34, enums.DataTypeRate1,
+			enums.DataTypeRate1,
 			enums.DataTypeMBCHeader, enums.DataTypeMBCContinuation:
 			burstType, ok := ipscDataBurstType(enums.DataType(dtypeOrVSeq))
 			if !ok {
@@ -391,7 +403,7 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	t.buildRTPHeader(buf, ss, isFirst, 0x5D)
 
 	// RTP Payload — voice header with the full LC
-	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x00, lc, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x00, lc[:], slotTypeColorCode(pkt.DMRData))
 	return buf
 }
 
@@ -405,7 +417,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	t.buildRTPHeader(buf, ss, false, 0x5E)
 
 	// RTP Payload — voice terminator (same structure as header)
-	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc[:], slotTypeColorCode(pkt.DMRData))
 
 	ss.ipscSeq++
 	return buf
@@ -422,39 +434,56 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
 
 	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
-	writeIPSCDataBurst(buf, burstType, 0x40, payload, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, burstType, 0x40, payload[:], slotTypeColorCode(pkt.DMRData))
 
 	ss.ipscSeq++
 	return buf
 }
 
-// writeIPSCDataBurst writes the 24-byte RTP payload (bytes 30-53) of an IPSC
-// voice header, terminator, or data packet, after buildIPSCHeader has set
-// the timeslot in byte 17. The layout follows MOTOTRBO
-// captures (DMRlink voice_burst_decoding.txt) and node-dmr-lib's
-// DMRDataPayload:
+// buildIPSCRate34Packet builds a 60-byte IPSC rate 3/4 data packet. An XPR
+// 8400 carries the 18 octets of a rate 3/4 block (ETSI TS 102 361-1 9.2.10)
+// rotated left by two: in a confirmed block the DBSN and CRC-9 octets go
+// after the 16 data octets, and an unconfirmed block is rotated the same way.
+func (t *IPSCTranslator) buildIPSCRate34Packet(pkt mmdvm.Packet, ss *streamState, payload [18]byte) []byte {
+	buf := make([]byte, 60)
+	t.buildIPSCHeader(buf, pkt, ss, false, true)
+	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
+	var rotated [18]byte
+	copy(rotated[:], payload[2:])
+	copy(rotated[16:], payload[:2])
+	writeIPSCDataBurst(buf, ipscBurstRate34, 0x40, rotated[:], slotTypeColorCode(pkt.DMRData))
+	ss.ipscSeq++
+	return buf
+}
+
+// writeIPSCDataBurst writes the RTP payload (bytes 30 to the end of buf) of
+// an IPSC voice header, terminator, or data packet, after buildIPSCHeader
+// has set the timeslot in byte 17. buf holds payload and 4 more bytes. The
+// layout follows MOTOTRBO captures (DMRlink voice_burst_decoding.txt,
+// node-dmr-lib's DMRDataPayload, and an XPR 8400 on the test rig):
 //
 //	30     burst type (the DMR data type)
 //	31     bit 7: timeslot 2, the rest: RSSI and parity status flags
-//	32-33  length to follow in 16-bit words (10: bytes 34-53)
+//	32-33  length to follow in 16-bit words (bytes 34 to the end)
 //	34     0x80: RSSI present
 //	35     0x0A: slot type present, data sync
-//	36-37  payload size in bits (96)
-//	38-49  BPTC(196,96)-decoded payload
-//	50-51  slot type: color code (high nibble of 51) and DMR data type
-//	52-53  RSSI (left zero)
-func writeIPSCDataBurst(buf []byte, burstType, rssiParity byte, payload [12]byte, colorCode enums.ColorCode) {
+//	36-37  payload size in bits (96, or 144 for rate 3/4)
+//	38-    payload: the BPTC(196,96)-decoded octets, or a rate 3/4 block
+//	then   slot type: color code (high nibble of the second octet) and
+//	       DMR data type
+//	then   RSSI (left zero)
+func writeIPSCDataBurst(buf []byte, burstType, rssiParity byte, payload []byte, colorCode enums.ColorCode) {
 	buf[30] = burstType
 	buf[31] = rssiParity&0x7F | (buf[17]&0x20)<<2
-	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
+	binary.BigEndian.PutUint16(buf[32:34], uint16((len(buf)-34)/2)) //nolint:gosec // buf is at most 60 bytes
 	buf[34] = 0x80
 	buf[35] = 0x0A
-	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
-	copy(buf[38:50], payload[:])
+	binary.BigEndian.PutUint16(buf[36:38], uint16(len(payload)*8)) //nolint:gosec // payload is at most 18 bytes
+	end := 38 + copy(buf[38:], payload)
 	var slotType pdu.SlotTypeInfo
 	slotType.SetColorCode(colorCode)
 	slotType.SetDataType(enums.DataType(burstType))
-	buf[51] = byte(slotType)
+	buf[end+1] = byte(slotType)
 }
 
 // slotTypeColorCode returns the color code from the slot type of a DMR data
@@ -520,10 +549,10 @@ func embByte(burst *layer2.Burst, pos int) byte {
 	return byte(info)
 }
 
-// ipscDataBurstType maps a DMR data type to its IPSC burst type byte. It
-// reports false for data types that IPSC cannot carry: rate 3/4 and rate 1
-// payloads do not fit the verified 12-byte layout, and rate 1 (0x0A) would
-// read as a TS1 voice burst.
+// ipscDataBurstType maps a DMR data type with a 12-byte BPTC(196,96)
+// payload to its IPSC burst type byte. It reports false for other data
+// types: rate 3/4 has its own layout (buildIPSCRate34Packet), and IPSC
+// cannot carry rate 1, whose 0x0A would read as a TS1 voice burst.
 func ipscDataBurstType(dataType enums.DataType) (byte, bool) {
 	switch dataType {
 	case enums.DataTypePIHeader:
@@ -778,8 +807,11 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	}
 
 	minLen := ipscMinLCPacketLen
-	if burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2 {
+	switch burstType {
+	case ipscBurstSlot1, ipscBurstSlot2:
 		minLen = ipscMinVoicePktLen
+	case ipscBurstRate34:
+		minLen = ipscMinRate34Len
 	}
 	if len(data) < minLen {
 		slog.Debug("IPSCTranslator: IPSC burst too short",
@@ -848,6 +880,9 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
 			enums.DataType(burstType), data)
 		results = append(results, pkt)
+
+	case ipscBurstRate34:
+		results = append(results, t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data))
 
 	default:
 		slog.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
@@ -1008,6 +1043,34 @@ func lateEntryLC(payload [12]byte, src, dst uint, groupCall bool) (pdu.LCBytes, 
 		return pdu.LCBytes{}, false
 	}
 	return lc, true
+}
+
+// buildMMDVMRate34Packet builds an MMDVM DMRD packet for an IPSC rate 3/4
+// data packet, whose 18-octet block is rotated left by two (see
+// buildIPSCRate34Packet).
+func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint, groupCall, slot bool, rss *reverseStreamState, ipscData []byte) mmdvm.Packet {
+	var block [18]byte
+	copy(block[:], ipscData[54:56])
+	copy(block[2:], ipscData[38:54])
+	dmrData, err := layer2.BuildRate34DataBurst(block, t.colorCode, layer2.SyncSourceBS)
+	if err != nil {
+		slog.Debug("IPSCTranslator: cannot build rate 3/4 burst", "error", err)
+	}
+	pkt := mmdvm.Packet{
+		Signature:   mmdvm.DMRDSignature,
+		Seq:         uint(rss.seq),
+		Src:         src,
+		Dst:         dst,
+		Repeater:    uint(t.repeaterID),
+		Slot:        slot,
+		GroupCall:   groupCall,
+		FrameType:   mmdvmFrameTypeDataSync,
+		DTypeOrVSeq: uint(enums.DataTypeRate34),
+		StreamID:    uint(rss.streamID),
+		DMRData:     dmrData,
+	}
+	rss.seq++
+	return pkt
 }
 
 // buildMMDVMVoiceBurst builds MMDVM DMRD packets from an IPSC voice burst.

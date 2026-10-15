@@ -1275,13 +1275,11 @@ func TestTranslateToIPSCNeverEmitsVoiceBurstTypeForData(t *testing.T) {
 	}
 }
 
-func TestTranslateToIPSCDropsUnverifiedDataRates(t *testing.T) {
+func TestTranslateToIPSCDropsRate1(t *testing.T) {
 	t.Parallel()
-	for _, dt := range []enums.DataType{enums.DataTypeRate34, enums.DataTypeRate1} {
-		tr := newTestTranslator(t)
-		if out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(dt))); out != nil {
-			t.Fatalf("%s: expected nil, got %d packets", dt.String(), len(out))
-		}
+	tr := newTestTranslator(t)
+	if out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeRate1))); out != nil {
+		t.Fatalf("expected nil, got %d packets", len(out))
 	}
 }
 

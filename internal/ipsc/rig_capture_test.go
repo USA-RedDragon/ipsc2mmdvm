@@ -4,8 +4,120 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
+
+// rigDataCall is a data packet "DMRGO TEST" that the XPR 8400 relayed on
+// TS2 from 3191868, the bursts dmrgo encodes for it, and their data types.
+type rigDataCall struct {
+	name    string
+	dst     uint
+	group   bool
+	packets []string
+	bursts  []string
+	types   []enums.DataType
+}
+
+func rigRate34Calls() []rigDataCall {
+	return []rigDataCall{{
+		// Unconfirmed, to group 9: the header and the rate 3/4 block, then
+		// two 0x26 packets.
+		name: "unconfirmed", dst: 9, group: true,
+		packets: []string{
+			"830004ce2e0430b43c00000901000008972080dd0dc177f60fa00000000006c0000a800a006082a400000930b43c81006a6d00764898",
+			"830004ce2e0430b43c000009010000089760805e0dc277f611800000000008c2000d800a009052474f205445535400000000bd3e6a6c444d0078488b",
+			"830004ce2e0430b43c000009010000089720805d0dc377f613600000000026c00003800200004883",
+			"830004ce2e0430b43c000009010000089720805d0dc477f615400000000026c00003800200004897",
+		},
+		bursts: []string{
+			"081f86c810e222381764d761ddadff57d75df5de683018fa32b8216984480490f3",
+			"e669e3f222cdf5d5e00022edde1dff57d75df5d7d4ea2a3a322ce4762f79222166",
+		},
+		types: []enums.DataType{enums.DataTypeDataHeader, enums.DataTypeRate34},
+	}, {
+		// Confirmed, to radio 3191868: the header and the rate 3/4 block,
+		// then a 0x13 packet.
+		name: "confirmed", dst: 3191868,
+		packets: []string{
+			"840004ce2e8030b43c30b43c0100006ca62080dd6c5461006e330000000006c0000a800a006043a230b43c30b43c8100d06d007646fc",
+			"840004ce2e8030b43c30b43c0100006ca660805e6c55610070130000000008c0000d800a0090444d52474f20544553540000a3ecda7c002e007846cf",
+			"840004ce2e8030b43c30b43c0100006ca660805e6c56610071f30000000013800000",
+		},
+		bursts: []string{
+			"3849367d31d2a01a1620de61ddadff57d75df5de68245897b13121c880040b24d3",
+			"2c3c2a3cf259f24919d542edde1dff57d75df5d7d42efea77a2f9de704bf0f2c4e",
+		},
+		types: []enums.DataType{enums.DataTypeDataHeader, enums.DataTypeRate34},
+	}}
+}
+
+func TestRigRate34ToMMDVM(t *testing.T) {
+	t.Parallel()
+	for _, c := range rigRate34Calls() {
+		got := translateRig(t, c.packets)
+		if len(got) != len(c.bursts) {
+			t.Fatalf("%s: got %d packets, want %d", c.name, len(got), len(c.bursts))
+		}
+		for i, p := range got {
+			w, _ := hex.DecodeString(c.bursts[i])
+			if p.DMRData != [33]byte(w) {
+				t.Errorf("%s packet %d: burst\n got %x\nwant %x", c.name, i, p.DMRData, w)
+			}
+			if p.Src != 3191868 || p.Dst != c.dst || p.GroupCall != c.group || !p.Slot ||
+				p.FrameType != mmdvmFrameTypeDataSync || p.DTypeOrVSeq != uint(c.types[i]) {
+				t.Errorf("%s packet %d: got %+v", c.name, i, p)
+			}
+		}
+	}
+}
+
+// rigDataToIPSC sends the bursts of c to IPSC and checks bytes 30 to the
+// RSSI of each packet against what the XPR 8400 sent. Bit 1 of byte 31,
+// which the repeater sets when a block fails its CRC check, is not compared:
+// the repeater sets it on every unconfirmed rate 3/4 block, which has no
+// CRC-9.
+func rigDataToIPSC(t *testing.T, c rigDataCall) [][]byte {
+	t.Helper()
+	tr, err := NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.SetPeerID(3149999)
+	tr.SetColorCode(7)
+	all := make([][]byte, 0, len(c.bursts))
+	for i, b := range c.bursts {
+		w, _ := hex.DecodeString(b)
+		pkt := mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: c.group, Slot: true,
+			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 77, DMRData: [33]byte(w),
+		}
+		out := tr.TranslateToIPSC(pkt)
+		if len(out) != 1 {
+			t.Fatalf("%s burst %d: got %d packets", c.name, i, len(out))
+		}
+		r, _ := hex.DecodeString(c.packets[i])
+		if len(out[0]) != len(r) {
+			t.Fatalf("%s burst %d: got %d bytes, want %d", c.name, i, len(out[0]), len(r))
+		}
+		n := len(r) - 2
+		g := append([]byte(nil), out[0][30:n]...)
+		g[1] &^= 0x02
+		r[31] &^= 0x02
+		if hex.EncodeToString(g) != hex.EncodeToString(r[30:n]) {
+			t.Errorf("%s burst %d: bytes 30-%d\n got %x\nwant %x", c.name, i, n-1, g, r[30:n])
+		}
+		all = append(all, out[0])
+	}
+	return all
+}
+
+func TestRigRate34ToIPSC(t *testing.T) {
+	t.Parallel()
+	for _, c := range rigRate34Calls() {
+		rigDataToIPSC(t, c)
+	}
+}
 
 // Packets an XPR 8400 (peer 314926, color code 7) sent on IPSC for calls
 // that dmrgo's dmrrf transmitted into it over RF on 2026-10-15, and the DMR
