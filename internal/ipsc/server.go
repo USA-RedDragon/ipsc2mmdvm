@@ -193,6 +193,7 @@ func (s *IPSCServer) Stop() {
 		s.stopped.Store(true)
 		close(s.done)
 		if s.udp != nil {
+			s.deRegisterSelf()
 			if err := s.udp.Close(); err != nil {
 				slog.Error("error closing UDP listener", "error", err)
 			}
@@ -464,6 +465,19 @@ func (s *IPSCServer) handleDeRegisterRequest(data []byte, addr *net.UDPAddr) err
 	slog.Info("IPSC peer de-registered", "peerID", peerID, "peer", addr)
 	s.sendPeerList(time.Now())
 	return nil
+}
+
+// deRegisterSelf tells every active peer that the master is leaving, as
+// DMRlink's de_register_self does on shutdown: a de-registration request
+// with the local ID.
+func (s *IPSCServer) deRegisterSelf() {
+	req := append([]byte{byte(PacketType_DeRegisterRequest)}, s.localIDBytes()...)
+	for _, target := range s.activePeers(time.Now()) {
+		packet := &Packet{data: append([]byte(nil), req...)}
+		if err := s.sendPacket(packet, target.addr); err != nil {
+			slog.Warn("failed sending IPSC de-registration", "peer", target.addr, "error", err)
+		}
+	}
 }
 
 func (s *IPSCServer) handleRepeaterWakeUp(data []byte, addr *net.UDPAddr) error {

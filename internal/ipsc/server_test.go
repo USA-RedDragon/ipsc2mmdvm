@@ -534,10 +534,20 @@ func newTestServerWithUDP(t *testing.T, authEnabled bool, authKey string) (*IPSC
 	return s, addr
 }
 
-// registerPeer registers peerID as if it had sent a master register request.
+// registerPeer registers peerID as if it had sent a master register request,
+// from a loopback UDP socket that the test binds, so that what the server
+// sends to the peer, such as the de-registration in Stop, stays in the test.
 func registerPeer(t *testing.T, s *IPSCServer, peerID uint32) {
 	t.Helper()
-	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50000}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
 	if err := s.upsertPeer(peerID, addr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
 		t.Fatalf("upsertPeer: %v", err)
 	}
@@ -2386,5 +2396,38 @@ func TestDeRegisterRequestRemovesPeer(t *testing.T) {
 	expectNoUDP(t, client)
 	if _, err := s.handlePacket(mustDecodeHex(t, "9b0004ce2e"), peerAddr); !errors.Is(err, ErrPacketIgnored) {
 		t.Fatalf("de-registration reply: got %v, want ErrPacketIgnored", err)
+	}
+}
+
+// TestStopDeRegistersFromPeers checks that Stop sends each registered peer
+// the de-registration request DMRlink sends on shutdown: 0x9A and the local
+// ID, with one HMAC when authentication is on.
+func TestStopDeRegistersFromPeers(t *testing.T) {
+	t.Parallel()
+	const key = "00000000000000000000000000001234567890ab"
+	for _, authEnabled := range []bool{false, true} {
+		s := NewIPSCServer(testConfig(authEnabled, key), nil)
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.udp = conn
+		peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerAddr, _ := peer.LocalAddr().(*net.UDPAddr)
+		if err := s.upsertPeer(314926, peerAddr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
+			t.Fatal(err)
+		}
+		s.Stop()
+		want := mustDecodeHex(t, "9a0004c234")
+		if authEnabled {
+			want = signPacket(t, want, key)
+		}
+		if got := readUDP(t, peer); hex.EncodeToString(got) != hex.EncodeToString(want) {
+			t.Errorf("auth %v: got %x, want %x", authEnabled, got, want)
+		}
+		peer.Close()
 	}
 }
