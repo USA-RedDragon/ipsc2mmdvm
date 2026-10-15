@@ -45,6 +45,7 @@ type MMDVMClient struct {
 	dialTimeout  time.Duration
 	sessMu       sync.Mutex // serializes handshake transitions with supervise
 	salt         []byte     // last RPTACK salt, guarded by sessMu
+	resentAt     time.Time  // last handshake resend, guarded by sessMu
 
 	// Rewrite rules built from config, applied to packets
 	// flowing through this network.
@@ -421,8 +422,9 @@ func (h *MMDVMClient) handleReady(data []byte) {
 }
 
 // supervise owns the connection for the whole run. Every keepalive
-// interval it pings when READY, resends the current handshake step
-// otherwise, and reconnects when the master has stopped answering, the
+// interval it pings when READY, resends a stalled handshake step every
+// second interval (a faster resend can reset a session on hblink), and
+// reconnects when the master has stopped answering, the
 // handshake has not progressed within the timeout, or there is no
 // connection at all.
 func (h *MMDVMClient) supervise() {
@@ -459,7 +461,14 @@ func (h *MMDVMClient) tick(now time.Time) {
 			h.reconnect()
 			return
 		}
-		h.resend(st)
+		last := time.Unix(0, h.stateSince.Load())
+		if h.resentAt.After(last) {
+			last = h.resentAt
+		}
+		if now.Sub(last) >= 2*h.keepAlive {
+			h.resentAt = now
+			h.resend(st)
+		}
 	case STATE_IDLE, STATE_TIMEOUT:
 		h.connectAndLogin()
 	}

@@ -584,7 +584,7 @@ func TestHandlerSentLoginMSTACK(t *testing.T) {
 func TestHandlerSentLoginRejected(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.keepAlive = time.Hour
+	client.keepAlive = time.Minute
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_LOGIN)
 
@@ -593,7 +593,7 @@ func TestHandlerSentLoginRejected(t *testing.T) {
 		t.Fatal("expected no immediate resend after rejection")
 	}
 
-	client.tick(time.Now())
+	client.tick(time.Now().Add(2 * time.Minute))
 	data := <-client.connTX
 	if string(data[:4]) != tagRPTL {
 		t.Fatalf("expected RPTL retry, got %q", string(data[:4]))
@@ -634,7 +634,7 @@ func TestHandlerSentAuthMSTNAK(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	client.metrics = metrics.NewMetrics()
-	client.keepAlive = time.Hour
+	client.keepAlive = time.Minute
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_AUTH)
 
@@ -648,7 +648,7 @@ func TestHandlerSentAuthMSTNAK(t *testing.T) {
 		t.Fatalf("expected %q in metrics output", want)
 	}
 
-	client.tick(time.Now())
+	client.tick(time.Now().Add(2 * time.Minute))
 	data := <-client.connTX
 	if string(data[:4]) != tagRPTL {
 		t.Fatalf("expected RPTL retry, got %q", string(data[:4]))
@@ -711,7 +711,7 @@ func TestHandlerSentRPTCAccepted(t *testing.T) {
 func TestHandlerSentRPTCRejected(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.keepAlive = time.Hour
+	client.keepAlive = time.Minute
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_RPTC)
 
@@ -720,7 +720,7 @@ func TestHandlerSentRPTCRejected(t *testing.T) {
 		t.Fatalf("expected STATE_SENT_LOGIN after config rejection, got %d", st)
 	}
 
-	client.tick(time.Now())
+	client.tick(time.Now().Add(2 * time.Minute))
 	data := <-client.connTX
 	if string(data[:4]) != tagRPTL {
 		t.Fatalf("expected RPTL after config rejection, got %q", string(data[:4]))
@@ -2182,5 +2182,31 @@ func TestSendPacketDroppedUntilReady(t *testing.T) {
 	}
 	if strings.Contains(body, "mmdvm_packets_sent_total{") {
 		t.Fatal("dropped packets must not be counted as sent")
+	}
+}
+
+func TestHandshakeResendEverySecondInterval(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.keepAlive = time.Second
+	client.timeout = time.Hour
+	client.setState(STATE_SENT_LOGIN)
+	start := time.Now()
+
+	client.tick(start.Add(time.Second))
+	if n := len(client.connTX); n != 0 {
+		t.Fatalf("expected no resend after one interval, got %d queued", n)
+	}
+	client.tick(start.Add(2 * time.Second))
+	if n := len(client.connTX); n != 1 {
+		t.Fatalf("expected one resend after two intervals, got %d queued", n)
+	}
+	client.tick(start.Add(3 * time.Second))
+	if n := len(client.connTX); n != 1 {
+		t.Fatalf("expected no resend one interval after the last, got %d queued", n)
+	}
+	client.tick(start.Add(4 * time.Second))
+	if n := len(client.connTX); n != 2 {
+		t.Fatalf("expected a second resend, got %d queued", n)
 	}
 }
