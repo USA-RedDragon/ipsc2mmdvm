@@ -2246,3 +2246,27 @@ func TestSendUserPacketGivesUpWhenServerStops(t *testing.T) {
 	time.AfterFunc(20*time.Millisecond, s.Stop)
 	requireReturns(t, "SendUserPacket", func() { s.SendUserPacket(t.Context(), []byte("x")) })
 }
+
+func TestPacePeerSpacesConcurrentSenders(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	s.pace = 50 * time.Millisecond
+	s.lastSend[1] = time.Now()
+	var wg sync.WaitGroup
+	times := make([]time.Time, 2)
+	for i := range times {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !s.pacePeer(t.Context(), 1) {
+				t.Error("pacePeer gave up")
+			}
+			times[i] = time.Now()
+		}()
+	}
+	wg.Wait()
+	gap := times[0].Sub(times[1]).Abs()
+	if gap < s.pace-5*time.Millisecond {
+		t.Fatalf("two senders released %v apart, want at least %v", gap, s.pace)
+	}
+}

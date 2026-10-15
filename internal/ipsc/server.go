@@ -758,12 +758,17 @@ func (s *IPSCServer) SendUserPacket(ctx context.Context, data []byte) {
 	}
 }
 
-// pacePeer waits until a packet may be sent to peerID. It returns false if
-// ctx is done or the server stops first.
+// pacePeer waits until a packet may be sent to peerID and claims that send
+// time. It checks again after each wait, so concurrent callers are spaced
+// out too. It returns false if ctx is done or the server stops first.
 func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 	s.mu.Lock()
-	last := s.lastSend[peerID]
-	if wait := s.pace - time.Since(last); !last.IsZero() && wait > 0 {
+	for {
+		last := s.lastSend[peerID]
+		wait := s.pace - time.Since(last)
+		if last.IsZero() || wait <= 0 {
+			break
+		}
 		s.mu.Unlock()
 		timer := time.NewTimer(wait)
 		select {
