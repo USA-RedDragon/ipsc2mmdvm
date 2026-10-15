@@ -576,21 +576,14 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 			copy(buf[52:56], embData[:])
 		}
 
-		// Bytes 56-58: FLCO, FID, and service options of the call's full LC
-		lc := ss.lc
+		// Bytes 56-64: the call's full LC with the destination and source
+		// of the packet
+		lc := pdu.LCBytes(ss.lc)
 		if !ss.hasLC {
 			lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
 		}
-		copy(buf[56:59], lc[0:3])
-
-		// Bytes 59-61: Destination repeated
-		buf[59] = byte((pkt.Dst >> 16) & 0xFF)
-		buf[60] = byte((pkt.Dst >> 8) & 0xFF)
-		buf[61] = byte(pkt.Dst & 0xFF)
-		// Bytes 62-64: Source repeated
-		buf[62] = byte((pkt.Src >> 16) & 0xFF)
-		buf[63] = byte((pkt.Src >> 8) & 0xFF)
-		buf[64] = byte(pkt.Src & 0xFF)
+		lc.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src))
+		copy(buf[56:65], lc[:])
 		buf[65] = emb
 
 	default: // Bursts B, C, D, F — 57 bytes with embedded signalling
@@ -668,17 +661,12 @@ func mmdvmVoiceDecodeOptions(pkt mmdvm.Packet) *layer2.DecodeOptions {
 	return opts
 }
 
-// fullLCFromBurst returns the full LC carried by an MMDVM voice LC header or
-// terminator burst. If the burst does not decode to a valid LC, it returns
-// one built from the packet fields.
+// fullLCFromBurst returns the full LC for an MMDVM voice LC header or
+// terminator burst. The feature set ID and service options come from the LC
+// in the burst when it is valid; the call type, destination, and source come
+// from the packet fields, which a rewrite rule may have changed.
 func fullLCFromBurst(pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
-	lc, ok := decodeBPTCPayload(pkt.DMRData)
-	if ok && layer2.MMDVMHostAccepts(dataType, lc) {
-		return lc
-	}
-	slog.Debug("IPSCTranslator: invalid full LC in burst, constructing from packet fields",
-		"dtype", dataType.String())
-	return constructFullLC(pkt.Src, pkt.Dst, pkt.GroupCall, dataType)
+	return fullLCCodeword(rewrittenLC(&pkt, dataType), dataType)
 }
 
 // reverseStreamState tracks per-call state for IPSC→MMDVM translation.

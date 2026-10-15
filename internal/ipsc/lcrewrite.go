@@ -1,6 +1,7 @@
 package ipsc
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
@@ -94,9 +95,14 @@ func (r *LCRewriter) pruneLocked(now time.Time) {
 // call type, destination, and source from pkt. The protect flag stays as
 // it is. A call type change clears the reserved bit, as DMRGateway does.
 func rewrittenLC(pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
-	lc := constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
-	if payload, ok := decodeBPTCPayload(pkt.DMRData); ok && layer2.MMDVMHostAccepts(dataType, payload) {
+	var lc pdu.LCBytes
+	payload, ok := decodeBPTCPayload(pkt.DMRData)
+	if ok && layer2.MMDVMHostAccepts(dataType, payload) {
 		lc = pdu.LCBytes(payload[:9])
+	} else {
+		slog.Debug("invalid full LC in burst, constructing from packet fields",
+			"dtype", dataType.String())
+		lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
 	}
 
 	flco := enums.FLCOUnitToUnitVoiceChannelUser

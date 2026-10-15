@@ -361,3 +361,35 @@ func TestLCRewriterPrunesIdleStreams(t *testing.T) {
 		t.Fatalf("idle stream not pruned: %d streams", len(r.streams))
 	}
 }
+
+// TestTranslateToIPSCFullLCFollowsPacketFields checks that the translator
+// takes the call type, destination, and source of the IPSC full LC from the
+// packet fields, which a rewrite rule may have changed, and keeps the
+// feature set ID and service options of the decoded LC.
+func TestTranslateToIPSCFullLCFollowsPacketFields(t *testing.T) {
+	t.Parallel()
+	priv := [9]byte{0x03, 0x10, 0xC0, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+	group := [9]byte{0x00, 0x00, 0xC0, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
+	tr := newTestTranslator(t)
+
+	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 9, true, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
+	out := tr.TranslateToIPSC(hdr)
+	want := testFullLC(t, group, enums.DataTypeVoiceLCHeader)
+	if len(out) != 3 || string(out[0][38:50]) != string(want[:]) {
+		t.Fatalf("header LC % X, want % X", out[0][38:50], want)
+	}
+	for vseq := uint(0); vseq <= 4; vseq++ {
+		v := voicePacket(vseq, defaultLCSS(int(vseq))) //nolint:gosec // vseq is in [0,4]
+		v.Src, v.Dst, v.GroupCall = 1234, 9, true
+		out = tr.TranslateToIPSC(v)
+	}
+	if len(out) != 1 || len(out[0]) != 66 || string(out[0][56:59]) != string(group[0:3]) {
+		t.Fatalf("burst E LC prefix % X, want % X", out[0][56:59], group[0:3])
+	}
+	term := lcPacket(enums.DataTypeTerminatorWithLC, 1234, 9, true, burstWithLC(t, priv, enums.DataTypeTerminatorWithLC, 1))
+	out = tr.TranslateToIPSC(term)
+	want = testFullLC(t, group, enums.DataTypeTerminatorWithLC)
+	if len(out) != 1 || string(out[0][38:50]) != string(want[:]) {
+		t.Fatalf("terminator LC % X, want % X", out[0][38:50], want)
+	}
+}
