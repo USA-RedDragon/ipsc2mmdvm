@@ -801,7 +801,11 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		slog.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
 	}
 
-	if isEnd {
+	// MOTOTRBO repeaters also set the end bit on voice bursts in the middle
+	// of a weak-signal call, so a voice burst never ends the stream. As in
+	// ipsc2hbpc, the call ends at its terminator, and pruning ends a call
+	// whose terminator is lost.
+	if isEnd && burstType != ipscBurstSlot1 && burstType != ipscBurstSlot2 {
 		t.removeReverseStreamLocked(callControl)
 	}
 

@@ -1,9 +1,11 @@
 package ipsc
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
@@ -162,5 +164,46 @@ func TestTranslateToIPSCSlotFlagInPayload(t *testing.T) {
 				t.Errorf("slot %t packet %d: byte 31 0x%02X, want bit 7 = 0x%02X", slot, i, p[31], want)
 			}
 		}
+	}
+}
+
+// The repeater sets the call-end bit of byte 17 on weak-signal voice bursts
+// in the middle of a call (captureSyncLost lines 15 and 20). Like ipsc2hbpc,
+// only a terminator or a non-voice packet ends the stream; a voice burst's
+// end bit does not.
+func TestIPSCVoiceBurstEndBitKeepsStream(t *testing.T) {
+	t.Parallel()
+	tr, clock, m := newClockedTranslator(t)
+	streams := map[uint]bool{}
+	for i, h := range captureSyncLost() {
+		data, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+		for _, p := range tr.TranslateToMMDVM(data[0], data) {
+			streams[p.StreamID] = true
+		}
+	}
+	if len(streams) != 1 {
+		t.Fatalf("call split into %d streams, want 1", len(streams))
+	}
+	if got := activeStreams(t, m, "ipsc_to_mmdvm"); got != 1 {
+		t.Fatalf("ipsc_to_mmdvm gauge %v, want 1", got)
+	}
+
+	// The capture has no terminator; pruning still ends the call.
+	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
+	d := makeTestIPSCPacket(0x83, ipscBurstCSBK, true, false)
+	tr.TranslateToMMDVM(0x83, d)
+	if len(tr.reverseStreams) != 1 {
+		t.Fatalf("expected only the new stream after pruning, got %d", len(tr.reverseStreams))
+	}
+
+	data := makeTestIPSCPacket(0x83, ipscBurstCSBK, true, false)
+	data[17] |= 0x40
+	binary.BigEndian.PutUint32(data[13:17], 0xD00D)
+	tr.TranslateToMMDVM(0x83, data)
+	if _, ok := tr.reverseStreams[0xD00D]; ok {
+		t.Fatal("a data packet with the end bit did not end its stream")
 	}
 }
