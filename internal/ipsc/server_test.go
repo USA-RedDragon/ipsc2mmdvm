@@ -2072,3 +2072,133 @@ func TestRegistrationIsCappedAtMaxPeers(t *testing.T) {
 		t.Fatalf("re-registering an existing peer failed: %v", err)
 	}
 }
+
+func TestSilentPeerStopsGettingTraffic(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestServerWithUDP(t, false, "")
+
+	victim, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer victim.Close()
+	victimAddr, ok := victim.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+
+	if err := s.upsertPeer(42, victimAddr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
+		t.Fatalf("upsertPeer: %v", err)
+	}
+	s.mu.Lock()
+	s.peers[42].LastSeen = time.Now().Add(-peerTimeout - time.Second)
+	s.mu.Unlock()
+
+	s.SendUserPacket([]byte("voice"))
+	expectNoUDP(t, victim)
+}
+
+func TestExpiredPeerKeepaliveIsRejected(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	registerPeer(t, s, 7)
+
+	s.mu.Lock()
+	s.peers[7].LastSeen = time.Now().Add(-peerTimeout - time.Second)
+	s.mu.Unlock()
+	if s.markPeerAlive(7) {
+		t.Fatal("expected keepalive from a timed-out peer to require registration")
+	}
+}
+
+func TestExpirePeersRemovesSilentPeers(t *testing.T) {
+	t.Parallel()
+	m := metrics.NewMetrics()
+	s, _ := newTestServerWithUDP(t, false, "")
+	s.metrics = m
+
+	live, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer live.Close()
+	liveAddr, ok := live.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatal("expected *net.UDPAddr from LocalAddr")
+	}
+
+	if err := s.upsertPeer(1, liveAddr, s.defaultModeByte(), s.defaultFlagsBytes()); err != nil {
+		t.Fatalf("upsertPeer: %v", err)
+	}
+	registerPeer(t, s, 2)
+	s.pacePeer(2)
+
+	now := time.Now()
+	s.mu.Lock()
+	s.peers[2].LastSeen = now.Add(-peerTimeout - time.Second)
+	s.mu.Unlock()
+
+	s.expirePeers(now)
+
+	s.mu.RLock()
+	_, stale := s.peers[2]
+	_, staleSend := s.lastSend[2]
+	_, kept := s.peers[1]
+	s.mu.RUnlock()
+	if stale || staleSend {
+		t.Fatal("expected silent peer to be removed")
+	}
+	if !kept {
+		t.Fatal("expected live peer to be kept")
+	}
+	if got := gaugeValue(t, m.IPSCPeersRegistered); got != 1 {
+		t.Fatalf("expected gauge 1 after expiry, got %v", got)
+	}
+
+	reply := readUDP(t, live)
+	if reply[0] != byte(PacketType_PeerListReply) {
+		t.Fatalf("expected peer list broadcast, got 0x%02X", reply[0])
+	}
+	if n := binary.BigEndian.Uint16(reply[5:7]); n != 11 {
+		t.Fatalf("expected one peer in the list, got %d bytes", n)
+	}
+	if id := binary.BigEndian.Uint32(reply[7:11]); id != 1 {
+		t.Fatalf("expected peer 1 in the list, got %d", id)
+	}
+}
+
+func TestKeepalivesPreventExpiry(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	registerPeer(t, s, 7)
+
+	s.mu.Lock()
+	s.peers[7].LastSeen = time.Now().Add(-peerTimeout + time.Second)
+	s.mu.Unlock()
+	if !s.markPeerAlive(7) {
+		t.Fatal("markPeerAlive rejected a live peer")
+	}
+
+	s.expirePeers(time.Now().Add(2 * time.Second))
+	if s.peerCount() != 1 {
+		t.Fatal("expected peer with recent keepalive to be kept")
+	}
+}
+
+func TestStopEndsMaintenance(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	s.wg.Add(1)
+	go s.maintenance()
+
+	stopped := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not end the maintenance goroutine")
+	}
+}

@@ -36,6 +36,7 @@ type IPSCServer struct {
 	wg       sync.WaitGroup
 	stopped  atomic.Bool
 	stopOnce sync.Once
+	done     chan struct{}
 }
 
 type Packet struct {
@@ -93,6 +94,15 @@ var (
 // grow it without limit. Motorola IPSC networks allow at most 15 peers.
 const maxPeers = 64
 
+const (
+	// peerKeepAliveInterval is how often IPSC peers send keepalives, and how
+	// often the server checks for silent peers.
+	peerKeepAliveInterval = 5 * time.Second
+	// peerTimeout is how long a registered peer may stay silent before it is
+	// removed. It matches the 120 second timeout DMRlink uses as a master.
+	peerTimeout = 24 * peerKeepAliveInterval
+)
+
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 	// Decode the auth key from hex string to raw bytes.
 	// DMRlink left-pads the hex key to 40 characters (20 bytes) with zeros.
@@ -125,6 +135,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		peers:    map[uint32]*Peer{},
 		lastSend: map[uint32]time.Time{},
 		bursts:   make(chan burst, burstQueueSize),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -143,8 +154,9 @@ func (s *IPSCServer) Start() error {
 		return fmt.Errorf("error starting UDP listener: %w", err)
 	}
 
-	s.wg.Add(1)
+	s.wg.Add(2)
 	go s.handler()
+	go s.maintenance()
 
 	return nil
 }
@@ -153,6 +165,7 @@ func (s *IPSCServer) Stop() {
 	s.stopOnce.Do(func() {
 		slog.Info("Stopping IPSC server")
 		s.stopped.Store(true)
+		close(s.done)
 		if s.udp != nil {
 			if err := s.udp.Close(); err != nil {
 				slog.Error("error closing UDP listener", "error", err)
@@ -461,17 +474,86 @@ func (s *IPSCServer) updatePeersGaugeLocked() {
 	s.metrics.IPSCPeersRegistered.Set(float64(registered))
 }
 
+// maintenance removes expired peers every keepalive interval until Stop.
+func (s *IPSCServer) maintenance() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(peerKeepAliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case now := <-ticker.C:
+			s.expirePeers(now)
+		}
+	}
+}
+
+// expirePeers removes peers that have been silent for longer than
+// peerTimeout and, like DMRlink, sends the new peer list to the peers left.
+func (s *IPSCServer) expirePeers(now time.Time) {
+	s.mu.Lock()
+	var expired []uint32
+	for id, peer := range s.peers {
+		if !peerActive(peer, now) {
+			expired = append(expired, id)
+			delete(s.peers, id)
+			delete(s.lastSend, id)
+		}
+	}
+	if len(expired) > 0 {
+		s.updatePeersGaugeLocked()
+	}
+	s.mu.Unlock()
+
+	if len(expired) == 0 {
+		return
+	}
+	slog.Warn("IPSC peers timed out, de-registering", "peerIDs", expired, "timeout", peerTimeout)
+	reply := s.buildPeerListReply()
+	for _, target := range s.activePeers(now) {
+		packet := &Packet{data: append([]byte(nil), reply...)}
+		if err := s.sendPacket(packet, target.addr); err != nil {
+			slog.Warn("failed sending IPSC peer list", "peer", target.addr, "error", err)
+		}
+	}
+}
+
+// peerActive reports whether peer is registered and has not timed out.
+func peerActive(peer *Peer, now time.Time) bool {
+	return peer.RegistrationStatus && now.Sub(peer.LastSeen) <= peerTimeout
+}
+
+type peerTarget struct {
+	id   uint32
+	addr *net.UDPAddr
+}
+
+// activePeers returns the ID and a copy of the address of every active peer.
+func (s *IPSCServer) activePeers(now time.Time) []peerTarget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	targets := make([]peerTarget, 0, len(s.peers))
+	for _, peer := range s.peers {
+		if peerActive(peer, now) && peer.Addr != nil {
+			targets = append(targets, peerTarget{id: peer.ID, addr: cloneUDPAddr(peer.Addr)})
+		}
+	}
+	return targets
+}
+
 // markPeerAlive records activity from a registered peer. It returns false,
 // and changes nothing, when the peer has not registered.
 func (s *IPSCServer) markPeerAlive(peerID uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	peer, ok := s.peers[peerID]
-	if !ok || !peer.RegistrationStatus {
+	if !ok || !peerActive(peer, now) {
 		return false
 	}
-	peer.LastSeen = time.Now()
+	peer.LastSeen = now
 	peer.KeepAliveReceived++
 	return true
 }
@@ -480,7 +562,7 @@ func (s *IPSCServer) isRegistered(peerID uint32) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	peer, ok := s.peers[peerID]
-	return ok && peer.RegistrationStatus
+	return ok && peerActive(peer, time.Now())
 }
 
 func (s *IPSCServer) buildMasterRegisterReply() []byte {
@@ -533,9 +615,10 @@ func (s *IPSCServer) buildPeerList() []byte {
 		return nil
 	}
 
+	now := time.Now()
 	peerList := make([]byte, 0, len(s.peers)*11)
 	for _, peer := range s.peers {
-		if peer.Addr == nil || peer.Addr.IP == nil {
+		if !peerActive(peer, now) || peer.Addr == nil || peer.Addr.IP == nil {
 			continue
 		} //nolint:gosec
 		peerList = append(peerList, uint32ToBytes(peer.ID)...)
@@ -647,23 +730,14 @@ func (s *IPSCServer) SendUserPacket(data []byte) {
 	if s.stopped.Load() {
 		return
 	}
-	s.mu.RLock()
-	peers := make([]*Peer, 0, len(s.peers))
-	for _, peer := range s.peers {
-		if peer.RegistrationStatus && peer.Addr != nil {
-			peers = append(peers, peer)
-		}
-	}
-	s.mu.RUnlock()
-
-	for _, peer := range peers {
-		s.pacePeer(peer.ID)
+	for _, peer := range s.activePeers(time.Now()) {
+		s.pacePeer(peer.id)
 		packetData := make([]byte, len(data))
 		copy(packetData, data)
 		packet := &Packet{data: packetData}
-		slog.Debug("IPSC burst sending", "peer", peer.Addr, "length", len(packet.data))
-		if err := s.sendPacket(packet, peer.Addr); err != nil {
-			slog.Warn("failed sending IPSC user packet", "peer", peer.Addr, "error", err)
+		slog.Debug("IPSC burst sending", "peer", peer.addr, "length", len(packet.data))
+		if err := s.sendPacket(packet, peer.addr); err != nil {
+			slog.Warn("failed sending IPSC user packet", "peer", peer.addr, "error", err)
 		} else if s.metrics != nil {
 			s.metrics.IPSCPacketsSent.Inc()
 		}
