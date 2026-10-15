@@ -781,6 +781,52 @@ func TestLateEntryLearnsPrivacy(t *testing.T) {
 	}
 }
 
+// TestLateEntryNeverMixesSuperframes sends the bursts of
+// TestRigLateEntryToIPSCCarriesEmbeddedLC with E lost in the first
+// superframe and A to D lost in the second. Fragments B-D of the first and
+// E of the second decode to the call's LC, but they are from two
+// superframes, so burst E carries the LC built from the packet fields.
+func TestLateEntryNeverMixesSuperframes(t *testing.T) {
+	t.Parallel()
+	tr, err := NewIPSCTranslator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.SetPeerID(3149999)
+	tr.SetColorCode(7)
+	bursts := []string{
+		rigBurstA,
+		"8a3e8c022d191619eeaa053b03c73000909003849ea5bcfdf812bca894359e323a",
+		"4922df4c3e3bd60c0f3432b2189770f0a0606dd16e595bc6c5fc8e707c1726043d",
+		"62b67b404c70f4053a0dca5bf7077091d0f05ddf8428b241d17b05dd18bf1b0b70",
+		"9d3b07147149793a31b2bcd2f0c751d18001eae3805c3f7964072cffc3606f58eb",
+	}
+	var e []byte
+	for _, pos := range []int{burstA, burstB, burstC, burstD, burstF, burstE} {
+		b := pos
+		if pos == burstF {
+			b = burstB
+		}
+		w, _ := hex.DecodeString(bursts[b])
+		ft := mmdvmFrameTypeVoice
+		if pos == burstA {
+			ft = mmdvmFrameTypeVoiceSync
+		}
+		out := tr.TranslateToIPSC(mmdvm.Packet{
+			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 91, GroupCall: true, Slot: true,
+			FrameType: ft, DTypeOrVSeq: uint(pos), StreamID: 81, DMRData: [33]byte(w),
+		})
+		if len(out) != 1 {
+			t.Fatalf("burst %c: got %d packets", 'A'+pos, len(out))
+		}
+		e = out[0]
+	}
+	want := constructLC(3191868, 91, true)
+	if got := hex.EncodeToString(e[56:65]); got != hex.EncodeToString(want[:]) {
+		t.Fatalf("burst E LC %s, want %x", got, want)
+	}
+}
+
 // TestRigCallSequence checks that byte 5 is the same in every packet of a
 // call, voice or data, as in the XPR 8400 captures, and differs between
 // calls.
