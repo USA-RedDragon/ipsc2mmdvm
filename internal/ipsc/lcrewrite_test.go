@@ -488,3 +488,110 @@ func TestLCRewriterRewritesDataHeader(t *testing.T) {
 		t.Fatalf("response header % X, want % X", got, want)
 	}
 }
+
+// voiceWithEmbeddedLC returns voice burst vseq (1-5) of a superframe whose
+// bursts B-E carry fragments as their embedded LC.
+func voiceWithEmbeddedLC(vseq uint, fragments [4][4]byte) mmdvm.Packet {
+	pos := int(vseq) //nolint:gosec // vseq is in [1,5]
+	p := voicePacket(vseq, defaultLCSS(pos))
+	if pos > burstE {
+		return p
+	}
+	raw := layer2.RawBurst(p.DMRData)
+	raw.SetEmbeddedData(fragments[pos-burstB])
+	p.DMRData = raw
+	return p
+}
+
+// TestLCRewriterPassesNonVoiceEmbeddedLC checks that, as in DMRGateway's
+// CRewrite::processEmbeddedData, only voice embedded LCs are replaced: a
+// talker alias passes through one superframe late, and the first superframe
+// always carries the new LC.
+func TestLCRewriterPassesNonVoiceEmbeddedLC(t *testing.T) {
+	t.Parallel()
+	r := NewLCRewriter()
+	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+	newLC := [9]byte{0x00, 0x00, 0x80, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
+	alias1 := [9]byte{0x04, 0x00, 0x44, 'N', '0', 'C', 'A', 'L', 'L'}
+	alias2 := [9]byte{0x05, 0x00, 'S', 'P', 'R', 'I', 'N', 'G', 'F'}
+
+	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
+	out := hdr
+	out.Dst, out.GroupCall = 9, true
+	r.Rewrite(hdr, &out)
+
+	in := [][9]byte{alias1, alias2, priv, priv}
+	want := [][9]byte{newLC, alias1, alias2, newLC}
+	for sf := range in {
+		raw := layer2.EncodeEmbeddedLC(in[sf])
+		var bursts [][33]byte
+		for vseq := uint(0); vseq <= 5; vseq++ {
+			v := voicePacket(0, enums.LCSSSingleFragment)
+			if vseq > 0 {
+				v = voiceWithEmbeddedLC(vseq, raw)
+			}
+			o := v
+			o.Dst, o.GroupCall = 9, true
+			r.Rewrite(v, &o)
+			if vseq == 0 || vseq == 5 {
+				if o.DMRData != v.DMRData {
+					t.Fatalf("superframe %d: burst %c changed", sf, 'A'+vseq)
+				}
+				continue
+			}
+			bursts = append(bursts, o.DMRData)
+		}
+		if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != want[sf] {
+			t.Fatalf("superframe %d: embedded LC % X, want % X", sf, lc, want[sf])
+		}
+	}
+}
+
+// TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost checks that a received
+// embedded LC is decoded as MMDVMHost decodes it: one bit error in a row is
+// corrected, so the talker alias passes through, and two bit errors in a row
+// make it undecodable, so it is replaced by the rewritten LC.
+func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
+	t.Parallel()
+	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+	newLC := [9]byte{0x00, 0x00, 0x80, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
+	alias := [9]byte{0x04, 0x00, 0x44, 'N', '0', 'C', 'A', 'L', 'L'}
+	one := layer2.EncodeEmbeddedLC(alias)
+	one[0][0] ^= 0x04 // fragment bit 5: row 5, column 0
+	two := one
+	two[0][1] ^= 0x04 // fragment bit 13: row 5, column 1
+
+	for _, tc := range []struct {
+		name string
+		in   [4][4]byte
+		want [9]byte
+	}{
+		{"one error in a row", one, alias},
+		{"two errors in a row", two, newLC},
+	} {
+		r := NewLCRewriter()
+		hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
+		out := hdr
+		out.Dst, out.GroupCall = 9, true
+		r.Rewrite(hdr, &out)
+
+		var bursts [][33]byte
+		for sf, in := range [][4][4]byte{tc.in, layer2.EncodeEmbeddedLC(priv)} {
+			for vseq := uint(0); vseq <= 5; vseq++ {
+				v := voicePacket(0, enums.LCSSSingleFragment)
+				if vseq > 0 {
+					v = voiceWithEmbeddedLC(vseq, in)
+				}
+				o := v
+				o.Dst, o.GroupCall = 9, true
+				r.Rewrite(v, &o)
+				if sf == 1 && vseq >= 1 && vseq <= 4 {
+					bursts = append(bursts, o.DMRData)
+				}
+			}
+		}
+		if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != tc.want {
+			t.Fatalf("%s: embedded LC % X, want % X", tc.name, lc, tc.want)
+		}
+	}
+}

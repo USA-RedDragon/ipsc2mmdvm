@@ -36,6 +36,85 @@ type lcStream struct {
 	lc       [9]byte
 	embedded [4][4]byte
 	lastSeen time.Time
+
+	// Embedded LCs received in the current and the previous superframe,
+	// as in DMRGateway's CRewrite m_data, m_writeNum, m_readNum, m_lastN.
+	received [2]embeddedLCBuffer
+	writeNum int
+	readNum  int
+	lastPos  int
+}
+
+// embeddedLCBuffer collects the four fragments of one received embedded LC,
+// as DMRGateway's CDMREmbeddedData::addData does.
+type embeddedLCBuffer struct {
+	raw   [4][4]byte
+	next  int // fragments collected so far in this superframe
+	valid bool
+	flco  enums.FLCO
+}
+
+func (b *embeddedLCBuffer) add(frag [4]byte, lcss enums.LCSS) {
+	switch {
+	case lcss == enums.LCSSFirstFragment:
+		b.next, b.valid = 0, false
+	case lcss == enums.LCSSContinuationFragment && (b.next == 1 || b.next == 2):
+	case lcss == enums.LCSSLastFragment && b.next == 3:
+	default:
+		return
+	}
+	b.raw[b.next] = frag
+	b.next++
+	if b.next < 4 {
+		return
+	}
+	b.next = 0
+	lc, result := layer2.DecodeEmbeddedLC(b.raw, true)
+	if result.Uncorrectable {
+		return
+	}
+	b.valid = true
+	b.flco = pdu.LCBytes(lc).FLCO()
+	b.raw = layer2.EncodeEmbeddedLC(lc)
+}
+
+// swap moves to the next superframe, as DMRGateway's CRewrite::swap does
+// (Rewrite.cpp lines 125-145).
+func (st *lcStream) swap() {
+	if st.lastPos == 0 {
+		return
+	}
+	if st.readNum == 0 && st.writeNum == 0 {
+		st.writeNum = 1
+		return
+	}
+	st.readNum ^= 1
+	st.writeNum ^= 1
+}
+
+// processEmbedded records the embedded LC fragment of voice burst pos (B-E)
+// and replaces it, as DMRGateway's CRewrite::processEmbeddedData does
+// (Rewrite.cpp lines 97-123). The decision for a superframe uses the
+// embedded LC of the previous one, since a fragment must be sent before the
+// LC it belongs to is complete: a voice LC (group or unit-to-unit) is
+// replaced by the rewritten LC, and any other LC, such as a talker alias or
+// GPS, passes through one superframe late. The first superframe always
+// carries the rewritten LC. Unlike DMRGateway, an embedded LC that failed to
+// decode is replaced rather than passed through.
+func (st *lcStream) processEmbedded(data *[33]byte, pos int) {
+	raw := layer2.RawBurst(*data)
+	emb := raw.EMB()
+	st.received[st.writeNum].add(raw.EmbeddedData(), emb.LCSS)
+
+	out := st.embedded
+	if st.readNum != 0 || st.writeNum != 0 {
+		prev := &st.received[st.readNum]
+		voice := prev.flco == enums.FLCOGroupVoiceChannelUser || prev.flco == enums.FLCOUnitToUnitVoiceChannelUser
+		if prev.valid && !voice {
+			out = prev.raw
+		}
+	}
+	putEmbeddedFragment(data, out, pos)
 }
 
 // NewLCRewriter returns an empty LCRewriter.
@@ -79,9 +158,15 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 			return
 		}
 		r.streams[pkt.StreamID] = &lcStream{lc: lc, embedded: layer2.EncodeEmbeddedLC(lc), lastSeen: now}
+	case mmdvmFrameTypeVoiceSync:
+		if st, ok := r.streams[pkt.StreamID]; ok {
+			st.lastSeen = now
+			st.swap()
+			st.lastPos = 0
+		}
 	case mmdvmFrameTypeVoice:
 		pos, ok := mmdvmVoiceBurstPosition(*pkt)
-		if !ok || pos < burstB || pos > burstE {
+		if !ok || pos < burstB {
 			return
 		}
 		st, ok := r.streams[pkt.StreamID]
@@ -91,7 +176,13 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 			r.streams[pkt.StreamID] = st
 		}
 		st.lastSeen = now
-		putEmbeddedFragment(&pkt.DMRData, st.embedded, pos)
+		if pos < st.lastPos {
+			st.swap()
+		}
+		if pos <= burstE {
+			st.processEmbedded(&pkt.DMRData, pos)
+		}
+		st.lastPos = pos
 	}
 }
 
