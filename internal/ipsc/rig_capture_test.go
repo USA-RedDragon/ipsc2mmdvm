@@ -93,8 +93,9 @@ func rigVoiceToIPSC(t *testing.T, ref, bursts []string, kinds [][2]uint) [][]byt
 	return got
 }
 
-// TestRigPICallToIPSC checks the packet type and the burst of each packet
-// the translator sends for rigPICall, apart from the RSSI.
+// TestRigPICallToIPSC checks the packet type, the call info with the
+// privacy flag, and the burst of each packet the translator sends for
+// rigPICall, apart from the RSSI.
 func TestRigPICallToIPSC(t *testing.T) {
 	t.Parallel()
 	ref := rigPICall()
@@ -104,8 +105,24 @@ func TestRigPICallToIPSC(t *testing.T) {
 		if r[30] < ipscBurstSlot1 {
 			n -= 2
 		}
-		if g[0] != r[0] || len(g) != len(r) || hex.EncodeToString(g[32:n]) != hex.EncodeToString(r[32:n]) {
+		if g[0] != r[0] || g[17] != r[17] || len(g) != len(r) || hex.EncodeToString(g[32:n]) != hex.EncodeToString(r[32:n]) {
 			t.Errorf("packet %d:\n got %x\nwant %x", i, g, r)
+		}
+	}
+}
+
+// TestPIHeaderSetsPrivacy sends the voice header of rigVoiceCall, whose LC
+// has no privacy service option, then the PI header and burst A of
+// rigPICall. The PI header alone makes the call encrypted, so it and every
+// packet after it carry the privacy flag.
+func TestPIHeaderSetsPrivacy(t *testing.T) {
+	t.Parallel()
+	bursts := []string{rigVoiceCallBursts()[0], rigPICallBursts()[1], rigPICallBursts()[2]}
+	kinds := rigPICallKinds()[:3]
+	got := rigVoiceToIPSC(t, bursts, bursts, kinds)
+	for i, g := range got {
+		if want := i > 0; (g[17]&ipscCallInfoPrivacy != 0) != want {
+			t.Errorf("packet %d: call info %02x, want privacy %v", i, g[17], want)
 		}
 	}
 }

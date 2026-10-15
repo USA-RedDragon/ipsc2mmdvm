@@ -57,6 +57,7 @@ type streamState struct {
 	lastSeen     time.Time
 	lc           [9]byte
 	hasLC        bool // lc holds the full LC from the voice header
+	privacy      bool // the call is encrypted: privacy LC or a PI header
 	firstPacket  bool // true for the very first packet
 }
 
@@ -102,6 +103,10 @@ const ipscVoiceCtrlSync = 0x40
 
 // ipscCallInfoEnd is the call end flag in byte 17 of an IPSC user packet.
 const ipscCallInfoEnd = 0x40
+
+// ipscCallInfoPrivacy is the flag in byte 17 of an IPSC user packet that an
+// XPR 8400 sets on every packet of an encrypted voice call.
+const ipscCallInfoPrivacy = 0x80
 
 // ipscBurstSyncUndetect is the burst type of the 34-byte placeholder a
 // repeater sends for a burst it lost because it lost sync. Bit 7 is the
@@ -236,6 +241,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			lc := fullLCFromBurst(pkt, enums.DataTypeVoiceLCHeader)
 			copy(ss.lc[:], lc[:9])
 			ss.hasLC = true
+			ss.privacy = ss.privacy || lcPrivacy(ss.lc)
 			// Send voice header (IPSC sends 3 copies)
 			for i := 0; i < 3; i++ {
 				data := t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket, lc)
@@ -260,6 +266,9 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			enums.DataTypeRate1,
 			enums.DataTypeMBCHeader, enums.DataTypeMBCContinuation:
 			burstType, ok := ipscDataBurstType(enums.DataType(dtypeOrVSeq))
+			if ok && burstType == ipscBurstPIHeader {
+				ss.privacy = true
+			}
 			if !ok {
 				slog.Debug("IPSCTranslator: dropping data burst with no verified IPSC encoding",
 					"dtype", enums.DataType(dtypeOrVSeq).String())
@@ -357,8 +366,11 @@ func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt mmdvm.Packet, ss *strea
 	// Bytes 13-16: Call control (random per-call)
 	binary.BigEndian.PutUint32(buf[13:17], ss.callControl)
 
-	// Byte 17: Call info (timeslot + end flag)
+	// Byte 17: Call info (privacy, end flag, timeslot)
 	callInfo := byte(0x00)
+	if ss.privacy {
+		callInfo |= ipscCallInfoPrivacy
+	}
 	if pkt.Slot { // true = TS2
 		callInfo |= 0x20
 	}
@@ -702,6 +714,21 @@ func constructLC(src, dst uint, groupCall bool) pdu.LCBytes {
 	lc.SetServiceOptions(0x20) // the default reserved bit
 	lc.SetAddresses(lcAddress(dst), lcAddress(src))
 	return lc
+}
+
+// lcPrivacy reports whether lc is a group or unit-to-unit voice LC with the
+// privacy service option.
+func lcPrivacy(lc [9]byte) bool {
+	flc, err := pdu.DecodeFullLinkControlBytes(lc)
+	switch {
+	case err != nil:
+		return false
+	case flc.GroupVoice != nil:
+		return flc.GroupVoice.ServiceOptions.IsPrivacy
+	case flc.UnitToUnit != nil:
+		return flc.UnitToUnit.ServiceOptions.IsPrivacy
+	}
+	return false
 }
 
 // lcAddress returns the low 24 bits of id, the part of it that the DMRD and
