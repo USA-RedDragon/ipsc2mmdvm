@@ -15,6 +15,9 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
+// AllNetworks is the network label of a manager shared by all networks.
+const AllNetworks = "all"
+
 // DefaultTimeout is the duration after which an active call is considered
 // stale and its timeslot can be reclaimed. This covers the case where
 // a voice terminator packet is lost.
@@ -115,6 +118,7 @@ type Manager struct {
 	timeout   time.Duration
 	metrics   *metrics.Metrics
 	direction string // "inbound" or "outbound" (for metric labels)
+	network   string // network name, or "all" for a shared manager (for metric labels)
 	stopped   bool
 	wg        sync.WaitGroup
 }
@@ -126,10 +130,12 @@ func NewManager() *Manager {
 	}
 }
 
-// SetMetrics configures the metrics collector and direction label for this manager.
-func (m *Manager) SetMetrics(met *metrics.Metrics, direction string) {
+// SetMetrics configures the metrics collector and the direction and
+// network labels for this manager.
+func (m *Manager) SetMetrics(met *metrics.Metrics, direction, network string) {
 	m.metrics = met
 	m.direction = direction
+	m.network = network
 }
 
 // slotIndex converts the boolean Slot flag to an array index.
@@ -178,7 +184,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
 		m.armLocked(slot, ss, now)
 		if m.metrics != nil {
-			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(1)
+			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(1)
 		}
 		slog.Debug("timeslot acquired",
 			"slot", slot, "streamID", streamID, "network", network)
@@ -233,7 +239,7 @@ func (m *Manager) expirePendingLocked(slot bool, ss *slotState, now time.Time) {
 
 func (m *Manager) dropLocked(slot bool, reason string, n int) {
 	if m.metrics != nil && n > 0 {
-		m.metrics.TimeslotPacketsDropped.WithLabelValues(slotLabel(slot), m.direction, reason).Add(float64(n))
+		m.metrics.TimeslotPacketsDropped.WithLabelValues(slotLabel(slot), m.direction, m.network, reason).Add(float64(n))
 	}
 }
 
@@ -249,7 +255,7 @@ func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
 		"oldStream", ss.active.id, "oldNetwork", ss.active.network,
 		"pendingCount", len(ss.pending))
 	if m.metrics != nil {
-		m.metrics.TimeslotTimeouts.WithLabelValues(slotLabel(slot), m.direction).Inc()
+		m.metrics.TimeslotTimeouts.WithLabelValues(slotLabel(slot), m.direction, m.network).Inc()
 	}
 	m.advanceLocked(slot, ss)
 }
@@ -315,7 +321,7 @@ func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) Verd
 		s.ended = true
 	}
 	if m.metrics != nil {
-		m.metrics.TimeslotPacketsBuffered.WithLabelValues(slotLabel(slot), m.direction).Inc()
+		m.metrics.TimeslotPacketsBuffered.WithLabelValues(slotLabel(slot), m.direction, m.network).Inc()
 	}
 	return Queued
 }
@@ -363,7 +369,7 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 			ss.timer.Stop()
 		}
 		if m.metrics != nil {
-			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(0)
+			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(0)
 		}
 		return
 	}

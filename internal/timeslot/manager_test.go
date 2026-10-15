@@ -276,12 +276,12 @@ func TestStopHaltsStaleTimer(t *testing.T) {
 func TestActiveCallsGaugeResetsAfterLostTerminator(t *testing.T) {
 	met := metrics.NewMetrics()
 	m := NewManager()
-	m.SetMetrics(met, "outbound")
+	m.SetMetrics(met, "outbound", AllNetworks)
 	m.timeout = 200 * time.Millisecond
 	t.Cleanup(m.Stop)
 	submit(m, false, 1, "A", "A-hdr", &recorder{})
 
-	const line = `timeslot_active_calls{direction="outbound",slot="1"} `
+	const line = `timeslot_active_calls{direction="outbound",network="all",slot="1"} `
 	if v := metricLine(t, met, line); v != "1" {
 		t.Fatalf("gauge = %q while the call is active, want 1", v)
 	}
@@ -315,14 +315,14 @@ func newMeteredManager(t *testing.T) (*Manager, *metrics.Metrics) {
 	t.Helper()
 	met := metrics.NewMetrics()
 	m := NewManager()
-	m.SetMetrics(met, "outbound")
+	m.SetMetrics(met, "outbound", AllNetworks)
 	t.Cleanup(m.Stop)
 	return m, met
 }
 
 func expectDropped(t *testing.T, met *metrics.Metrics, reason, want string) {
 	t.Helper()
-	prefix := `timeslot_packets_dropped_total{direction="outbound",reason="` + reason + `",slot="1"} `
+	prefix := `timeslot_packets_dropped_total{direction="outbound",network="all",reason="` + reason + `",slot="1"} `
 	if got := metricLine(t, met, prefix); got != want {
 		t.Fatalf("dropped{reason=%q} = %q, want %q", reason, got, want)
 	}

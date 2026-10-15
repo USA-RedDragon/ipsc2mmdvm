@@ -113,7 +113,7 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		if translator != nil {
 			translator.SetMetrics(m)
 		}
-		c.inboundTSMgr.SetMetrics(m, "inbound")
+		c.inboundTSMgr.SetMetrics(m, "inbound", cfg.Name)
 	}
 	return c
 }

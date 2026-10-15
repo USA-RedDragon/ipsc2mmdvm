@@ -307,3 +307,29 @@ func TestBufferedInboundPacketsAreNotCountedAsDropped(t *testing.T) {
 		t.Fatalf("buffered packet counted as dropped:\n%s", grepLines(body, "mmdvm_packets_dropped_total"))
 	}
 }
+
+func TestInboundTimeslotMetricsArePerNetwork(t *testing.T) {
+	t.Parallel()
+	m := metrics.NewMetrics()
+	clients := make([]*MMDVMClient, 0, 2)
+	for _, name := range []string{"A", "B"} {
+		cfg := testMMDVMConfig()
+		cfg.Name = name
+		c := NewMMDVMClient(cfg, m)
+		t.Cleanup(c.inboundTSMgr.Stop)
+		clients = append(clients, c)
+	}
+	clients[0].inboundTSMgr.Submit(false, 1, "ipsc", nil, false, nil)
+	clients[1].inboundTSMgr.Submit(false, 2, "ipsc", nil, false, nil)
+	clients[1].inboundTSMgr.Release(false, 2)
+
+	body := scrapeMetrics(t, m)
+	for _, want := range []string{
+		`timeslot_active_calls{direction="inbound",network="A",slot="1"} 1`,
+		`timeslot_active_calls{direction="inbound",network="B",slot="1"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("want %s, got:\n%s", want, grepLines(body, "timeslot_active_calls"))
+		}
+	}
+}

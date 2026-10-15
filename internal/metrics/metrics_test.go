@@ -47,7 +47,7 @@ func TestHandler_ContainsCustomMetrics(t *testing.T) {
 	m.IPSCPacketsReceived.WithLabelValues("group_voice").Inc()
 	m.MMDVMConnectionState.WithLabelValues("TestNet").Set(2)
 	m.MMDVMReconnects.WithLabelValues("TestNet").Inc()
-	m.TimeslotActiveCalls.WithLabelValues("1", "outbound").Set(1)
+	m.TimeslotActiveCalls.WithLabelValues("1", "outbound", "all").Set(1)
 	m.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Set(1)
 	handler := m.Handler()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)

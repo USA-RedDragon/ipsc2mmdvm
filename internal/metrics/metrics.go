@@ -124,19 +124,19 @@ func NewMetrics() *Metrics {
 		TimeslotActiveCalls: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "timeslot_active_calls",
 			Help: "Number of active calls per timeslot.",
-		}, []string{labelSlot, labelDirection}),
+		}, []string{labelSlot, labelDirection, labelNetwork}),
 		TimeslotPacketsBuffered: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_packets_buffered_total",
 			Help: "Total packets buffered due to timeslot contention.",
-		}, []string{labelSlot, labelDirection}),
+		}, []string{labelSlot, labelDirection, labelNetwork}),
 		TimeslotPacketsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_packets_dropped_total",
 			Help: "Total buffered or offered packets the timeslot manager discarded, by reason.",
-		}, []string{labelSlot, labelDirection, "reason"}),
+		}, []string{labelSlot, labelDirection, labelNetwork, "reason"}),
 		TimeslotTimeouts: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "timeslot_timeouts_total",
 			Help: "Total timeslot call timeouts.",
-		}, []string{labelSlot, labelDirection}),
+		}, []string{labelSlot, labelDirection, labelNetwork}),
 
 		// Translator
 		TranslatorActiveStreams: prometheus.NewGaugeVec(prometheus.GaugeOpts{
