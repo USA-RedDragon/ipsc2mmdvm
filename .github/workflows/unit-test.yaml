@@ -33,8 +33,8 @@ jobs:
         run: |
           go install github.com/jstemmer/go-junit-report/v2@latest
           go install github.com/vakenbolt/go-test-report@latest
-          env CGO_ENABLED=0 go test -v ./... 2>&1 > out.txt || true
-          env CGO_ENABLED=0 go test -v ./... -json 2>&1 > json-out.txt || true
+          env CGO_ENABLED=0 go test -v ./... > out.txt 2>&1 || true
+          env CGO_ENABLED=0 go test -v ./... -json > json-out.txt 2>&1 || true
           cat out.txt | go-junit-report -out report.xml -iocopy
           cat json-out.txt | go-test-report -o report.html
 
