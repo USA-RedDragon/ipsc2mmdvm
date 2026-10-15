@@ -56,7 +56,7 @@ ipsc:
   # Interface to listen for IPSC packets on
   # interface: ""
   # Port to listen for IPSC packets on
-  # port: 0
+  port: 50000
   # IP address to listen for IPSC packets on
   ip: "10.10.250.1"
   # Subnet mask for the virtual network interface created for IPSC packets

@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"math"
+	"strings"
 	"testing"
 )
 
@@ -292,9 +294,12 @@ func TestValidateMetricsAddress(t *testing.T) {
 		{"default port only", ":9100", false},
 		{"host and port", "0.0.0.0:9100", false},
 		{"localhost", "127.0.0.1:2112", false},
-		{"empty disables", "", false},
+		{"empty", "", true},
 		{"missing port", "localhost", true},
 		{"invalid format", ":::bad", true},
+		{"non-numeric port", "nohost:notaport", true},
+		{"port out of range", ":99999", true},
+		{"port zero", ":0", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -308,6 +313,74 @@ func TestValidateMetricsAddress(t *testing.T) {
 			}
 			if !tt.wantErr && errors.Is(err, ErrInvalidMetricsAddress) {
 				t.Fatalf("did not expect %v, got %v", ErrInvalidMetricsAddress, err)
+			}
+		})
+	}
+}
+
+func TestValidConfigPasses(t *testing.T) {
+	t.Parallel()
+	if err := validConfig().Validate(); err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+}
+
+func TestValidateFieldLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(c *Config)
+		wantErr error
+	}{
+		{"callsign 8 chars", func(c *Config) { c.MMDVM[0].Callsign = "AB1CDEFG" }, nil},
+		{"callsign 9 chars", func(c *Config) { c.MMDVM[0].Callsign = "AB1CDEFGH" }, ErrInvalidMMDVMCallsign},
+		{"radio id zero", func(c *Config) { c.MMDVM[0].ID = 0 }, ErrInvalidMMDVMRadioID},
+		{"radio id 9 digits", func(c *Config) { c.MMDVM[0].ID = 999999999 }, nil},
+		{"radio id 10 digits", func(c *Config) { c.MMDVM[0].ID = 1000000000 }, ErrInvalidMMDVMRadioID},
+		{"rx freq 9 digits", func(c *Config) { c.MMDVM[0].RXFreq = 999999999 }, nil},
+		{"rx freq 10 digits", func(c *Config) { c.MMDVM[0].RXFreq = 1000000000 }, ErrInvalidMMDVMFrequency},
+		{"tx freq 10 digits", func(c *Config) { c.MMDVM[0].TXFreq = 4294967295 }, ErrInvalidMMDVMFrequency},
+		{"tx power 99", func(c *Config) { c.MMDVM[0].TXPower = 99 }, nil},
+		{"tx power 100", func(c *Config) { c.MMDVM[0].TXPower = 100 }, ErrInvalidMMDVMTXPower},
+		{"height 999", func(c *Config) { c.MMDVM[0].Height = 999 }, nil},
+		{"height 1000", func(c *Config) { c.MMDVM[0].Height = 1000 }, ErrInvalidMMDVMHeight},
+		{"location 20", func(c *Config) { c.MMDVM[0].Location = strings.Repeat("a", 20) }, nil},
+		{"location 21", func(c *Config) { c.MMDVM[0].Location = strings.Repeat("a", 21) }, ErrInvalidMMDVMLocation},
+		{"description 19", func(c *Config) { c.MMDVM[0].Description = strings.Repeat("a", 19) }, nil},
+		{"description 20", func(c *Config) { c.MMDVM[0].Description = strings.Repeat("a", 20) }, ErrInvalidMMDVMDescription},
+		{"url 124", func(c *Config) { c.MMDVM[0].URL = strings.Repeat("a", 124) }, nil},
+		{"url 125", func(c *Config) { c.MMDVM[0].URL = strings.Repeat("a", 125) }, ErrInvalidMMDVMURL},
+		{"slots 4", func(c *Config) { c.MMDVM[0].Slots = 4 }, nil},
+		{"slots 5", func(c *Config) { c.MMDVM[0].Slots = 5 }, ErrInvalidMMDVMSlots},
+		{"latitude NaN", func(c *Config) { c.MMDVM[0].Latitude = math.NaN() }, ErrInvalidMMDVMLatitude},
+		{"longitude NaN", func(c *Config) { c.MMDVM[0].Longitude = math.NaN() }, ErrInvalidMMDVMLongitude},
+		{"pass-all-tg slot 2", func(c *Config) { c.MMDVM[0].PassAllTG = []int{1, 2} }, nil},
+		{"pass-all-tg slot 5", func(c *Config) { c.MMDVM[0].PassAllTG = []int{5} }, ErrInvalidPassAllSlot},
+		{"pass-all-pc slot 0", func(c *Config) { c.MMDVM[0].PassAllPC = []int{0} }, ErrInvalidPassAllSlot},
+		{"ipsc port zero", func(c *Config) { c.IPSC.Port = 0 }, ErrInvalidIPSCPort},
+		{"ipsc ip empty", func(c *Config) { c.IPSC.IP = "" }, ErrInvalidIPSCIP},
+		{"ipsc ip garbage", func(c *Config) { c.IPSC.IP = "not-an-ip" }, ErrInvalidIPSCIP},
+		{"ipsc ip with mask", func(c *Config) { c.IPSC.IP = "10.10.250.1/24" }, ErrInvalidIPSCIP},
+		{"ipsc ip ipv6", func(c *Config) { c.IPSC.IP = "fe80::1" }, ErrInvalidIPSCIP},
+		{"ipsc ip v4-mapped", func(c *Config) { c.IPSC.IP = "::ffff:10.10.250.1" }, ErrInvalidIPSCIP},
+		{"ipsc ip unspecified", func(c *Config) { c.IPSC.IP = "0.0.0.0" }, ErrInvalidIPSCIP},
+		{"ipsc ip broadcast", func(c *Config) { c.IPSC.IP = "255.255.255.255" }, ErrInvalidIPSCIP},
+		{"ipsc ip multicast", func(c *Config) { c.IPSC.IP = "224.0.0.1" }, ErrInvalidIPSCIP},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := validConfig()
+			tt.mutate(&c)
+			err := c.Validate()
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("expected valid config, got %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("expected %v, got %v", tt.wantErr, err)
 			}
 		})
 	}

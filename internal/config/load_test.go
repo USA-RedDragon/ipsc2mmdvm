@@ -49,6 +49,9 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	if cfg.IPSC.Port != 50000 {
+		t.Errorf("expected ipsc.port default 50000, got %d", cfg.IPSC.Port)
+	}
 	if len(cfg.MMDVM) != 1 {
 		t.Fatalf("expected 1 mmdvm entry, got %d", len(cfg.MMDVM))
 	}

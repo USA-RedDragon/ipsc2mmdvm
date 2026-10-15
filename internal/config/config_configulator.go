@@ -116,6 +116,8 @@ func configApplyDefaults(cfg *Config, _ string, set configulator.SetOrigin) erro
 	set("log-level", configulator.LayerDefault, "default tag")
 	cfg.Metrics.Address = ":9100"
 	set("metrics.address", configulator.LayerDefault, "default tag")
+	cfg.IPSC.Port = uint16(50000)
+	set("ipsc.port", configulator.LayerDefault, "default tag")
 	cfg.IPSC.IP = "10.10.250.1"
 	set("ipsc.ip", configulator.LayerDefault, "default tag")
 	cfg.IPSC.SubnetMask = 24
@@ -506,7 +508,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.Bool(names[1], false, "Whether to enable Prometheus metrics endpoint")
 	fs.String(names[2], ":9100", "Address to serve Prometheus metrics on")
 	fs.String(names[3], "", "Interface to listen for IPSC packets on")
-	fs.Uint16(names[4], 0, "Port to listen for IPSC packets on")
+	fs.Uint16(names[4], 50000, "Port to listen for IPSC packets on")
 	fs.String(names[5], "10.10.250.1", "IP address to listen for IPSC packets on")
 	fs.Var(impl.NewInt(24), names[6], "Subnet mask for the virtual network interface created for IPSC packets")
 	fs.Bool(names[7], false, "Whether to require authentication for IPSC clients")

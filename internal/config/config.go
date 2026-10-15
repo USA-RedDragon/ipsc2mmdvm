@@ -2,8 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"net"
+	"net/netip"
 	"regexp"
+	"strconv"
 
 	"github.com/vishvananda/netlink"
 )
@@ -34,7 +38,7 @@ type Metrics struct {
 // IPSC creates a virtual network interface and listens for IPSC packets on it.
 type IPSC struct {
 	Interface  string   `name:"interface" description:"Interface to listen for IPSC packets on"`
-	Port       uint16   `name:"port" description:"Port to listen for IPSC packets on"`
+	Port       uint16   `name:"port" description:"Port to listen for IPSC packets on" default:"50000"`
 	IP         string   `name:"ip" description:"IP address to listen for IPSC packets on" default:"10.10.250.1"`
 	SubnetMask int      `name:"subnet-mask" description:"Subnet mask for the virtual network interface created for IPSC packets" default:"24"`
 	Auth       IPSCAuth `name:"auth" description:"Authentication configuration for the IPSC server"`
@@ -134,14 +138,43 @@ var (
 	ErrInvalidMMDVMLatitude     = errors.New("invalid MMDVM latitude provided")
 	ErrInvalidMMDVMMasterServer = errors.New("invalid MMDVM master server provided")
 	ErrInvalidMMDVMPassword     = errors.New("invalid MMDVM password provided")
+	ErrInvalidMMDVMRadioID      = errors.New("invalid MMDVM radio ID provided (must be 1-999999999)")
+	ErrInvalidMMDVMFrequency    = errors.New("invalid MMDVM frequency provided (must be at most 9 digits)")
+	ErrInvalidMMDVMTXPower      = errors.New("invalid MMDVM tx power provided (must be 0-99)")
+	ErrInvalidMMDVMHeight       = errors.New("invalid MMDVM height provided (must be 0-999)")
+	ErrInvalidMMDVMLocation     = errors.New("invalid MMDVM location provided (must be at most 20 characters)")
+	ErrInvalidMMDVMDescription  = errors.New("invalid MMDVM description provided (must be at most 19 characters)")
+	ErrInvalidMMDVMURL          = errors.New("invalid MMDVM URL provided (must be at most 124 characters)")
+	ErrInvalidMMDVMSlots        = errors.New("invalid MMDVM slots provided (must be 0-4)")
+	ErrInvalidPassAllSlot       = errors.New("invalid pass-all slot (must be 1 or 2)")
 	ErrInvalidRewriteSlot       = errors.New("invalid rewrite slot (must be 1 or 2)")
 	ErrInvalidRewriteRange      = errors.New("invalid rewrite range (must be >= 1)")
 	ErrInvalidRewriteTG         = errors.New("invalid rewrite talkgroup (must be >= 1)")
 	ErrInvalidIPSCInterface     = errors.New("invalid IPSC interface provided")
-	ErrInvalidIPSCIP            = errors.New("invalid IPSC IP address provided")
+	ErrInvalidIPSCPort          = errors.New("invalid IPSC port provided")
+	ErrInvalidIPSCIP            = errors.New("invalid IPSC IP address provided (must be a unicast IPv4 address)")
 	ErrInvalidIPSCSubnetMask    = errors.New("invalid IPSC subnet mask provided")
 	ErrInvalidIPSCAuthKey       = errors.New("invalid IPSC authentication key provided")
 	ErrInvalidMetricsAddress    = errors.New("invalid metrics address provided")
+)
+
+// Field limits of the RPTC configuration message, from the format string in
+// DMRGateway's CDMRGateway::getConfig:
+// "%-8.8s%09u%09u%02u%02u%8.8s%9.9s%03d%-20.20s%-19.19s%c%-124.124s...".
+const (
+	maxCallsignLen    = 8
+	maxFrequency      = 999999999
+	maxTXPower        = 99
+	maxHeight         = 999
+	maxLocationLen    = 20
+	maxDescriptionLen = 19
+	maxURLLen         = 124
+	maxSlots          = 4
+	latitudeWidth     = 8
+	longitudeWidth    = 9
+	// maxRadioID allows 9-digit IDs, such as a 7-digit DMR ID with a
+	// 2-digit hotspot suffix.
+	maxRadioID = 999999999
 )
 
 func (c Config) Validate() error {
@@ -151,11 +184,8 @@ func (c Config) Validate() error {
 		return ErrInvalidLogLevel
 	}
 
-	if c.Metrics.Enabled && c.Metrics.Address != "" {
-		_, _, err := net.SplitHostPort(c.Metrics.Address)
-		if err != nil {
-			return ErrInvalidMetricsAddress
-		}
+	if c.Metrics.Enabled && !validListenAddress(c.Metrics.Address) {
+		return ErrInvalidMetricsAddress
 	}
 
 	if len(c.MMDVM) == 0 {
@@ -166,7 +196,6 @@ func (c Config) Validate() error {
 	for i := range c.MMDVM {
 		h := &c.MMDVM[i]
 
-		// Default name to "Network N" if empty
 		if h.Name == "" {
 			return ErrInvalidMMDVMName
 		}
@@ -176,31 +205,7 @@ func (c Config) Validate() error {
 		}
 		names[h.Name] = struct{}{}
 
-		if h.Callsign == "" {
-			return ErrInvalidMMDVMCallsign
-		}
-
-		if h.ColorCode > 15 {
-			return ErrInvalidMMDVMColorCode
-		}
-
-		if h.Longitude < -180 || h.Longitude > 180 {
-			return ErrInvalidMMDVMLongitude
-		}
-
-		if h.Latitude < -90 || h.Latitude > 90 {
-			return ErrInvalidMMDVMLatitude
-		}
-
-		if h.MasterServer == "" {
-			return ErrInvalidMMDVMMasterServer
-		}
-
-		if h.Password == "" {
-			return ErrInvalidMMDVMPassword
-		}
-
-		if err := validateRewrites(h); err != nil {
+		if err := validateMMDVM(h); err != nil {
 			return err
 		}
 	}
@@ -209,13 +214,17 @@ func (c Config) Validate() error {
 		return ErrInvalidIPSCInterface
 	}
 
+	if c.IPSC.Port == 0 {
+		return ErrInvalidIPSCPort
+	}
+
+	if !validIPv4Unicast(c.IPSC.IP) {
+		return ErrInvalidIPSCIP
+	}
+
 	_, err := netlink.LinkByName(c.IPSC.Interface)
 	if err != nil {
 		return ErrInvalidIPSCInterface
-	}
-
-	if c.IPSC.IP == "" {
-		return ErrInvalidIPSCIP
 	}
 
 	if c.IPSC.SubnetMask < 1 || c.IPSC.SubnetMask > 32 {
@@ -233,6 +242,96 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func validListenAddress(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && p != 0
+}
+
+func validIPv4Unicast(s string) bool {
+	ip, err := netip.ParseAddr(s)
+	if err != nil || !ip.Is4() {
+		return false
+	}
+	return !ip.IsUnspecified() && !ip.IsMulticast() && ip != netip.AddrFrom4([4]byte{255, 255, 255, 255})
+}
+
+func validateMMDVM(h *MMDVM) error {
+	if h.Callsign == "" || len(h.Callsign) > maxCallsignLen {
+		return ErrInvalidMMDVMCallsign
+	}
+
+	if h.ID < 1 || h.ID > maxRadioID {
+		return ErrInvalidMMDVMRadioID
+	}
+
+	if h.RXFreq > maxFrequency || h.TXFreq > maxFrequency {
+		return ErrInvalidMMDVMFrequency
+	}
+
+	if h.TXPower > maxTXPower {
+		return ErrInvalidMMDVMTXPower
+	}
+
+	if h.ColorCode > 15 {
+		return ErrInvalidMMDVMColorCode
+	}
+
+	if math.IsNaN(h.Latitude) || h.Latitude < -90 || h.Latitude > 90 ||
+		len(fmt.Sprintf("%+08.4f", h.Latitude)) != latitudeWidth {
+		return ErrInvalidMMDVMLatitude
+	}
+
+	if math.IsNaN(h.Longitude) || h.Longitude < -180 || h.Longitude > 180 ||
+		len(fmt.Sprintf("%+09.4f", h.Longitude)) != longitudeWidth {
+		return ErrInvalidMMDVMLongitude
+	}
+
+	if h.Height > maxHeight {
+		return ErrInvalidMMDVMHeight
+	}
+
+	if len(h.Location) > maxLocationLen {
+		return ErrInvalidMMDVMLocation
+	}
+
+	if len(h.Description) > maxDescriptionLen {
+		return ErrInvalidMMDVMDescription
+	}
+
+	if len(h.URL) > maxURLLen {
+		return ErrInvalidMMDVMURL
+	}
+
+	if h.Slots > maxSlots {
+		return ErrInvalidMMDVMSlots
+	}
+
+	if h.MasterServer == "" {
+		return ErrInvalidMMDVMMasterServer
+	}
+
+	if h.Password == "" {
+		return ErrInvalidMMDVMPassword
+	}
+
+	for _, s := range h.PassAllTG {
+		if s != 1 && s != 2 {
+			return ErrInvalidPassAllSlot
+		}
+	}
+	for _, s := range h.PassAllPC {
+		if s != 1 && s != 2 {
+			return ErrInvalidPassAllSlot
+		}
+	}
+
+	return validateRewrites(h)
 }
 
 func validateSlot(slot uint) bool {

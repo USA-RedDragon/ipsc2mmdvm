@@ -265,7 +265,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `mmdvm[].pass-all-pc`              | list of integer |               | —                   | —                     | Timeslots on which all private calls pass through unchanged (e.g. [1, 2]) |
 | `mmdvm[].pass-all-tg`              | list of integer |               | —                   | —                     | Timeslots on which all group calls pass through unchanged (e.g. [1, 2])   |
 | `ipsc.interface`                   | string          |               | `IPSC_INTERFACE`    | `--ipsc.interface`    | Interface to listen for IPSC packets on                                   |
-| `ipsc.port`                        | integer         |               | `IPSC_PORT`         | `--ipsc.port`         | Port to listen for IPSC packets on                                        |
+| `ipsc.port`                        | integer         | `50000`       | `IPSC_PORT`         | `--ipsc.port`         | Port to listen for IPSC packets on                                        |
 | `ipsc.ip`                          | string          | `10.10.250.1` | `IPSC_IP`           | `--ipsc.ip`           | IP address to listen for IPSC packets on                                  |
 | `ipsc.subnet-mask`                 | integer         | `24`          | `IPSC_SUBNET_MASK`  | `--ipsc.subnet-mask`  | Subnet mask for the virtual network interface created for IPSC packets    |
 | `ipsc.auth.enabled`                | boolean         |               | `IPSC_AUTH_ENABLED` | `--ipsc.auth.enabled` | Whether to require authentication for IPSC clients                        |
