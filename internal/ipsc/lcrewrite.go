@@ -37,6 +37,10 @@ type lcStream struct {
 	embedded [4][4]byte
 	lastSeen time.Time
 
+	// colorCode is the color code of the voice header's slot type, or of
+	// the first correctable EMB of a late entry.
+	colorCode enums.ColorCode
+
 	// Embedded LCs received in the current and the previous superframe,
 	// as in DMRGateway's CRewrite m_data, m_writeNum, m_readNum, m_lastN.
 	received [2]embeddedLCBuffer
@@ -114,7 +118,7 @@ func (st *lcStream) processEmbedded(data *[33]byte, pos int) {
 			out = prev.raw
 		}
 	}
-	putEmbeddedFragment(data, out, pos)
+	putEmbeddedFragment(data, out, pos, st.colorCode)
 }
 
 // NewLCRewriter returns an empty LCRewriter.
@@ -157,7 +161,7 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 			delete(r.streams, pkt.StreamID)
 			return
 		}
-		r.streams[pkt.StreamID] = &lcStream{lc: lc, embedded: layer2.EncodeEmbeddedLC(lc), lastSeen: now}
+		r.streams[pkt.StreamID] = &lcStream{lc: lc, embedded: layer2.EncodeEmbeddedLC(lc), lastSeen: now, colorCode: slotTypeColorCode(pkt.DMRData)}
 	case mmdvmFrameTypeVoiceSync:
 		if st, ok := r.streams[pkt.StreamID]; ok {
 			st.lastSeen = now
@@ -173,6 +177,9 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 		if !ok {
 			st = &lcStream{lc: constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)}
 			st.embedded = layer2.EncodeEmbeddedLC(st.lc)
+			if emb := layer2.RawBurst(pkt.DMRData).EMB(); !emb.FEC.Uncorrectable {
+				st.colorCode = emb.ColorCode
+			}
 			r.streams[pkt.StreamID] = st
 		}
 		st.lastSeen = now
@@ -273,14 +280,11 @@ func rewrittenLC(pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
 }
 
 // putEmbeddedFragment writes the embedded LC fragment for burst position pos
-// (B-E) into a voice burst and makes its EMB carry the matching LCSS.
-func putEmbeddedFragment(data *[33]byte, embedded [4][4]byte, pos int) {
+// (B-E) into a voice burst and gives it a new EMB with colorCode, the
+// matching LCSS, and PI clear. The burst's own EMB may be corrupt, so it
+// is not used.
+func putEmbeddedFragment(data *[33]byte, embedded [4][4]byte, pos int, colorCode enums.ColorCode) {
 	raw := (*layer2.RawBurst)(data)
 	raw.SetEmbeddedData(embedded[pos-burstB])
-
-	emb := raw.EMB()
-	if !emb.FEC.Uncorrectable && emb.LCSS != defaultLCSS(pos) {
-		emb.LCSS = defaultLCSS(pos)
-		raw.SetEMB(emb) // a decoded EMB always encodes
-	}
+	raw.SetEMB(pdu.EmbeddedSignalling{ColorCode: colorCode, LCSS: defaultLCSS(pos)}) // writes nothing for a color code over 15
 }

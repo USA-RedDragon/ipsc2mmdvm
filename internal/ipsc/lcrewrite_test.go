@@ -244,7 +244,7 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 		bursts = append(bursts, out.DMRData)
 		raw := layer2.RawBurst(out.DMRData)
 		emb := raw.EMB()
-		if emb.FEC.Uncorrectable || emb.LCSS != defaultLCSS(int(vseq)) || emb.ColorCode != 3 || !emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
+		if emb.FEC.Uncorrectable || emb.LCSS != defaultLCSS(int(vseq)) || emb.ColorCode != 1 || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 			t.Fatalf("burst %c EMB %s", 'A'+vseq, emb.String())
 		}
 		if !sameBits(v.DMRData, out.DMRData, 0, 108) || !sameBits(v.DMRData, out.DMRData, 156, 264) {
@@ -612,6 +612,71 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 		}
 		if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != tc.want {
 			t.Fatalf("%s: embedded LC % X, want % X", tc.name, lc, tc.want)
+		}
+	}
+}
+
+// withUncorrectableEMB flips bits of the EMB of a voice burst until it can
+// no longer be decoded.
+func withUncorrectableEMB(t *testing.T, v mmdvm.Packet) mmdvm.Packet {
+	t.Helper()
+	for mask := 1; mask < 1<<16; mask++ {
+		d := v.DMRData
+		for i := range 16 {
+			if mask>>i&1 == 0 {
+				continue
+			}
+			bit := 108 + i
+			if i >= 8 {
+				bit = 148 + i - 8
+			}
+			d[bit/8] ^= 1 << (7 - bit%8)
+		}
+		if res := (*layer2.RawBurst)(&d).EMB().FEC; res.Uncorrectable {
+			v.DMRData = d
+			return v
+		}
+	}
+	t.Fatal("no uncorrectable EMB found")
+	return v
+}
+
+// A rewritten burst gets an EMB with the LCSS for its position, the color
+// code from the slot type of the call's voice header, and PI clear, even
+// when its own EMB is uncorrectable. A late entry with no voice header
+// keeps the color code of a correctable EMB.
+func TestLCRewriterRebuildsEMB(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		header  bool
+		corrupt bool
+		wantCC  enums.ColorCode
+	}{
+		{"header and uncorrectable EMB", true, true, 1},
+		{"header and correctable EMB", true, false, 1},
+		{"late entry", false, false, 3},
+	} {
+		r := NewLCRewriter()
+		if tc.header {
+			lc := [9]byte{0x00, 0x00, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
+			h := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, true, burstWithLC(t, lc, enums.DataTypeVoiceLCHeader, 1))
+			out := h
+			out.Dst = 9
+			r.Rewrite(h, &out)
+		}
+		for vseq := uint(1); vseq <= 4; vseq++ {
+			v := voicePacket(vseq, enums.LCSSSingleFragment)
+			if tc.corrupt {
+				v = withUncorrectableEMB(t, v)
+			}
+			out := v
+			out.Dst = 9
+			r.Rewrite(v, &out)
+			emb := (*layer2.RawBurst)(&out.DMRData).EMB()
+			if emb.FEC.Uncorrectable || emb.LCSS != defaultLCSS(int(vseq)) || emb.ColorCode != tc.wantCC || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
+				t.Errorf("%s: burst %c EMB %s", tc.name, 'A'+vseq, emb.String())
+			}
 		}
 	}
 }
