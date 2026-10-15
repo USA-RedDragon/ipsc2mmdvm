@@ -71,6 +71,8 @@ func newTestClient(t *testing.T) *MMDVMClient {
 		tx_chan:    make(chan proto.Packet, 16),
 		done:       make(chan struct{}),
 		translator: translator,
+		netLC:      ipsc.NewLCRewriter(),
+		rfLC:       ipsc.NewLCRewriter(),
 	}
 	client.state.Store(uint32(STATE_IDLE))
 	return client

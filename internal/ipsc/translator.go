@@ -627,7 +627,12 @@ func decodeBPTCPayload(data [33]byte) ([12]byte, bool) {
 // RS(12,9) parity) from call fields. It is the fallback when no valid LC is
 // available from the source. dataType is a voice LC header or terminator.
 func constructFullLC(src, dst uint, groupCall bool, dataType enums.DataType) [12]byte {
-	lc := constructLC(src, dst, groupCall)
+	return fullLCCodeword(constructLC(src, dst, groupCall), dataType)
+}
+
+// fullLCCodeword returns the codeword of lc in a burst of dataType: a
+// terminator with LC, or else a voice LC header.
+func fullLCCodeword(lc pdu.LCBytes, dataType enums.DataType) [12]byte {
 	if dataType != enums.DataTypeTerminatorWithLC {
 		dataType = enums.DataTypeVoiceLCHeader
 	}

@@ -41,6 +41,8 @@ type MMDVMClient struct {
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
 	ipscHandler  atomic.Pointer[func(data []byte)]
 	translator   *ipsc.IPSCTranslator
+	netLC        *ipsc.LCRewriter // re-encodes LC after netRewrites
+	rfLC         *ipsc.LCRewriter // re-encodes LC after rfRewrites
 	dial         func(ctx context.Context, network, address string) (net.Conn, error)
 	dialTimeout  time.Duration
 	sessMu       sync.Mutex // serializes handshake transitions with supervise
@@ -99,6 +101,8 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		keepAlive:    5 * time.Second,
 		timeout:      15 * time.Second,
 		translator:   translator,
+		netLC:        ipsc.NewLCRewriter(),
+		rfLC:         ipsc.NewLCRewriter(),
 		inboundTSMgr: timeslot.NewManager(),
 		dial:         (&net.Dialer{}).DialContext,
 		dialTimeout:  defaultDialTimeout,
@@ -405,6 +409,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 		}
 		slog.Debug("MMDVM DMRD received", "network", h.cfg.Name, "packet", packet)
 
+		orig := packet
 		if !rewrite.Apply(h.netRewrites, &packet) {
 			slog.Debug("MMDVM DMRD dropped (no rewrite rule matched)", "network", h.cfg.Name)
 			if h.metrics != nil {
@@ -413,6 +418,7 @@ func (h *MMDVMClient) handleReady(data []byte) {
 			return
 		}
 
+		h.netLC.Rewrite(orig, &packet)
 		slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
 
 		h.submitOutbound(packet)
@@ -830,6 +836,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 		// Apply RF→Net rewrite rules (outbound to this master).
 		// Try specific rewrites first; if none match, try passall
 		// rules as a fallback.
+		orig := pkt
 		if !rewrite.Apply(h.rfRewrites, &pkt) {
 			if !rewrite.Apply(h.passallRewrites, &pkt) {
 				slog.Debug("HandleIPSCBurst: dropped (no rewrite rule matched)", "network", h.cfg.Name)
@@ -839,6 +846,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 				continue
 			}
 		}
+		h.rfLC.Rewrite(orig, &pkt)
 		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
 
 		if h.inboundTSMgr == nil {
