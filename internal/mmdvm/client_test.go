@@ -1901,3 +1901,109 @@ func TestHandshakeRejectionDoesNotBlockHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestStartSucceedsWhileMasterUnresolvable(t *testing.T) {
+	t.Parallel()
+	m := newFakeMaster(t)
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = m.addr()
+	c := NewMMDVMClient(cfg, nil)
+	c.keepAlive = 25 * time.Millisecond
+	c.timeout = 300 * time.Millisecond
+	var failures, attempts atomic.Int32
+	failures.Store(3)
+	c.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		attempts.Add(1)
+		if failures.Add(-1) >= 0 {
+			return nil, &net.DNSError{Err: "no such host", Name: address, IsNotFound: true}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start failed while the master was unresolvable: %v", err)
+	}
+	t.Cleanup(c.Stop)
+	waitFor(t, 2*time.Second, "READY once resolvable", isReady(c))
+	if n := attempts.Load(); n < 4 {
+		t.Fatalf("expected at least 4 dial attempts, got %d", n)
+	}
+}
+
+func TestStartRejectsMalformedMasterAddress(t *testing.T) {
+	t.Parallel()
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = "missing-port"
+	c := NewMMDVMClient(cfg, nil)
+	if err := c.Start(); err == nil {
+		c.Stop()
+		t.Fatal("expected an error for a master address without a port")
+	}
+}
+
+func TestStopCancelsPendingDial(t *testing.T) {
+	t.Parallel()
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = "127.0.0.1:62031"
+	c := NewMMDVMClient(cfg, nil)
+	dialing := make(chan struct{})
+	canceled := make(chan struct{})
+	var once sync.Once
+	c.dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		once.Do(func() { close(dialing) })
+		<-ctx.Done()
+		close(canceled)
+		return nil, ctx.Err()
+	}
+	startErr := make(chan error, 1)
+	go func() { startErr <- c.Start() }()
+	select {
+	case err := <-startErr:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start blocked on the dial")
+	}
+	<-dialing
+
+	stopped := make(chan struct{})
+	go func() {
+		c.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung on a pending dial")
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("dial context was not canceled")
+	}
+}
+
+func TestDialTimesOut(t *testing.T) {
+	t.Parallel()
+	m := newFakeMaster(t)
+	cfg := testMMDVMConfig()
+	cfg.MasterServer = m.addr()
+	c := NewMMDVMClient(cfg, nil)
+	c.keepAlive = 25 * time.Millisecond
+	c.timeout = 300 * time.Millisecond
+	c.dialTimeout = 50 * time.Millisecond
+	var hung atomic.Bool
+	hung.Store(true)
+	c.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if hung.CompareAndSwap(true, false) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	if err := c.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(c.Stop)
+	waitFor(t, 2*time.Second, "READY after a hung dial", isReady(c))
+}

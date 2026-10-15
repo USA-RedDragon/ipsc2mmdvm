@@ -39,6 +39,7 @@ type MMDVMClient struct {
 	ipscHandler  atomic.Pointer[func(data []byte)]
 	translator   *ipsc.IPSCTranslator
 	dial         func(ctx context.Context, network, address string) (net.Conn, error)
+	dialTimeout  time.Duration
 	sessMu       sync.Mutex // serializes handshake transitions with supervise
 	salt         []byte     // last RPTACK salt, guarded by sessMu
 
@@ -94,6 +95,7 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		translator:   translator,
 		inboundTSMgr: timeslot.NewManager(),
 		dial:         (&net.Dialer{}).DialContext,
+		dialTimeout:  defaultDialTimeout,
 	}
 	c.state.Store(uint32(STATE_IDLE))
 	c.buildRewriteRules()
@@ -191,7 +193,14 @@ func (h *MMDVMClient) buildRewriteRules() {
 	}
 }
 
+// Start launches the client and returns without waiting for the network.
+// The master is dialed and logged into in the background, and retried
+// until it answers. Start fails only if the master address is malformed.
 func (h *MMDVMClient) Start() error {
+	if _, _, err := net.SplitHostPort(h.cfg.MasterServer); err != nil {
+		return fmt.Errorf("invalid master server address %q: %w", h.cfg.MasterServer, err)
+	}
+
 	if h.translator != nil {
 		h.translator.SetPeerID(h.cfg.ID)
 	}
@@ -202,35 +211,39 @@ func (h *MMDVMClient) Start() error {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
 	}
 
-	conn, err := h.connect()
-	if err != nil {
-		return err
-	}
-
 	h.started.Store(true)
 
-	h.wg.Add(5)
-	go h.rx(conn)
+	h.wg.Add(4)
 	go h.handler()
 	go h.tx()
 	go h.forwardTX()
 	go h.supervise()
 
-	h.sessMu.Lock()
-	h.startLogin()
-	h.sessMu.Unlock()
-
 	return nil
 }
 
-// connect dials the master and installs the new connection. It fails if
-// the client has been stopped. The caller starts rx for the connection.
+// connect dials the master and installs the new connection. The dial is
+// bounded by dialTimeout and canceled by Stop. The caller starts rx for
+// the connection.
 func (h *MMDVMClient) connect() (net.Conn, error) {
 	dial := h.dial
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
 	}
-	conn, err := dial(context.Background(), "udp", h.cfg.MasterServer)
+	timeout := h.dialTimeout
+	if timeout <= 0 {
+		timeout = defaultDialTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-h.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	conn, err := dial(ctx, "udp", h.cfg.MasterServer)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +260,8 @@ func (h *MMDVMClient) connect() (net.Conn, error) {
 }
 
 const rptAck = "RPTACK"
+
+const defaultDialTimeout = 10 * time.Second
 
 func (h *MMDVMClient) handler() {
 	defer h.wg.Done()
@@ -396,6 +411,9 @@ func (h *MMDVMClient) handleReady(data []byte) {
 // connection at all.
 func (h *MMDVMClient) supervise() {
 	defer h.wg.Done()
+	h.sessMu.Lock()
+	h.connectAndLogin()
+	h.sessMu.Unlock()
 	ticker := time.NewTicker(h.keepAlive)
 	defer ticker.Stop()
 	for {
@@ -427,7 +445,7 @@ func (h *MMDVMClient) tick(now time.Time) {
 		}
 		h.resend(st)
 	case STATE_IDLE, STATE_TIMEOUT:
-		h.reconnect()
+		h.connectAndLogin()
 	}
 }
 
@@ -451,9 +469,8 @@ func (h *MMDVMClient) startLogin() {
 	h.sendLogin()
 }
 
-// reconnect closes the current connection, dials a new one, and starts a
-// fresh login. If the dial fails the client stays in STATE_TIMEOUT and the
-// next tick tries again. Must be called with sessMu held.
+// reconnect closes the current connection, then dials a new one and starts
+// a fresh login. Must be called with sessMu held.
 func (h *MMDVMClient) reconnect() {
 	h.setState(STATE_TIMEOUT)
 	if h.metrics != nil {
@@ -468,9 +485,21 @@ func (h *MMDVMClient) reconnect() {
 		h.conn = nil
 	}
 	h.connMu.Unlock()
+	h.connectAndLogin()
+}
+
+// connectAndLogin dials the master and starts a login. If the dial fails
+// the client stays in STATE_TIMEOUT and the next tick tries again. Must be
+// called with sessMu held.
+func (h *MMDVMClient) connectAndLogin() {
+	h.setState(STATE_TIMEOUT)
 	conn, err := h.connect()
 	if err != nil {
-		slog.Error("Error connecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		select {
+		case <-h.done:
+		default:
+			slog.Error("Error connecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		}
 		return
 	}
 	h.wg.Add(1)
