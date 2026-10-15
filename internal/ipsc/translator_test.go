@@ -4,12 +4,21 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/USA-RedDragon/dmrgo/dmr/enums"
-	"github.com/USA-RedDragon/dmrgo/dmr/layer2"
-	"github.com/USA-RedDragon/dmrgo/dmr/layer2/elements"
-	"github.com/USA-RedDragon/dmrgo/dmr/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
+
+func rawEMB(t *testing.T, raw *layer2.RawBurst) pdu.EmbeddedSignalling {
+	t.Helper()
+	emb := raw.EMB()
+	if emb.FEC.Uncorrectable {
+		t.Fatal("expected a valid EMB")
+	}
+	return emb
+}
 
 func newTestTranslator(t *testing.T) *IPSCTranslator {
 	t.Helper()
@@ -533,25 +542,25 @@ func TestMultipleStreamsConcurrent(t *testing.T) {
 // round-trips through layer2.Burst Decode/Encode. This allows buildVoiceBurst
 // and buildMMDVMVoiceBurst to work on realistic data.
 func makeVoiceDMRData(syncBurst bool) [33]byte {
-	var burst layer2.Burst
-	// Set up minimal voice frames (silence-ish)
-	burst.VoiceData = pdu.Vocoder{}
+	// Minimal voice frames: all-zero vocoder slots
+	burst := layer2.Burst{Kind: layer2.KindVoice}
 	if syncBurst {
-		burst.SyncPattern = enums.MsSourcedVoice
+		burst.SyncPattern = enums.SyncMSSourcedVoice
 		burst.VoiceBurst = enums.VoiceBurstA
-		burst.HasEmbeddedSignalling = false
 	} else {
-		burst.SyncPattern = enums.EmbeddedSignallingPattern
+		burst.SyncPattern = enums.SyncNone
 		burst.VoiceBurst = enums.VoiceBurstB
-		burst.HasEmbeddedSignalling = true
 		burst.EmbeddedSignalling = pdu.EmbeddedSignalling{
 			ColorCode:                          0,
 			PreemptionAndPowerControlIndicator: false,
-			LCSS:                               enums.FirstFragmentLC,
-			ParityOK:                           true,
+			LCSS:                               enums.LCSSFirstFragment,
 		}
 	}
-	return burst.Encode()
+	data, err := burst.Encode()
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func TestBuildVoiceBurstA(t *testing.T) {
@@ -705,24 +714,58 @@ func TestBuildVoiceBurstE(t *testing.T) {
 	}
 }
 
-func TestBuildVoiceBurstSkipsDataBurst(t *testing.T) {
+// TestBuildVoiceBurstTrustsFrameType checks that a voice burst is decoded as
+// voice by its DMRD frame type, whatever its SYNC field holds. The burst is
+// a real MMDVM voice burst D whose embedded signalling field equals the MS
+// RC SYNC pattern, which a SYNC classification takes for a standalone RC
+// burst with no voice.
+func TestBuildVoiceBurstTrustsFrameType(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 
-	// Establish stream
 	header := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 1)
 	tr.TranslateToIPSC(header)
 
-	// Build a DMR data burst (not voice) — the burst decodes as IsData=true
-	dataDMR := layer2.BuildLCDataBurst([12]byte{}, elements.DataTypeVoiceLCHeader, 0)
+	dmrData := [33]byte{
+		0x08, 0x5d, 0xc1, 0x1e, 0x5e, 0x1d, 0x32, 0x8f, 0x0c, 0xae, 0x4b,
+		0xc9, 0x1d, 0xa7, 0x7d, 0x55, 0xf7, 0xdf, 0xd7, 0x7a, 0xb8, 0x08,
+		0xe7, 0x0a, 0x09, 0x6a, 0xd3, 0x2d, 0xe1, 0xf5, 0x6d, 0x0f, 0x9e,
+	}
+	var bySync layer2.Burst
+	_ = bySync.DecodeFromBytes(dmrData)
+	if bySync.Kind != layer2.KindReverseChannel {
+		t.Fatalf("expected the SYNC field to classify the burst as RC, got %s", bySync.Kind)
+	}
 
-	pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeVoice, 0)
-	pkt.StreamID = header.StreamID
-	pkt.DMRData = dataDMR
+	var voice layer2.Burst
+	if err := voice.DecodeFromBytesWith(dmrData, &layer2.DecodeOptions{
+		Kind: layer2.KindVoice, VoiceBurst: enums.VoiceBurstD,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frames, res := voice.AMBEFrames()
+	if res.Uncorrectable {
+		t.Fatalf("expected the voice frames to decode, got %+v", res)
+	}
+	want := vocoder.PackAMBEVoice(frames)
+	if want == ([19]byte{}) {
+		t.Fatal("expected nonzero voice")
+	}
 
-	result := tr.TranslateToIPSC(pkt)
-	if result != nil {
-		t.Fatalf("expected nil for data burst in voice stream, got %d packets", len(result))
+	for vseq := uint(1); vseq <= 3; vseq++ {
+		pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeVoice, vseq)
+		pkt.StreamID = header.StreamID
+		pkt.DMRData = makeVoiceDMRData(false)
+		if vseq == 3 {
+			pkt.DMRData = dmrData
+		}
+		result := tr.TranslateToIPSC(pkt)
+		if len(result) != 1 {
+			t.Fatalf("vseq %d: expected 1 packet, got %d", vseq, len(result))
+		}
+		if vseq == 3 && [19]byte(result[0][33:52]) != want {
+			t.Fatalf("expected AMBE % X, got % X", want, result[0][33:52])
+		}
 	}
 }
 
@@ -953,8 +996,7 @@ func TestPopulateEmbeddedSignallingBurstB(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 
-	var burst layer2.Burst
-	burst.HasEmbeddedSignalling = true
+	var raw layer2.RawBurst
 
 	// Burst B with 57-byte packet (5 bytes embedded data at [52:57])
 	ipscData := make([]byte, 57)
@@ -963,15 +1005,15 @@ func TestPopulateEmbeddedSignallingBurstB(t *testing.T) {
 	ipscData[54] = 0xEF
 	ipscData[55] = 0x12
 
-	tr.populateEmbeddedSignalling(&burst, 1, ipscData)
+	tr.populateEmbeddedSignalling(&raw, 1, ipscData)
 
 	// Burst B (index 1) should have LCSS = FirstFragmentLC
-	if burst.EmbeddedSignalling.LCSS != enums.FirstFragmentLC {
-		t.Fatalf("expected LCSS FirstFragmentLC, got %d", burst.EmbeddedSignalling.LCSS)
+	if rawEMB(t, &raw).LCSS != enums.LCSSFirstFragment {
+		t.Fatalf("expected LCSS FirstFragmentLC, got %d", rawEMB(t, &raw).LCSS)
 	}
 
 	// Check that embedded data was unpacked
-	packed := burst.PackEmbeddedSignallingData()
+	packed := raw.EmbeddedData()
 	//nolint:gosec // packed is [4]byte, index is always in range
 	if packed[0] != 0xAB || packed[1] != 0xCD || packed[2] != 0xEF || packed[3] != 0x12 {
 		t.Fatalf("expected embedded data [AB CD EF 12], got [%02X %02X %02X %02X]",
@@ -983,8 +1025,7 @@ func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 
-	var burst layer2.Burst
-	burst.HasEmbeddedSignalling = true
+	var raw layer2.RawBurst
 
 	// Burst E with 66-byte packet (7 bytes embedded data at [52:59])
 	ipscData := make([]byte, 66)
@@ -993,14 +1034,14 @@ func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
 	ipscData[54] = 0x33
 	ipscData[55] = 0x44
 
-	tr.populateEmbeddedSignalling(&burst, 4, ipscData)
+	tr.populateEmbeddedSignalling(&raw, 4, ipscData)
 
 	// Burst E (index 4) should have LCSS = LastFragmentLCorCSBK
-	if burst.EmbeddedSignalling.LCSS != enums.LastFragmentLCorCSBK {
-		t.Fatalf("expected LCSS LastFragmentLCorCSBK, got %d", burst.EmbeddedSignalling.LCSS)
+	if rawEMB(t, &raw).LCSS != enums.LCSSLastFragment {
+		t.Fatalf("expected LCSS LastFragmentLCorCSBK, got %d", rawEMB(t, &raw).LCSS)
 	}
 
-	packed := burst.PackEmbeddedSignallingData()
+	packed := raw.EmbeddedData()
 	//nolint:gosec // packed is [4]byte, index is always in range
 	if packed[0] != 0x11 || packed[1] != 0x22 || packed[2] != 0x33 || packed[3] != 0x44 {
 		t.Fatalf("expected embedded data [11 22 33 44], got [%02X %02X %02X %02X]",
@@ -1012,16 +1053,15 @@ func TestPopulateEmbeddedSignallingContinuation(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 
-	var burst layer2.Burst
-	burst.HasEmbeddedSignalling = true
+	var raw layer2.RawBurst
 
 	// Bursts C, D, F should all get ContinuationFragmentLCorCSBK
 	for _, idx := range []int{2, 3, 5} {
 		ipscData := make([]byte, 57)
-		tr.populateEmbeddedSignalling(&burst, idx, ipscData)
-		if burst.EmbeddedSignalling.LCSS != enums.ContinuationFragmentLCorCSBK {
+		tr.populateEmbeddedSignalling(&raw, idx, ipscData)
+		if rawEMB(t, &raw).LCSS != enums.LCSSContinuationFragment {
 			t.Fatalf("burst index %d: expected LCSS ContinuationFragmentLCorCSBK, got %d",
-				idx, burst.EmbeddedSignalling.LCSS)
+				idx, rawEMB(t, &raw).LCSS)
 		}
 	}
 }
@@ -1030,20 +1070,19 @@ func TestPopulateEmbeddedSignallingNoEmbeddedData(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 
-	var burst layer2.Burst
-	burst.HasEmbeddedSignalling = true
+	var raw layer2.RawBurst
 
 	// A 52-byte packet doesn't match 57 or 66, so no embedded data is extracted
 	ipscData := make([]byte, 52)
-	tr.populateEmbeddedSignalling(&burst, 1, ipscData)
+	tr.populateEmbeddedSignalling(&raw, 1, ipscData)
 
 	// LCSS should still be set
-	if burst.EmbeddedSignalling.LCSS != enums.FirstFragmentLC {
-		t.Fatalf("expected LCSS FirstFragmentLC, got %d", burst.EmbeddedSignalling.LCSS)
+	if rawEMB(t, &raw).LCSS != enums.LCSSFirstFragment {
+		t.Fatalf("expected LCSS FirstFragmentLC, got %d", rawEMB(t, &raw).LCSS)
 	}
 
 	// Embedded data should remain empty (all zeros)
-	packed := burst.PackEmbeddedSignallingData()
+	packed := raw.EmbeddedData()
 	for i, b := range packed {
 		if b != 0 {
 			t.Fatalf("expected zero embedded data byte %d, got 0x%02X", i, b)
