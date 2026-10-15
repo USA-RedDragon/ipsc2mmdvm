@@ -437,28 +437,19 @@ func (h *MMDVMClient) tx() {
 			return
 		case data := <-h.connTX:
 			h.connMu.Lock()
-			slog.Debug("sending packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
-			_, err := h.conn.Write(data)
+			conn := h.conn
 			h.connMu.Unlock()
-			if err != nil {
+			if conn == nil {
+				slog.Debug("Dropping packet, not connected", "network", h.cfg.Name)
+				continue
+			}
+			slog.Debug("sending packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
+			if _, err := conn.Write(data); err != nil {
 				if errors.Is(err, net.ErrClosed) {
-					// Connection was closed by reconnect();
-					// re-queue the data so it is sent on the
-					// new connection, then loop back.
-					select {
-					case h.connTX <- data:
-					default:
-						slog.Warn("connTX full, dropping packet during reconnect", "network", h.cfg.Name)
-					}
-					select {
-					case <-time.After(100 * time.Millisecond):
-						continue
-					case <-h.done:
-						return
-					}
+					slog.Debug("Dropping packet, connection closed", "network", h.cfg.Name)
+					continue
 				}
 				slog.Error("Error writing to MMDVM server", "network", h.cfg.Name, "error", err)
-				continue
 			}
 		}
 	}

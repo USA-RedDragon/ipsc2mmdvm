@@ -10,6 +10,15 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
+// enqueue hands data to tx. It gives up when the client stops, so a full
+// connTX can never block Stop.
+func (h *MMDVMClient) enqueue(data []byte) {
+	select {
+	case h.connTX <- data:
+	case <-h.done:
+	}
+}
+
 func (h *MMDVMClient) sendLogin() {
 	var (
 		data = make([]byte, len("RPTL")+4)
@@ -17,7 +26,7 @@ func (h *MMDVMClient) sendLogin() {
 	)
 	binary.BigEndian.PutUint32(data[n:], h.cfg.ID)
 
-	h.connTX <- data
+	h.enqueue(data)
 }
 
 // rptclPacket builds the RPTCL disconnect packet: "RPTCL" followed by the
@@ -33,7 +42,7 @@ func (h *MMDVMClient) rptclPacket() []byte {
 const rptcLength = 302
 
 func (h *MMDVMClient) sendRPTC() {
-	h.connTX <- h.rptcPacket()
+	h.enqueue(h.rptcPacket())
 }
 
 // rptcPacket builds the RPTC configuration packet. Every field has a fixed
@@ -95,7 +104,7 @@ func (h *MMDVMClient) sendRPTK(random []byte) {
 	copy(buf[0:4], "RPTK")
 	binary.BigEndian.PutUint32(buf[4:8], h.cfg.ID)
 	copy(buf[8:], token)
-	h.connTX <- buf
+	h.enqueue(buf)
 }
 
 func (h *MMDVMClient) sendPing() {
@@ -105,7 +114,7 @@ func (h *MMDVMClient) sendPing() {
 	)
 	binary.BigEndian.PutUint32(data[n:], h.cfg.ID)
 	h.lastPingSent.Store(time.Now().UnixNano())
-	h.connTX <- data
+	h.enqueue(data)
 }
 
 func (h *MMDVMClient) sendPacket(packet proto.Packet) {
@@ -114,5 +123,5 @@ func (h *MMDVMClient) sendPacket(packet proto.Packet) {
 	if h.metrics != nil {
 		h.metrics.MMDVMPacketsSent.WithLabelValues(h.cfg.Name).Inc()
 	}
-	h.connTX <- data
+	h.enqueue(data)
 }

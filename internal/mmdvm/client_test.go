@@ -1811,3 +1811,48 @@ func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
 		t.Fatal("IPSC handler was not called")
 	}
 }
+
+func TestStopReturnsWhileSendBlockedOnFullQueue(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	for len(client.connTX) < cap(client.connTX) {
+		client.connTX <- []byte("filler")
+	}
+	client.wg.Add(1)
+	go func() {
+		defer client.wg.Done()
+		client.sendLogin()
+		client.sendPing()
+		client.sendRPTC()
+		client.sendRPTK([]byte{1, 2, 3, 4})
+		client.sendPacket(proto.Packet{Signature: tagDMRD})
+	}()
+
+	stopped := make(chan struct{})
+	go func() {
+		client.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung while a sender was blocked on a full connTX")
+	}
+}
+
+func TestTxDropsPacketsWhenConnectionClosed(t *testing.T) {
+	t.Parallel()
+	serverConn, client := udpPair(t)
+	defer serverConn.Close()
+	client.conn.Close()
+	for len(client.connTX) < cap(client.connTX) {
+		client.connTX <- []byte("queued")
+	}
+
+	client.wg.Add(1)
+	go client.tx()
+	waitFor(t, time.Second, "tx to drain connTX", func() bool { return len(client.connTX) == 0 })
+
+	close(client.done)
+	client.wg.Wait()
+}
