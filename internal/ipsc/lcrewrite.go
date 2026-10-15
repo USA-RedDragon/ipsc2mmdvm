@@ -15,8 +15,9 @@ import (
 // routing fields of a packet after a rewrite rule changed them, as
 // DMRGateway's CRewrite::processMessage does. It re-encodes the full LC of
 // voice LC headers and terminators and the embedded LC of voice bursts B-E
-// with the new source, destination, and call type. The feature set ID and
-// service options of the original LC are kept unless the call type changes.
+// with the new source, destination, and call type. The service options of
+// the original LC are kept. Its feature set ID is kept unless the call type
+// changes, which resets it to the standard one.
 //
 // A rewritten stream keeps state between its voice header and its
 // terminator, so one LCRewriter must see one direction of traffic only.
