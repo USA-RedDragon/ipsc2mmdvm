@@ -371,7 +371,7 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	t.buildRTPHeader(buf, ss, isFirst, 0x5D)
 
 	// RTP Payload — voice header with the full LC
-	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x80, lc, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x00, lc, slotTypeColorCode(pkt.DMRData))
 	return buf
 }
 
@@ -385,7 +385,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	t.buildRTPHeader(buf, ss, false, 0x5E)
 
 	// RTP Payload — voice terminator (same structure as header)
-	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x80, lc, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc, slotTypeColorCode(pkt.DMRData))
 
 	ss.ipscSeq++
 	return buf
@@ -402,19 +402,20 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
 
 	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
-	writeIPSCDataBurst(buf, burstType, 0xC0, payload, slotTypeColorCode(pkt.DMRData))
+	writeIPSCDataBurst(buf, burstType, 0x40, payload, slotTypeColorCode(pkt.DMRData))
 
 	ss.ipscSeq++
 	return buf
 }
 
 // writeIPSCDataBurst writes the 24-byte RTP payload (bytes 30-53) of an IPSC
-// voice header, terminator, or data packet. The layout follows MOTOTRBO
+// voice header, terminator, or data packet, after buildIPSCHeader has set
+// the timeslot in byte 17. The layout follows MOTOTRBO
 // captures (DMRlink voice_burst_decoding.txt) and node-dmr-lib's
 // DMRDataPayload:
 //
 //	30     burst type (the DMR data type)
-//	31     RSSI threshold and parity flags
+//	31     bit 7: timeslot 2, the rest: RSSI and parity status flags
 //	32-33  length to follow in 16-bit words (10: bytes 34-53)
 //	34     0x80: RSSI present
 //	35     0x0A: slot type present, data sync
@@ -424,7 +425,7 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 //	52-53  RSSI (left zero)
 func writeIPSCDataBurst(buf []byte, burstType, rssiParity byte, payload [12]byte, colorCode enums.ColorCode) {
 	buf[30] = burstType
-	buf[31] = rssiParity
+	buf[31] = rssiParity&0x7F | (buf[17]&0x20)<<2
 	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
 	buf[34] = 0x80
 	buf[35] = 0x0A

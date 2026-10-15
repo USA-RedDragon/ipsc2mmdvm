@@ -145,3 +145,22 @@ func TestTranslateToIPSCCallPriority(t *testing.T) {
 		}
 	}
 }
+
+// Byte 31 of a header, terminator, or data packet carries the timeslot in
+// bit 7, which node-dmr-lib's DMRDataPayload reads as pduSlot. The TS1
+// captures in the ipsc2hbpc test data have it clear, and the TS2 capture
+// in DMRlink's voice_burst_decoding.txt has 0x80.
+func TestTranslateToIPSCSlotFlagInPayload(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []bool{false, true} {
+		want := byte(0x00)
+		if slot {
+			want = 0x80
+		}
+		for i, p := range headerTermDataPackets(t, true, slot) {
+			if p[31]&0x80 != want {
+				t.Errorf("slot %t packet %d: byte 31 0x%02X, want bit 7 = 0x%02X", slot, i, p[31], want)
+			}
+		}
+	}
+}
