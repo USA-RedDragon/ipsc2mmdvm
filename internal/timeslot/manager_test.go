@@ -1,10 +1,16 @@
 package timeslot
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
 type recorder struct {
@@ -54,8 +60,8 @@ func submit(m *Manager, slot bool, id uint, network string, pkt any, r *recorder
 	return m.Submit(slot, id, network, pkt, false, r.sink) == Deliver
 }
 
-func submitEnd(m *Manager, slot bool, id uint, network string, pkt any, r *recorder) bool {
-	return m.Submit(slot, id, network, pkt, true, r.sink) == Deliver
+func submitEnd(m *Manager, id uint, network string, pkt any, r *recorder) bool {
+	return m.Submit(false, id, network, pkt, true, r.sink) == Deliver
 }
 
 func TestSubmit_FreeSlot(t *testing.T) {
@@ -156,7 +162,7 @@ func TestRelease_FIFO_MultiplePending(t *testing.T) {
 	b.waitPackets(t, "b1", "b2")
 	c.expectNone(t)
 
-	if !submitEnd(m, false, 200, "net2", "b-end", b) {
+	if !submitEnd(m, 200, "net2", "b-end", b) {
 		t.Fatal("active stream 200 should deliver its terminator")
 	}
 	m.Release(false, 200)
@@ -226,11 +232,77 @@ func TestTimeoutPromotesPendingInOrder(t *testing.T) {
 		t.Fatal("C must wait behind B, which was queued first")
 	}
 	b.waitPackets(t, "B-hdr")
-	if !submitEnd(m, false, 2, "B", "B-end", b) {
+	if !submitEnd(m, 2, "B", "B-end", b) {
 		t.Fatal("B should be active after the reclaim")
 	}
 	m.Release(false, 2)
 	c.waitPackets(t, "C-hdr", "C-v1")
+}
+
+func TestTimerDeliversCompleteCallBehindStaleActive(t *testing.T) {
+	m := NewManager()
+	m.timeout = 20 * time.Millisecond
+	t.Cleanup(m.Stop)
+	a, b := &recorder{}, &recorder{}
+	submit(m, false, 1, "A", "A-hdr", a)
+	submit(m, false, 2, "B", "B-hdr", b)
+	submitEnd(m, 2, "B", "B-end", b)
+
+	b.waitPackets(t, "B-hdr", "B-end")
+	if !submit(m, false, 3, "C", "C-hdr", &recorder{}) {
+		t.Fatal("slot should be free after B's buffered call ended")
+	}
+}
+
+func TestStopHaltsStaleTimer(t *testing.T) {
+	m := NewManager()
+	m.timeout = 10 * time.Millisecond
+	b := &recorder{}
+	submit(m, false, 1, "A", "A-hdr", &recorder{})
+	submit(m, false, 2, "B", "B-hdr", b)
+	m.Stop()
+	time.Sleep(40 * time.Millisecond)
+	if got := b.packets(); len(got) != 0 {
+		t.Fatalf("timer promoted a call after Stop: %v", got)
+	}
+}
+
+func TestActiveCallsGaugeResetsAfterLostTerminator(t *testing.T) {
+	met := metrics.NewMetrics()
+	m := NewManager()
+	m.SetMetrics(met, "outbound")
+	m.timeout = 200 * time.Millisecond
+	t.Cleanup(m.Stop)
+	submit(m, false, 1, "A", "A-hdr", &recorder{})
+
+	const line = `timeslot_active_calls{direction="outbound",slot="1"} `
+	if v := metricLine(t, met, line); v != "1" {
+		t.Fatalf("gauge = %q while the call is active, want 1", v)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for metricLine(t, met, line) != "0" {
+		if time.Now().After(deadline) {
+			t.Fatalf("gauge = %q after the call went stale, want 0", metricLine(t, met, line))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func metricLine(t *testing.T, met *metrics.Metrics, prefix string) string {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	met.Handler().ServeHTTP(rec, req)
+	body, err := io.ReadAll(rec.Result().Body)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	for line := range strings.SplitSeq(string(body), "\n") {
+		if v, ok := strings.CutPrefix(line, prefix); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func TestSubmit_NotYetTimedOut(t *testing.T) {
@@ -323,7 +395,7 @@ func TestRelease_Chain_CompletePendingCall(t *testing.T) {
 	submit(m, false, 100, "net1", "a-header", a)
 	submit(m, false, 200, "net2", "b-header", b)
 	submit(m, false, 200, "net2", "b-voice", b)
-	submitEnd(m, false, 200, "net2", "b-terminator", b)
+	submitEnd(m, 200, "net2", "b-terminator", b)
 	submit(m, false, 300, "net3", "c-header", c)
 
 	m.Release(false, 100)

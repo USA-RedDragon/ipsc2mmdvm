@@ -59,6 +59,9 @@ type slotState struct {
 	// sending is true while the slot's sender goroutine runs.
 	sending bool
 	pending []*stream
+	// timer reclaims the slot when the active call goes stale, so
+	// waiting calls do not depend on a new packet to be promoted.
+	timer *time.Timer
 }
 
 // Manager arbitrates access to DMR timeslots. Two timeslots exist
@@ -144,6 +147,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 
 	if ss.active == nil {
 		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
+		m.armLocked(slot, ss, now)
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(1)
 		}
@@ -191,6 +195,35 @@ func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
 	m.advanceLocked(slot, ss)
 }
 
+// armLocked schedules the stale check for the active call on slot.
+func (m *Manager) armLocked(slot bool, ss *slotState, now time.Time) {
+	if m.stopped || ss.active == nil {
+		return
+	}
+	d := m.timeout
+	if !ss.draining {
+		d = ss.active.lastSeen.Add(m.timeout).Sub(now)
+	}
+	d += time.Millisecond
+	if ss.timer == nil {
+		ss.timer = time.AfterFunc(d, func() { m.onTimer(slot) })
+		return
+	}
+	ss.timer.Reset(d)
+}
+
+func (m *Manager) onTimer(slot bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
+	ss := &m.slots[slotIndex(slot)]
+	now := time.Now()
+	m.reclaimStaleLocked(slot, ss, now)
+	m.armLocked(slot, ss, now)
+}
+
 func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) {
 	s.queue = append(s.queue, entry{packet: packet, end: end})
 	if m.metrics != nil {
@@ -216,12 +249,17 @@ func (m *Manager) Release(slot bool, streamID uint) {
 	m.advanceLocked(slot, ss)
 }
 
-// Stop halts replays and waits for any delivery in progress to return.
-// Packets still buffered are discarded and later Submit and Release
-// calls do nothing.
+// Stop halts replays and stale-call timers and waits for any delivery in
+// progress to return. Packets still buffered are discarded and later
+// Submit and Release calls do nothing.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	m.stopped = true
+	for i := range m.slots {
+		if t := m.slots[i].timer; t != nil {
+			t.Stop()
+		}
+	}
 	m.mu.Unlock()
 	m.wg.Wait()
 }
@@ -232,6 +270,9 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	ss.draining = false
 	if len(ss.pending) == 0 {
 		ss.active = nil
+		if ss.timer != nil {
+			ss.timer.Stop()
+		}
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(0)
 		}
@@ -240,12 +281,14 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	next := ss.pending[0]
 	ss.pending[0] = nil
 	ss.pending = ss.pending[1:]
-	next.lastSeen = time.Now()
+	now := time.Now()
+	next.lastSeen = now
 	ss.active = next
 	slog.Debug("timeslot activating pending stream",
 		"slot", slot, "streamID", next.id, "network", next.network,
 		"bufferedPackets", len(next.queue))
 	ss.draining = len(next.queue) > 0
+	m.armLocked(slot, ss, now)
 	if ss.draining && !ss.sending && !m.stopped {
 		ss.sending = true
 		m.wg.Add(1)
