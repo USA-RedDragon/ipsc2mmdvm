@@ -1,12 +1,15 @@
 package mmdvm
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
@@ -47,8 +50,167 @@ func newSlotTestClient(t *testing.T, name string, mgr *timeslot.Manager) *MMDVMC
 }
 
 func dmrd(streamID, frameType, dtype uint) []byte {
-	p := proto.Packet{Signature: "DMRD", Src: 1, Dst: 9, GroupCall: true, FrameType: frameType, DTypeOrVSeq: dtype, StreamID: streamID}
+	return dmrdFrom(1, streamID, frameType, dtype)
+}
+
+func dmrdFrom(src, streamID, frameType, dtype uint) []byte {
+	p := proto.Packet{Signature: "DMRD", Src: src, Dst: 9, GroupCall: true, FrameType: frameType, DTypeOrVSeq: dtype, StreamID: streamID}
 	return p.Encode()
+}
+
+type ipscRecord struct {
+	via         string
+	src         uint32
+	callControl uint32
+	burstType   byte
+}
+
+type ipscRecorder struct {
+	mu   sync.Mutex
+	recs []ipscRecord
+	hook func(ipscRecord)
+}
+
+func (r *ipscRecorder) handler(name string) func([]byte) {
+	return func(d []byte) {
+		rec := ipscRecord{
+			via:         name,
+			src:         uint32(d[6])<<16 | uint32(d[7])<<8 | uint32(d[8]),
+			callControl: binary.BigEndian.Uint32(d[13:17]),
+			burstType:   d[30],
+		}
+		r.mu.Lock()
+		hook := r.hook
+		r.recs = append(r.recs, rec)
+		r.mu.Unlock()
+		if hook != nil {
+			hook(rec)
+		}
+	}
+}
+
+func (r *ipscRecorder) snapshot() []ipscRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ipscRecord(nil), r.recs...)
+}
+
+func (r *ipscRecorder) waitFor(t *testing.T, cond func([]ipscRecord) bool) []ipscRecord {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		recs := r.snapshot()
+		if cond(recs) {
+			return recs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for IPSC output, got %+v", recs)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+const (
+	srcA = 1
+	srcB = 10
+)
+
+func hasTerminatorFrom(src uint32) func([]ipscRecord) bool {
+	return func(recs []ipscRecord) bool {
+		for _, r := range recs {
+			if r.src == src && r.burstType == 0x02 {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func TestQueuedCallIsSentByItsOwnClient(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	c1 := newSlotTestClient(t, "net1", mgr)
+	c2 := newSlotTestClient(t, "net2", mgr)
+	rec := &ipscRecorder{}
+	c1.SetIPSCHandler(rec.handler("net1"))
+	c2.SetIPSCHandler(rec.handler("net2"))
+	for i := range uint(5) {
+		c2.translator.TranslateToIPSC(proto.Packet{StreamID: 900 + i, FrameType: 2, DTypeOrVSeq: 1, Dst: 1, GroupCall: true})
+	}
+
+	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
+	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 2))
+
+	recs := rec.waitFor(t, hasTerminatorFrom(srcB))
+	var cc uint32
+	for _, r := range recs {
+		if r.src != srcB {
+			continue
+		}
+		if r.via != "net2" {
+			t.Fatalf("stream B packet sent via %s, want net2: %+v", r.via, recs)
+		}
+		if cc == 0 {
+			cc = r.callControl
+		}
+		if r.callControl != cc {
+			t.Fatalf("stream B call control changed mid-call: %+v", recs)
+		}
+	}
+}
+
+func TestLivePacketsWaitBehindReplay(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	c1 := newSlotTestClient(t, "net1", mgr)
+	c2 := newSlotTestClient(t, "net2", mgr)
+	rec := &ipscRecorder{}
+	blocked := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	rec.hook = func(r ipscRecord) {
+		if r.src == srcB+1 {
+			once.Do(func() {
+				close(blocked)
+				<-gate
+			})
+		}
+	}
+	c1.SetIPSCHandler(rec.handler("net1"))
+	c2.SetIPSCHandler(rec.handler("net2"))
+
+	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
+	c2.handleReady(dmrdFrom(srcB+1, 0xB, 2, 1))
+	go c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
+	<-blocked
+	liveDone := make(chan struct{})
+	go func() {
+		c2.handleReady(dmrdFrom(srcB+2, 0xB, 2, 1))
+		close(liveDone)
+	}()
+	select {
+	case <-liveDone:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gate)
+	<-liveDone
+	c2.handleReady(dmrdFrom(srcB+3, 0xB, 2, 2))
+
+	recs := rec.waitFor(t, hasTerminatorFrom(srcB+3))
+	var last uint32
+	for _, r := range recs {
+		if r.src < srcB {
+			continue
+		}
+		if r.src < last {
+			t.Fatalf("stream B packets out of order: %+v", recs)
+		}
+		last = r.src
+	}
 }
 
 func TestBufferedPacketsAreNotCountedAsDropped(t *testing.T) {

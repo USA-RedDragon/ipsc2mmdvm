@@ -1,141 +1,186 @@
 package timeslot
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 )
 
+type recorder struct {
+	mu  sync.Mutex
+	got []any
+}
+
+func (r *recorder) sink(p any) {
+	r.mu.Lock()
+	r.got = append(r.got, p)
+	r.mu.Unlock()
+}
+
+func (r *recorder) packets() []any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]any(nil), r.got...)
+}
+
+// waitPackets waits until the recorder holds want, and fails if it
+// holds anything else.
+func (r *recorder) waitPackets(t *testing.T, want ...any) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := r.packets()
+		if reflect.DeepEqual(got, want) {
+			return
+		}
+		if len(got) >= len(want) || time.Now().After(deadline) {
+			t.Fatalf("delivered %v, want %v", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// expectNone fails if anything is delivered within a short window.
+func (r *recorder) expectNone(t *testing.T) {
+	t.Helper()
+	time.Sleep(20 * time.Millisecond)
+	if got := r.packets(); len(got) != 0 {
+		t.Fatalf("expected no delivery, got %v", got)
+	}
+}
+
+func submit(m *Manager, slot bool, id uint, network string, pkt any, r *recorder) bool {
+	return m.Submit(slot, id, network, pkt, false, r.sink) == Deliver
+}
+
+func submitEnd(m *Manager, slot bool, id uint, network string, pkt any, r *recorder) bool {
+	return m.Submit(slot, id, network, pkt, true, r.sink) == Deliver
+}
+
 func TestSubmit_FreeSlot(t *testing.T) {
 	m := NewManager()
-	if !m.Submit(false, 100, "net1", "pkt1") {
+	r := &recorder{}
+	if !submit(m, false, 100, "net1", "pkt1", r) {
 		t.Fatal("expected to deliver on free TS1")
 	}
-	if !m.Submit(true, 200, "net2", "pkt2") {
+	if !submit(m, true, 200, "net2", "pkt2", r) {
 		t.Fatal("expected to deliver on free TS2")
 	}
 }
 
 func TestSubmit_SameStream(t *testing.T) {
 	m := NewManager()
-	if !m.Submit(false, 100, "net1", "pkt1") {
+	r := &recorder{}
+	if !submit(m, false, 100, "net1", "pkt1", r) {
 		t.Fatal("first submit should deliver")
 	}
-	if !m.Submit(false, 100, "net1", "pkt2") {
+	if !submit(m, false, 100, "net1", "pkt2", r) {
 		t.Fatal("same stream should always deliver")
 	}
 }
 
 func TestSubmit_DifferentStream_Buffers(t *testing.T) {
 	m := NewManager()
-	if !m.Submit(false, 100, "net1", "pkt1") {
+	r := &recorder{}
+	if !submit(m, false, 100, "net1", "pkt1", r) {
 		t.Fatal("first stream should deliver")
 	}
-	if m.Submit(false, 200, "net2", "pkt2") {
+	if submit(m, false, 200, "net2", "pkt2", r) {
 		t.Fatal("different stream on busy slot should be buffered, not delivered")
 	}
 }
 
 func TestSubmit_DifferentSlots_Independent(t *testing.T) {
 	m := NewManager()
-	if !m.Submit(false, 100, "net1", "pkt1") {
+	r := &recorder{}
+	if !submit(m, false, 100, "net1", "pkt1", r) {
 		t.Fatal("TS1 should be free")
 	}
-	if !m.Submit(true, 200, "net2", "pkt2") {
+	if !submit(m, true, 200, "net2", "pkt2", r) {
 		t.Fatal("TS2 should be independent of TS1")
 	}
 }
 
 func TestRelease_NoBuffer(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "pkt1")
-	buffered := m.Release(false, 100)
+	r := &recorder{}
+	submit(m, false, 100, "net1", "pkt1", r)
+	m.Release(false, 100)
+	r.expectNone(t)
 
-	if len(buffered) != 0 {
-		t.Fatalf("expected no buffered packets, got %d", len(buffered))
-	}
-
-	if !m.Submit(false, 200, "net2", "pkt2") {
+	if !submit(m, false, 200, "net2", "pkt2", r) {
 		t.Fatal("slot should be free after release")
 	}
 }
 
-func TestRelease_ReturnsBufferedPackets(t *testing.T) {
+func TestRelease_DeliversBufferedPackets(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "active1")
-	m.Submit(false, 200, "net2", "buffered1")
-	m.Submit(false, 200, "net2", "buffered2")
+	a, b := &recorder{}, &recorder{}
+	submit(m, false, 100, "net1", "active1", a)
+	submit(m, false, 200, "net2", "buffered1", b)
+	submit(m, false, 200, "net2", "buffered2", b)
 
-	buffered := m.Release(false, 100)
-	if len(buffered) != 2 {
-		t.Fatalf("expected 2 buffered packets, got %d", len(buffered))
-	}
-	if buffered[0] != "buffered1" || buffered[1] != "buffered2" {
-		t.Fatalf("unexpected packet contents: %v", buffered)
+	m.Release(false, 100)
+	b.waitPackets(t, "buffered1", "buffered2")
+	if got := a.packets(); len(got) != 0 {
+		t.Fatalf("buffered packets went to the wrong sink: %v", got)
 	}
 }
 
 func TestRelease_ActivatesPendingStream(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	m.Submit(false, 200, "net2", "b1")
-	m.Release(false, 100) // activates stream 200
+	r := &recorder{}
+	submit(m, false, 100, "net1", "a1", r)
+	submit(m, false, 200, "net2", "b1", r)
+	m.Release(false, 100)
+	r.waitPackets(t, "b1")
 
-	// Stream 200 is now active — new packets should deliver.
-	if !m.Submit(false, 200, "net2", "b2") {
+	if !submit(m, false, 200, "net2", "b2", r) {
 		t.Fatal("newly activated pending stream should accept further packets")
 	}
-
-	// Different stream should be buffered behind 200.
-	if m.Submit(false, 300, "net3", "c1") {
+	if submit(m, false, 300, "net3", "c1", r) {
 		t.Fatal("new stream should be buffered behind activated stream")
 	}
 }
 
 func TestRelease_FIFO_MultiplePending(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	m.Submit(false, 200, "net2", "b1")
-	m.Submit(false, 200, "net2", "b2")
-	m.Submit(false, 300, "net3", "c1")
+	b, c := &recorder{}, &recorder{}
+	submit(m, false, 100, "net1", "a1", b)
+	submit(m, false, 200, "net2", "b1", b)
+	submit(m, false, 200, "net2", "b2", b)
+	submit(m, false, 300, "net3", "c1", c)
 
-	// Release active (100) → get stream 200's packets.
-	buffered := m.Release(false, 100)
-	if len(buffered) != 2 {
-		t.Fatalf("expected 2 packets from stream 200, got %d", len(buffered))
-	}
+	m.Release(false, 100)
+	b.waitPackets(t, "b1", "b2")
+	c.expectNone(t)
 
-	// Release stream 200 → get stream 300's packets.
-	buffered = m.Release(false, 200)
-	if len(buffered) != 1 {
-		t.Fatalf("expected 1 packet from stream 300, got %d", len(buffered))
+	if !submitEnd(m, false, 200, "net2", "b-end", b) {
+		t.Fatal("active stream 200 should deliver its terminator")
 	}
-	if buffered[0] != "c1" {
-		t.Fatalf("expected 'c1', got %v", buffered[0])
-	}
+	m.Release(false, 200)
+	c.waitPackets(t, "c1")
 }
 
 func TestRelease_WrongStream(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	buffered := m.Release(false, 999)
+	r := &recorder{}
+	submit(m, false, 100, "net1", "a1", r)
+	m.Release(false, 999)
 
-	if buffered != nil {
-		t.Fatal("release with wrong stream ID should return nil")
-	}
-
-	// Slot should still be held.
-	if m.Submit(false, 200, "net2", "b1") {
+	if submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("slot should still be held after release with wrong stream ID")
 	}
 }
 
 func TestRelease_WrongSlot(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	m.Release(true, 100) // wrong slot
+	r := &recorder{}
+	submit(m, false, 100, "net1", "a1", r)
+	m.Release(true, 100)
 
-	if m.Submit(false, 200, "net2", "b1") {
+	if submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("TS1 should still be held after releasing TS2")
 	}
 }
@@ -143,42 +188,24 @@ func TestRelease_WrongSlot(t *testing.T) {
 func TestSubmit_Timeout(t *testing.T) {
 	m := NewManager()
 	m.timeout = 10 * time.Millisecond
+	r := &recorder{}
 
-	m.Submit(false, 100, "net1", "a1")
+	submit(m, false, 100, "net1", "a1", r)
 	time.Sleep(20 * time.Millisecond)
 
-	if !m.Submit(false, 200, "net2", "b1") {
+	if !submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("should reclaim slot after timeout")
-	}
-}
-
-func TestSubmit_Timeout_DiscardsPending(t *testing.T) {
-	m := NewManager()
-	m.timeout = 10 * time.Millisecond
-
-	m.Submit(false, 100, "net1", "a1")
-	m.Submit(false, 200, "net2", "b1") // buffered
-	time.Sleep(20 * time.Millisecond)
-
-	// Timeout reclaims and discards pending.
-	if !m.Submit(false, 300, "net3", "c1") {
-		t.Fatal("should reclaim slot after timeout")
-	}
-
-	// Release 300 should return nothing (200 was discarded).
-	buffered := m.Release(false, 300)
-	if len(buffered) != 0 {
-		t.Fatalf("expected no buffered packets after timeout reclaim, got %d", len(buffered))
 	}
 }
 
 func TestSubmit_NotYetTimedOut(t *testing.T) {
 	m := NewManager()
 	m.timeout = 1 * time.Second
+	r := &recorder{}
 
-	m.Submit(false, 100, "net1", "a1")
+	submit(m, false, 100, "net1", "a1", r)
 
-	if m.Submit(false, 200, "net2", "b1") {
+	if submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("should buffer before timeout")
 	}
 }
@@ -186,46 +213,40 @@ func TestSubmit_NotYetTimedOut(t *testing.T) {
 func TestSubmit_TouchExtendsTimeout(t *testing.T) {
 	m := NewManager()
 	m.timeout = 30 * time.Millisecond
+	r := &recorder{}
 
-	m.Submit(false, 100, "net1", "a1")
+	submit(m, false, 100, "net1", "a1", r)
 	time.Sleep(15 * time.Millisecond)
 
-	m.Submit(false, 100, "net1", "a2") // touch extends timeout
+	submit(m, false, 100, "net1", "a2", r)
 	time.Sleep(15 * time.Millisecond)
 
-	// Only 15ms since last touch — should still be buffered.
-	if m.Submit(false, 200, "net2", "b1") {
+	if submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("slot should still be held; touch extended the timeout")
 	}
 
 	time.Sleep(20 * time.Millisecond)
-	if !m.Submit(false, 200, "net2", "b2") {
+	if !submit(m, false, 300, "net3", "c1", r) {
 		t.Fatal("should reclaim slot after extended timeout expires")
 	}
 }
 
 func TestRelease_NoOp_EmptySlot(t *testing.T) {
 	m := NewManager()
-	// Releasing a slot that was never acquired should not panic.
-	buffered := m.Release(false, 100)
-	if buffered != nil {
-		t.Fatal("release on empty slot should return nil")
-	}
-	buffered = m.Release(true, 200)
-	if buffered != nil {
-		t.Fatal("release on empty slot should return nil")
-	}
+	m.Release(false, 100)
+	m.Release(true, 200)
 }
 
 func TestSubmit_BothSlotsBusy(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	m.Submit(true, 200, "net2", "b1")
+	r := &recorder{}
+	submit(m, false, 100, "net1", "a1", r)
+	submit(m, true, 200, "net2", "b1", r)
 
-	if m.Submit(false, 300, "net3", "c1") {
+	if submit(m, false, 300, "net3", "c1", r) {
 		t.Fatal("TS1 should be busy")
 	}
-	if m.Submit(true, 400, "net4", "d1") {
+	if submit(m, true, 400, "net4", "d1", r) {
 		t.Fatal("TS2 should be busy")
 	}
 }
@@ -233,6 +254,7 @@ func TestSubmit_BothSlotsBusy(t *testing.T) {
 func TestConcurrentSubmit(t *testing.T) {
 	m := NewManager()
 	m.timeout = 5 * time.Second
+	r := &recorder{}
 
 	const goroutines = 50
 	delivered := make(chan uint, goroutines)
@@ -240,7 +262,7 @@ func TestConcurrentSubmit(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range uint(goroutines) {
 		wg.Go(func() {
-			if m.Submit(false, i, "goroutine", "pkt") {
+			if submit(m, false, i, "goroutine", "pkt", r) {
 				delivered <- i
 			}
 		})
@@ -249,7 +271,6 @@ func TestConcurrentSubmit(t *testing.T) {
 	wg.Wait()
 	close(delivered)
 
-	// Exactly one goroutine should have delivered immediately.
 	winners := []uint{}
 	for id := range delivered {
 		winners = append(winners, id)
@@ -261,47 +282,66 @@ func TestConcurrentSubmit(t *testing.T) {
 }
 
 func TestRelease_Chain_CompletePendingCall(t *testing.T) {
-	// Simulate: stream 100 active, stream 200 buffered with a complete
-	// call (header + terminator). After releasing 100, the caller gets
-	// 200's packets, sees the terminator, and releases 200 to chain.
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a-header")
-	m.Submit(false, 200, "net2", "b-header")
-	m.Submit(false, 200, "net2", "b-voice")
-	m.Submit(false, 200, "net2", "b-terminator")
-	m.Submit(false, 300, "net3", "c-header")
+	a, b, c := &recorder{}, &recorder{}, &recorder{}
+	submit(m, false, 100, "net1", "a-header", a)
+	submit(m, false, 200, "net2", "b-header", b)
+	submit(m, false, 200, "net2", "b-voice", b)
+	submitEnd(m, false, 200, "net2", "b-terminator", b)
+	submit(m, false, 300, "net3", "c-header", c)
 
-	// Release 100 → get 200's packets.
-	buffered := m.Release(false, 100)
-	if len(buffered) != 3 {
-		t.Fatalf("expected 3 packets from stream 200, got %d", len(buffered))
-	}
-	if buffered[0] != "b-header" {
-		t.Fatalf("expected b-header, got %v", buffered[0])
-	}
-	if buffered[2] != "b-terminator" {
-		t.Fatalf("expected b-terminator, got %v", buffered[2])
-	}
+	m.Release(false, 100)
+	b.waitPackets(t, "b-header", "b-voice", "b-terminator")
+	c.waitPackets(t, "c-header")
 
-	// Caller detects terminator in buffered → release 200 → get 300's packets.
-	buffered = m.Release(false, 200)
-	if len(buffered) != 1 {
-		t.Fatalf("expected 1 packet from stream 300, got %d", len(buffered))
-	}
-	if buffered[0] != "c-header" {
-		t.Fatalf("expected c-header, got %v", buffered[0])
+	if !submit(m, false, 300, "net3", "c-voice", c) {
+		t.Fatal("stream 300 should be active after the chained replay")
 	}
 }
 
 func TestSubmit_SameStreamDoesNotDuplicate(t *testing.T) {
 	m := NewManager()
-	m.Submit(false, 100, "net1", "a1")
-	m.Submit(false, 200, "net2", "b1")
-	m.Submit(false, 200, "net2", "b2") // same pending stream
-	m.Submit(false, 200, "net2", "b3") // same pending stream
+	r := &recorder{}
+	submit(m, false, 100, "net1", "a1", r)
+	submit(m, false, 200, "net2", "b1", r)
+	submit(m, false, 200, "net2", "b2", r)
+	submit(m, false, 200, "net2", "b3", r)
 
-	buffered := m.Release(false, 100)
-	if len(buffered) != 3 {
-		t.Fatalf("expected 3 buffered packets from stream 200, got %d", len(buffered))
+	m.Release(false, 100)
+	r.waitPackets(t, "b1", "b2", "b3")
+}
+
+func TestLivePacketsQueueBehindReplay(t *testing.T) {
+	m := NewManager()
+	blocked := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	r := &recorder{}
+	sink := func(p any) {
+		once.Do(func() {
+			close(blocked)
+			<-gate
+		})
+		r.sink(p)
+	}
+	m.Submit(false, 100, "net1", "a1", false, sink)
+	m.Submit(false, 200, "net2", "b1", false, sink)
+	m.Submit(false, 200, "net2", "b2", false, sink)
+
+	released := make(chan struct{})
+	go func() {
+		m.Release(false, 100)
+		close(released)
+	}()
+	<-blocked
+	if v := m.Submit(false, 200, "net2", "b3", false, sink); v != Queued {
+		t.Fatalf("live packet during replay got verdict %v, want Queued", v)
+	}
+	close(gate)
+	r.waitPackets(t, "b1", "b2", "b3")
+	<-released
+
+	if v := m.Submit(false, 200, "net2", "b4", false, sink); v != Deliver {
+		t.Fatalf("live packet after replay got verdict %v, want Deliver", v)
 	}
 }

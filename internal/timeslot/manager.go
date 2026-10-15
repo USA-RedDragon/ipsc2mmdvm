@@ -4,7 +4,7 @@
 // audio on the same timeslot simultaneously, the first call is delivered
 // immediately while subsequent calls are buffered in memory. When the
 // active call terminates (or times out), buffered calls are delivered
-// in FIFO order.
+// in FIFO order through the sink of the source that submitted them.
 package timeslot
 
 import (
@@ -20,25 +20,43 @@ import (
 // a voice terminator packet is lost.
 const DefaultTimeout = 3 * time.Second
 
-// activeCall tracks a single in-progress call on one timeslot.
-type activeCall struct {
-	streamID uint
-	network  string    // human-readable label of the source (for logging)
-	lastSeen time.Time // last time a packet was received for this call
+// Verdict tells the caller of Submit what to do with a packet.
+type Verdict int
+
+const (
+	// Deliver means the stream owns the slot and the caller must
+	// deliver the packet now.
+	Deliver Verdict = iota
+	// Queued means the manager holds the packet and delivers it later
+	// through the stream's sink.
+	Queued
+)
+
+// Sink delivers one buffered packet on behalf of the source that
+// submitted it.
+type Sink func(packet any)
+
+type entry struct {
+	packet any
+	end    bool
 }
 
-// pendingStream holds buffered packets for a call waiting behind the
-// active call on the same timeslot.
-type pendingStream struct {
-	streamID uint
+// stream is one call on a timeslot, either active or waiting.
+type stream struct {
+	id       uint
 	network  string
-	packets  []any
+	sink     Sink
+	queue    []entry
+	lastSeen time.Time
 }
 
 // slotState tracks the active call and any pending calls on one timeslot.
 type slotState struct {
-	active  *activeCall
-	pending []*pendingStream // FIFO queue of waiting calls
+	active *stream
+	// draining is true while the active stream still has queued packets
+	// that must be delivered before its live packets.
+	draining bool
+	pending  []*stream
 }
 
 // Manager arbitrates access to DMR timeslots. Two timeslots exist
@@ -49,7 +67,7 @@ type slotState struct {
 // Create one Manager per traffic direction that needs isolation.
 type Manager struct {
 	mu        sync.Mutex
-	slots     [2]*slotState // [0] = TS1 (Slot=false), [1] = TS2 (Slot=true)
+	slots     [2]slotState // [0] = TS1 (Slot=false), [1] = TS2 (Slot=true)
 	timeout   time.Duration
 	metrics   *metrics.Metrics
 	direction string // "inbound" or "outbound" (for metric labels)
@@ -84,137 +102,162 @@ func slotLabel(slot bool) string {
 	return "1"
 }
 
-// getOrCreateSlot returns the slotState for idx, creating it if needed.
-// Must be called with mu held.
-func (m *Manager) getOrCreateSlot(idx int) *slotState {
-	if m.slots[idx] == nil {
-		m.slots[idx] = &slotState{}
-	}
-	return m.slots[idx]
-}
-
-// findPending returns the pendingStream for streamID, or nil.
-func (ss *slotState) findPending(streamID uint) *pendingStream {
+// findPending returns the pending stream for streamID, or nil.
+func (ss *slotState) findPending(streamID uint) *stream {
 	for _, p := range ss.pending {
-		if p.streamID == streamID {
+		if p.id == streamID {
 			return p
 		}
 	}
 	return nil
 }
 
-// Submit adds a packet to the timeslot manager. If the stream is active
-// (owns the slot), returns true and the caller should process the packet
-// immediately. If the slot is busy with another call, the packet is
-// buffered in memory and returns false — the caller should not process it.
+// Submit offers a packet from streamID to the timeslot. end marks the
+// packet that ends the call. sink delivers the packet later if the
+// manager buffers it, so it must send through the same path that the
+// caller uses for packets it delivers itself.
+//
+// On Deliver the caller must deliver the packet, and when end is true
+// it must call Release after the delivery. On Queued the manager owns
+// the packet.
 //
 // When the active call has timed out, all pending streams are discarded
 // (they're stale) and the new stream becomes active.
-func (m *Manager) Submit(slot bool, streamID uint, network string, packet any) bool {
+func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, end bool, sink Sink) Verdict {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	idx := slotIndex(slot)
-	ss := m.getOrCreateSlot(idx)
+	ss := &m.slots[slotIndex(slot)]
 	now := time.Now()
 
 	if ss.active == nil {
-		// Slot is free — claim it.
-		ss.active = &activeCall{
-			streamID: streamID,
-			network:  network,
-			lastSeen: now,
-		}
+		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(1)
 		}
 		slog.Debug("timeslot acquired",
 			"slot", slot, "streamID", streamID, "network", network)
-		return true
+		return Deliver
 	}
 
-	if ss.active.streamID == streamID {
-		// Same stream — update timestamp and allow.
+	if ss.active.id == streamID {
 		ss.active.lastSeen = now
-		return true
+		if !ss.draining {
+			return Deliver
+		}
+		m.enqueueLocked(slot, ss.active, packet, end)
+		return Queued
 	}
 
-	// Different stream — check for timeout on the active call.
 	if now.Sub(ss.active.lastSeen) > m.timeout {
 		slog.Info("timeslot call timed out, reclaiming slot",
 			"slot", slot,
-			"oldStream", ss.active.streamID, "oldNetwork", ss.active.network,
+			"oldStream", ss.active.id, "oldNetwork", ss.active.network,
 			"newStream", streamID, "newNetwork", network,
 			"pendingDiscarded", len(ss.pending))
 		if m.metrics != nil {
 			m.metrics.TimeslotTimeouts.WithLabelValues(slotLabel(slot), m.direction).Inc()
 		}
-		// Discard stale pending streams and the timed-out active call.
 		ss.pending = nil
-		ss.active = &activeCall{
-			streamID: streamID,
-			network:  network,
-			lastSeen: now,
-		}
-		return true
+		ss.draining = false
+		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
+		return Deliver
 	}
 
-	// Slot is busy — buffer the packet in a pending stream.
 	ps := ss.findPending(streamID)
 	if ps == nil {
-		ps = &pendingStream{
-			streamID: streamID,
-			network:  network,
-		}
+		ps = &stream{id: streamID, network: network, sink: sink}
 		ss.pending = append(ss.pending, ps)
 		slog.Debug("timeslot busy, buffering new stream",
-			"slot", slot, "activeStream", ss.active.streamID,
+			"slot", slot, "activeStream", ss.active.id,
 			"pendingStream", streamID, "network", network)
 	}
-	ps.packets = append(ps.packets, packet)
+	ps.lastSeen = now
+	m.enqueueLocked(slot, ps, packet, end)
+	return Queued
+}
+
+func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) {
+	s.queue = append(s.queue, entry{packet: packet, end: end})
 	if m.metrics != nil {
 		m.metrics.TimeslotPacketsBuffered.WithLabelValues(slotLabel(slot), m.direction).Inc()
 	}
-	return false
 }
 
 // Release frees a timeslot if it is currently held by the given stream.
-// If pending streams are queued, the first one becomes active and its
-// buffered packets are returned for immediate delivery by the caller.
-// Returns nil when no pending streams exist.
-func (m *Manager) Release(slot bool, streamID uint) []any {
+// If calls are waiting, the oldest one becomes active and its buffered
+// packets are delivered through its own sink, followed by any later
+// calls that are complete in the buffer.
+func (m *Manager) Release(slot bool, streamID uint) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	idx := slotIndex(slot)
-	ss := m.slots[idx]
-	if ss == nil || ss.active == nil || ss.active.streamID != streamID {
-		return nil
+	ss := &m.slots[slotIndex(slot)]
+	if ss.active == nil || ss.active.id != streamID || ss.draining {
+		m.mu.Unlock()
+		return
 	}
-
 	slog.Debug("timeslot released",
 		"slot", slot, "streamID", streamID, "network", ss.active.network,
 		"pendingCount", len(ss.pending))
+	replay := m.advanceLocked(slot, ss)
+	m.mu.Unlock()
+	if replay {
+		m.replay(slot)
+	}
+}
 
+// advanceLocked ends the active call and promotes the oldest pending
+// call. It returns true when the promoted call has packets to replay.
+func (m *Manager) advanceLocked(slot bool, ss *slotState) bool {
+	ss.draining = false
 	if len(ss.pending) == 0 {
-		// No pending streams — slot is free.
 		ss.active = nil
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(0)
 		}
-		return nil
+		return false
 	}
-
-	// Activate the first pending stream.
 	next := ss.pending[0]
+	ss.pending[0] = nil
 	ss.pending = ss.pending[1:]
-	ss.active = &activeCall{
-		streamID: next.streamID,
-		network:  next.network,
-		lastSeen: time.Now(),
-	}
+	next.lastSeen = time.Now()
+	ss.active = next
 	slog.Debug("timeslot activating pending stream",
-		"slot", slot, "streamID", next.streamID, "network", next.network,
-		"bufferedPackets", len(next.packets))
-	return next.packets
+		"slot", slot, "streamID", next.id, "network", next.network,
+		"bufferedPackets", len(next.queue))
+	ss.draining = len(next.queue) > 0
+	return ss.draining
+}
+
+// replay delivers the active stream's queued packets in order. Packets
+// that arrive for the stream during the replay join its queue, so they
+// are delivered after the older ones. When a queued packet ends the
+// call, the next pending call is promoted and replayed in turn.
+func (m *Manager) replay(slot bool) {
+	ss := &m.slots[slotIndex(slot)]
+	for {
+		m.mu.Lock()
+		s := ss.active
+		if s == nil || !ss.draining || len(s.queue) == 0 {
+			ss.draining = false
+			m.mu.Unlock()
+			return
+		}
+		e := s.queue[0]
+		s.queue[0] = entry{}
+		s.queue = s.queue[1:]
+		s.lastSeen = time.Now()
+		m.mu.Unlock()
+
+		if s.sink != nil {
+			s.sink(e.packet)
+		}
+
+		if e.end {
+			m.mu.Lock()
+			if ss.active == s {
+				m.advanceLocked(slot, ss)
+			}
+			m.mu.Unlock()
+		}
+	}
 }
