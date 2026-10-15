@@ -83,7 +83,15 @@ var (
 	ipscVersion = []byte{0x04, 0x02, 0x04, 0x01}
 )
 
-var ErrPacketIgnored = errors.New("packet ignored")
+var (
+	ErrPacketIgnored    = errors.New("packet ignored")
+	ErrUnregisteredPeer = errors.New("peer is not registered")
+	ErrTooManyPeers     = errors.New("too many registered peers")
+)
+
+// maxPeers bounds the peer map so registrations with random peer IDs cannot
+// grow it without limit. Motorola IPSC networks allow at most 15 peers.
+const maxPeers = 64
 
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 	// Decode the auth key from hex string to raw bytes.
@@ -332,7 +340,9 @@ func (s *IPSCServer) handleMasterRegisterRequest(data []byte, addr *net.UDPAddr)
 		copy(flags[:], data[6:10])
 	}
 
-	s.upsertPeer(peerID, addr, mode, flags)
+	if err := s.upsertPeer(peerID, addr, mode, flags); err != nil {
+		return err
+	}
 
 	packet := &Packet{data: s.buildMasterRegisterReply()}
 	if err := s.sendPacket(packet, addr); err != nil {
@@ -348,7 +358,9 @@ func (s *IPSCServer) handleMasterAliveRequest(data []byte, addr *net.UDPAddr) er
 		return err
 	}
 
-	s.markPeerAlive(peerID, addr)
+	if !s.markPeerAlive(peerID) {
+		return fmt.Errorf("keepalive from peer %d: %w", peerID, ErrUnregisteredPeer)
+	}
 
 	packet := &Packet{data: s.buildMasterAliveReply()}
 	if err := s.sendPacket(packet, addr); err != nil {
@@ -359,8 +371,12 @@ func (s *IPSCServer) handleMasterAliveRequest(data []byte, addr *net.UDPAddr) er
 }
 
 func (s *IPSCServer) handlePeerListRequest(data []byte, addr *net.UDPAddr) error {
-	if _, err := parsePeerID(data); err != nil {
+	peerID, err := parsePeerID(data)
+	if err != nil {
 		return err
+	}
+	if !s.isRegistered(peerID) {
+		return fmt.Errorf("peer list request from peer %d: %w", peerID, ErrUnregisteredPeer)
 	}
 
 	packet := &Packet{data: s.buildPeerListReply()}
@@ -377,7 +393,9 @@ func (s *IPSCServer) handleRepeaterWakeUp(data []byte, addr *net.UDPAddr) error 
 		return err
 	}
 
-	s.markPeerAlive(peerID, addr)
+	if !s.markPeerAlive(peerID) {
+		return fmt.Errorf("wake-up from peer %d: %w", peerID, ErrUnregisteredPeer)
+	}
 	slog.Debug("repeater wake-up packet received", "peer", addr, "peerID", peerID, "length", len(data))
 	return nil
 }
@@ -388,7 +406,9 @@ func (s *IPSCServer) handleUserPacket(packetType PacketType, data []byte, addr *
 		return err
 	}
 
-	s.markPeerAlive(peerID, addr)
+	if !s.markPeerAlive(peerID) {
+		return fmt.Errorf("user packet from peer %d: %w", peerID, ErrUnregisteredPeer)
+	}
 	slog.Debug("IPSC burst received", "peer", addr, "peerID", peerID, "packetType", byte(packetType), "length", len(data))
 	if s.burstHandler != nil {
 		packetCopy := make([]byte, len(data))
@@ -406,12 +426,15 @@ func (s *IPSCServer) SetBurstHandler(handler func(packetType byte, data []byte, 
 	s.burstHandler = handler
 }
 
-func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, flags [4]byte) {
+func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, flags [4]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	peer, ok := s.peers[peerID]
 	if !ok {
+		if len(s.peers) >= maxPeers {
+			return fmt.Errorf("registration from peer %d: %w", peerID, ErrTooManyPeers)
+		}
 		peer = &Peer{ID: peerID}
 		s.peers[peerID] = peer
 	}
@@ -421,6 +444,7 @@ func (s *IPSCServer) upsertPeer(peerID uint32, addr *net.UDPAddr, mode byte, fla
 	peer.LastSeen = time.Now()
 	peer.RegistrationStatus = true
 	s.updatePeersGaugeLocked()
+	return nil
 }
 
 // updatePeersGaugeLocked sets the registered-peers gauge. s.mu must be held.
@@ -437,19 +461,26 @@ func (s *IPSCServer) updatePeersGaugeLocked() {
 	s.metrics.IPSCPeersRegistered.Set(float64(registered))
 }
 
-func (s *IPSCServer) markPeerAlive(peerID uint32, addr *net.UDPAddr) {
+// markPeerAlive records activity from a registered peer. It returns false,
+// and changes nothing, when the peer has not registered.
+func (s *IPSCServer) markPeerAlive(peerID uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	peer, ok := s.peers[peerID]
-	if !ok {
-		peer = &Peer{ID: peerID}
-		s.peers[peerID] = peer
+	if !ok || !peer.RegistrationStatus {
+		return false
 	}
-	peer.Addr = cloneUDPAddr(addr)
 	peer.LastSeen = time.Now()
 	peer.KeepAliveReceived++
-	s.updatePeersGaugeLocked()
+	return true
+}
+
+func (s *IPSCServer) isRegistered(peerID uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	peer, ok := s.peers[peerID]
+	return ok && peer.RegistrationStatus
 }
 
 func (s *IPSCServer) buildMasterRegisterReply() []byte {
@@ -619,7 +650,7 @@ func (s *IPSCServer) SendUserPacket(data []byte) {
 	s.mu.RLock()
 	peers := make([]*Peer, 0, len(s.peers))
 	for _, peer := range s.peers {
-		if peer.Addr != nil {
+		if peer.RegistrationStatus && peer.Addr != nil {
 			peers = append(peers, peer)
 		}
 	}
