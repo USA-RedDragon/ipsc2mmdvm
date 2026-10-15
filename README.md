@@ -212,6 +212,12 @@ sudo systemctl status ipsc2mmdvm
 sudo journalctl -u ipsc2mmdvm -f
 ```
 
+## Runtime Behavior
+
+- **Masters.** ipsc2mmdvm starts even if a master is down or its host name does not resolve yet. It tries to connect and log in again every keepalive interval (5 seconds) until the master answers. Only a malformed `master-server` value stops startup.
+- **Traffic to a master.** ipsc2mmdvm sends voice and data to a master only while it is logged in to that master. Traffic for a master that is not logged in is dropped, as DMRGateway does.
+- **Repeater registration.** The repeater must register with ipsc2mmdvm (IPSC master register request, `0x90`) before it gets any traffic. ipsc2mmdvm ignores keepalives and voice from a repeater that has not registered. A repeater that sends nothing for 120 seconds is removed and must register again.
+
 ## Configuration Reference
 
 Settings can be given in the config file, as environment variables, or as command-line flags.
