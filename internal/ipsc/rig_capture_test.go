@@ -88,3 +88,39 @@ func TestRigVoiceCallBursts(t *testing.T) {
 	t.Parallel()
 	checkRigBursts(t, translateRig(t, rigVoiceCall()), rigVoiceCallBursts())
 }
+
+// TestRigLateEntryHeader uses a voice header the XPR 8400 built from the
+// embedded LC of a TS2 group call from 3191868 to 91 that it joined late:
+// the LC octets with zero RS parity. The header sent to MMDVM must carry
+// that LC with valid parity, the same burst dmrgo encodes for the call.
+func TestRigLateEntryHeader(t *testing.T) {
+	t.Parallel()
+	got := translateRig(t, []string{
+		"800004ce2e4130b43c00005b0200007f1d2080dd1b0e75c81ced00000000018000081000006000000000005b30b43c000000",
+	})
+	want, err := hex.DecodeString("00790b8215400f70752005605c4dff57d75df5d361001678387037202f019f8273")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].DMRData != [33]byte(want) {
+		t.Fatalf("got %d packets %+v, want one with burst %x", len(got), got, want)
+	}
+}
+
+func TestLateEntryLCRejectsMismatch(t *testing.T) {
+	t.Parallel()
+	payload := [12]byte{0, 0, 0, 0, 0, 91, 0x30, 0xb4, 0x3c}
+	if _, ok := lateEntryLC(payload, 3191868, 91, true); !ok {
+		t.Fatal("matching LC rejected")
+	}
+	if _, ok := lateEntryLC(payload, 3191868, 92, true); ok {
+		t.Fatal("LC for another destination accepted")
+	}
+	if _, ok := lateEntryLC(payload, 3191868, 91, false); ok {
+		t.Fatal("group LC accepted for a private call")
+	}
+	payload[11] = 1
+	if _, ok := lateEntryLC(payload, 3191868, 91, true); ok {
+		t.Fatal("LC with nonzero parity accepted")
+	}
+}

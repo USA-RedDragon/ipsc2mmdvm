@@ -967,9 +967,13 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	// valid, so flags such as emergency, privacy, and the protect flag survive.
 	if (dataType == enums.DataTypeVoiceLCHeader || dataType == enums.DataTypeTerminatorWithLC) &&
 		!layer2.MMDVMHostAccepts(dataType, lcBytes) {
-		slog.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
-			"dtype", dataType.String())
-		lcBytes = constructFullLC(src, dst, groupCall, dataType)
+		if lc, ok := lateEntryLC(lcBytes, src, dst, groupCall); ok {
+			lcBytes = fullLCCodeword(lc, dataType)
+		} else {
+			slog.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
+				"dtype", dataType.String())
+			lcBytes = constructFullLC(src, dst, groupCall, dataType)
+		}
 	}
 	if dataType == enums.DataTypeVoiceLCHeader {
 		rss.headerLC, rss.hasLC = lcBytes, true
@@ -983,6 +987,27 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	pkt.DMRData = dmrData
 
 	return pkt
+}
+
+// lateEntryLC returns the LC of a voice header that a MOTOTRBO repeater
+// built from the embedded LC of a call it joined late. Such a header carries
+// the 9 LC octets with zero RS(12,9) parity (and 0x10 0x00 in bytes 34-35
+// instead of 0x80 0x0A). The LC is used when its call type and addresses
+// match the IPSC header, so its feature set ID and service options survive.
+func lateEntryLC(payload [12]byte, src, dst uint, groupCall bool) (pdu.LCBytes, bool) {
+	if payload[9] != 0 || payload[10] != 0 || payload[11] != 0 {
+		return pdu.LCBytes{}, false
+	}
+	lc := pdu.LCBytes(payload[:9])
+	flco := enums.FLCOUnitToUnitVoiceChannelUser
+	if groupCall {
+		flco = enums.FLCOGroupVoiceChannelUser
+	}
+	target, source, ok := lc.Addresses()
+	if !ok || lc.FLCO() != flco || target != lcAddress(dst) || source != lcAddress(src) {
+		return pdu.LCBytes{}, false
+	}
+	return lc, true
 }
 
 // buildMMDVMVoiceBurst builds MMDVM DMRD packets from an IPSC voice burst.
