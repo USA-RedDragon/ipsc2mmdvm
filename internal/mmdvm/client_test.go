@@ -67,7 +67,7 @@ func newTestClient(t *testing.T) *MMDVMClient {
 	client := &MMDVMClient{
 		cfg:        cfg,
 		connTX:     make(chan []byte, 16),
-		connRX:     make(chan []byte, 16),
+		connRX:     make(chan rxPacket, 16),
 		tx_chan:    make(chan proto.Packet, 16),
 		done:       make(chan struct{}),
 		translator: translator,
@@ -489,7 +489,7 @@ func TestRxReceivesData(t *testing.T) {
 
 	client.started.Store(true)
 	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop)
+	go client.rx(client.conn, client.connStop, client.connGen.Load())
 
 	// Send a probe from the client so the server knows its address
 	client.connMu.Lock()
@@ -507,9 +507,9 @@ func TestRxReceivesData(t *testing.T) {
 	}
 
 	select {
-	case data := <-client.connRX:
-		if string(data) != "FROM_SERVER" {
-			t.Fatalf("expected FROM_SERVER, got %q", data)
+	case pkt := <-client.connRX:
+		if string(pkt.data) != "FROM_SERVER" || pkt.gen != client.connGen.Load() {
+			t.Fatalf("expected FROM_SERVER, got %q (generation %d)", pkt.data, pkt.gen)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for rx data")
@@ -527,7 +527,7 @@ func TestRxStopsOnConnClose(t *testing.T) {
 
 	client.started.Store(false) // simulate not started → will exit on read error
 	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop)
+	go client.rx(client.conn, client.connStop, client.connGen.Load())
 
 	client.conn.Close()
 	client.wg.Wait()
@@ -544,7 +544,7 @@ func TestHandlerIdleState(t *testing.T) {
 	go client.handler()
 
 	// Send data while in IDLE — should just log, not crash
-	client.connRX <- []byte("MSTACK__random12")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("MSTACK__random12")}
 
 	// Give handler time to process
 	time.Sleep(50 * time.Millisecond)
@@ -563,7 +563,7 @@ func TestHandlerSentLoginMSTACK(t *testing.T) {
 
 	// Simulate RPTACK response with random suffix (last 4 bytes used)
 	resp := append([]byte("RPTACK"), []byte("12345678")...)
-	client.connRX <- resp
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: resp}
 
 	// Should transition to SENT_AUTH and send RPTK
 	select {
@@ -591,7 +591,7 @@ func TestHandlerSentLoginRejected(t *testing.T) {
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_LOGIN)
 
-	client.handleState([]byte("RPTNAK__________"))
+	client.handleState(client.connGen.Load(), []byte("RPTNAK__________"))
 	if len(client.connTX) != 0 {
 		t.Fatal("expected no immediate resend after rejection")
 	}
@@ -612,7 +612,7 @@ func TestHandlerSentAuthMSTACK(t *testing.T) {
 	go client.handler()
 
 	// RPTACK means auth accepted
-	client.connRX <- []byte("RPTACK__________")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTACK__________")}
 
 	// Should send RPTC
 	select {
@@ -641,7 +641,7 @@ func TestHandlerSentAuthMSTNAK(t *testing.T) {
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_AUTH)
 
-	client.handleState([]byte(testMSTNAK))
+	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
 	if st := client.currentState(); st != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
 	}
@@ -690,7 +690,7 @@ func TestHandlerSentRPTCAccepted(t *testing.T) {
 	go client.handler()
 
 	// RPTACK means config accepted
-	client.connRX <- []byte("RPTACK__________")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTACK__________")}
 
 	// Should transition to STATE_READY and start ping (which sends RPTPING)
 	select {
@@ -718,7 +718,7 @@ func TestHandlerSentRPTCRejected(t *testing.T) {
 	client.timeout = time.Hour
 	client.setState(STATE_SENT_RPTC)
 
-	client.handleState([]byte(testMSTNAK))
+	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
 	if st := client.currentState(); st != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN after config rejection, got %d", st)
 	}
@@ -737,7 +737,7 @@ func TestHandlerReadyMSTNAKLogsInAgain(t *testing.T) {
 	client.timeout = time.Hour
 	client.setState(STATE_READY)
 
-	client.handleState([]byte(testMSTNAK))
+	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
 	if st := client.currentState(); st != STATE_SENT_LOGIN {
 		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
 	}
@@ -759,7 +759,7 @@ func TestHandlerMSTCLReconnects(t *testing.T) {
 		oldConn := client.conn
 
 		client.keepAlive = time.Second
-		client.handleState(append([]byte(packetTypeMstcl), 0, 4, 0xC2, 0x34))
+		client.handleState(client.connGen.Load(), append([]byte(packetTypeMstcl), 0, 4, 0xC2, 0x34))
 
 		if got := client.currentState(); got != STATE_TIMEOUT {
 			t.Fatalf("state %d: expected STATE_TIMEOUT, got %d", st, got)
@@ -793,7 +793,7 @@ func TestRxHandlesPongWithoutHandler(t *testing.T) {
 	client.metrics = metrics.NewMetrics()
 	client.lastPingSent.Store(time.Now().UnixNano())
 	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop)
+	go client.rx(client.conn, client.connStop, client.connGen.Load())
 
 	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
 		t.Fatalf("probe write: %v", err)
@@ -820,7 +820,7 @@ func TestHandlerReadyRPTSBKN(t *testing.T) {
 	go client.handler()
 
 	// Should just log, not crash
-	client.connRX <- []byte("RPTSBKN_________")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTSBKN_________")}
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -863,7 +863,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 		StreamID:    0x5555,
 	}
 	encoded := pkt.Encode()
-	client.connRX <- encoded
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encoded}
 
 	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
 		mu.Lock()
@@ -909,7 +909,7 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 		DTypeOrVSeq: 1,
 		StreamID:    0x6666,
 	}
-	client.connRX <- pkt.Encode()
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: pkt.Encode()}
 
 	// Should not panic
 	time.Sleep(50 * time.Millisecond)
@@ -927,7 +927,7 @@ func TestHandlerReadyDMRDInvalidPacket(t *testing.T) {
 	go client.handler()
 
 	// Send "DMRD" prefix but too short to decode
-	client.connRX <- []byte("DMRD_short")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("DMRD_short")}
 
 	// Should log error, not crash
 	time.Sleep(50 * time.Millisecond)
@@ -944,7 +944,7 @@ func TestHandlerReadyUnknownPacket(t *testing.T) {
 	client.wg.Add(1)
 	go client.handler()
 
-	client.connRX <- []byte("UNKN_some_data__")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("UNKN_some_data__")}
 
 	// Should just log, not crash
 	time.Sleep(50 * time.Millisecond)
@@ -961,7 +961,7 @@ func TestHandlerTimeoutState(t *testing.T) {
 	client.wg.Add(1)
 	go client.handler()
 
-	client.connRX <- []byte("MSTACK__________")
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("MSTACK__________")}
 
 	// Should just log, not crash or transition
 	time.Sleep(50 * time.Millisecond)
@@ -1375,7 +1375,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	client.wg.Add(4)
 	go client.handler()
-	go client.rx(client.conn, client.connStop)
+	go client.rx(client.conn, client.connStop, client.connGen.Load())
 	go client.tx()
 	go client.forwardTX()
 
@@ -1978,7 +1978,7 @@ func TestHandshakeRejectionDoesNotBlockHandler(t *testing.T) {
 		client := newTestClient(t)
 		client.state.Store(uint32(tc.st))
 		start := time.Now()
-		client.handleState([]byte(tc.data))
+		client.handleState(client.connGen.Load(), []byte(tc.data))
 		if d := time.Since(start); d > 200*time.Millisecond {
 			t.Fatalf("state %d: handling %q blocked for %v", tc.st, tc.data[:6], d)
 		}
@@ -2160,7 +2160,7 @@ func TestReconnectDiscardsPacketsFromOldConnection(t *testing.T) {
 	serverConn, client := udpPair(t)
 	client.timeout = time.Hour
 	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop)
+	go client.rx(client.conn, client.connStop, client.connGen.Load())
 
 	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
 		t.Fatalf("probe write: %v", err)
@@ -2181,6 +2181,40 @@ func TestReconnectDiscardsPacketsFromOldConnection(t *testing.T) {
 	waitFor(t, time.Second, "old rx to give up", func() bool { return !client.rxWaiting.Load() })
 	if n := len(client.connRX); n != 0 {
 		t.Fatalf("expected no stale packets queued after reconnect, got %d", n)
+	}
+	client.Stop()
+}
+
+func TestPacketQueuedDuringReconnectDoesNotReachNewSession(t *testing.T) {
+	t.Parallel()
+	serverConn, client := udpPair(t)
+	defer serverConn.Close()
+	client.keepAlive = time.Second
+	client.timeout = time.Hour
+	client.wg.Add(1)
+	go client.handler()
+
+	oldGen := client.connGen.Load()
+	client.sessMu.Lock()
+	client.reconnect()
+	client.sessMu.Unlock()
+	client.tick(time.Now().Add(client.keepAlive))
+	if data := <-client.connTX; string(data[:4]) != tagRPTL {
+		t.Fatalf("expected RPTL on the new connection, got %q", data[:4])
+	}
+
+	// An rx for the old connection that passed its stop check before
+	// reconnect closed it, and sent after the drain.
+	client.connRX <- rxPacket{gen: oldGen, data: []byte("RPTACK\x01\x02\x03\x04")}
+	client.connRX <- rxPacket{gen: oldGen, data: []byte(testMSTCL)}
+	waitFor(t, time.Second, "handler to drain", func() bool { return len(client.connRX) == 0 })
+	time.Sleep(20 * time.Millisecond)
+
+	if st := client.currentState(); st != STATE_SENT_LOGIN {
+		t.Fatalf("a packet from the old connection moved the new session to state %d", st)
+	}
+	if client.conn == nil {
+		t.Fatal("a packet from the old connection closed the new one")
 	}
 	client.Stop()
 }
@@ -2289,7 +2323,7 @@ func TestStopReturnsWhileIPSCHandlerBlocks(t *testing.T) {
 	})
 	client.wg.Add(1)
 	go client.handler()
-	client.connRX <- dmrd(1)
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: dmrd(1)}
 	<-entered
 
 	stopped := make(chan struct{})

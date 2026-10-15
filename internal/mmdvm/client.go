@@ -32,7 +32,8 @@ type MMDVMClient struct {
 	connStop     chan struct{} // closed when conn is replaced
 	state        atomic.Uint32
 	stateSince   atomic.Int64 // UnixNano of the last state change
-	connRX       chan []byte
+	connRX       chan rxPacket
+	connGen      atomic.Uint64 // bumped whenever conn is closed or replaced
 	connTX       chan []byte
 	keepAlive    time.Duration
 	timeout      time.Duration
@@ -60,6 +61,12 @@ type MMDVMClient struct {
 	// direction. inboundTSMgr is per-client for the IPSC→MMDVM direction.
 	outboundTSMgr *timeslot.Manager
 	inboundTSMgr  *timeslot.Manager
+}
+
+// rxPacket is a datagram read from the connection of generation gen.
+type rxPacket struct {
+	gen  uint64
+	data []byte
 }
 
 type state uint8
@@ -96,7 +103,7 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		metrics:      m,
 		done:         make(chan struct{}),
 		tx_chan:      tx_chan,
-		connRX:       make(chan []byte, 16),
+		connRX:       make(chan rxPacket, 16),
 		connTX:       make(chan []byte, 16),
 		keepAlive:    5 * time.Second,
 		timeout:      15 * time.Second,
@@ -271,6 +278,7 @@ func (h *MMDVMClient) connect() (net.Conn, error) {
 	}
 	h.conn = conn
 	h.connStop = make(chan struct{})
+	h.connGen.Add(1)
 	return conn, nil
 }
 
@@ -282,13 +290,14 @@ func (h *MMDVMClient) handler() {
 	defer h.wg.Done()
 	for {
 		select {
-		case data := <-h.connRX:
+		case pkt := <-h.connRX:
+			data := pkt.data
 			slog.Debug("received packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
 			if len(data) < 4 {
 				slog.Warn("Ignoring short packet from MMDVM server", "network", h.cfg.Name, "length", len(data))
 				continue
 			}
-			h.handleState(data)
+			h.handleState(pkt.gen, data)
 		case <-h.done:
 			return
 		}
@@ -306,19 +315,33 @@ func (h *MMDVMClient) setState(s state) {
 	h.state.Store(uint32(s))
 }
 
-func (h *MMDVMClient) handleState(data []byte) {
+// handleState handles a packet read from the connection of generation gen.
+// A packet from a connection that has since been closed is dropped, so it
+// cannot act on the session that replaced it.
+func (h *MMDVMClient) handleState(gen uint64, data []byte) {
 	h.sessMu.Lock()
+	if gen != h.connGen.Load() {
+		h.sessMu.Unlock()
+		slog.Debug("Dropping packet from a closed connection", "network", h.cfg.Name)
+		return
+	}
+	if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
+		defer h.sessMu.Unlock()
+		slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
+		h.reconnect()
+		return
+	}
 	if h.currentState() == STATE_READY {
+		if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+			defer h.sessMu.Unlock()
+			h.relogin()
+			return
+		}
 		h.sessMu.Unlock()
 		h.handleReady(data)
 		return
 	}
 	defer h.sessMu.Unlock()
-	if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
-		slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
-		h.reconnect()
-		return
-	}
 	switch h.currentState() {
 	case STATE_IDLE:
 		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
@@ -383,17 +406,6 @@ func (h *MMDVMClient) handleSentRPTC(data []byte) {
 
 func (h *MMDVMClient) handleReady(data []byte) {
 	switch string(data[:4]) {
-	case "MSTN":
-		if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
-			h.relogin()
-		}
-	case "MSTC":
-		if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
-			slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
-			h.sessMu.Lock()
-			h.reconnect()
-			h.sessMu.Unlock()
-		}
 	case "RPTS":
 		if len(data) >= 7 && string(data[:7]) == "RPTSBKN" {
 			slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
@@ -502,13 +514,8 @@ func (h *MMDVMClient) resend(st state) {
 // relogin restarts the handshake on the current connection after the
 // master rejected an established session. The RPTL goes out with the
 // next handshake resend, not at once, so a master that rejects every
-// session is not flooded with logins.
+// session is not flooded with logins. Must be called with sessMu held.
 func (h *MMDVMClient) relogin() {
-	h.sessMu.Lock()
-	defer h.sessMu.Unlock()
-	if h.currentState() != STATE_READY {
-		return
-	}
 	slog.Warn("Master rejected the session, logging in again", "network", h.cfg.Name)
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
@@ -539,6 +546,7 @@ func (h *MMDVMClient) reconnect() {
 		}
 		h.conn = nil
 		close(h.connStop)
+		h.connGen.Add(1)
 	}
 	h.connMu.Unlock()
 	for len(h.connRX) > 0 {
@@ -565,9 +573,10 @@ func (h *MMDVMClient) connectAndLogin() {
 	}
 	h.connMu.Lock()
 	stop := h.connStop
+	gen := h.connGen.Load()
 	h.connMu.Unlock()
 	h.wg.Add(1)
-	go h.rx(conn, stop)
+	go h.rx(conn, stop, gen)
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
 	}
@@ -603,7 +612,7 @@ func (h *MMDVMClient) tx() {
 // rx reads from one connection until it is closed. It records when the
 // master was last heard from and handles MSTPONG itself, so keepalive does
 // not depend on the handler goroutine.
-func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}) {
+func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}, gen uint64) {
 	defer h.wg.Done()
 	for {
 		data := make([]byte, 512)
@@ -625,7 +634,7 @@ func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}) {
 			h.handlePong()
 			continue
 		}
-		if !h.deliver(data[:n], stop) {
+		if !h.deliver(rxPacket{gen: gen, data: data[:n]}, stop) {
 			return
 		}
 	}
@@ -635,15 +644,16 @@ func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}) {
 // supervise that the master is still talking to us: the handler is busy
 // (for example replaying a buffered call), and MSTPONGs queued behind this
 // packet are not lost. Returns false when the client stops or the
-// connection is replaced, so a stale packet never reaches a new session.
-func (h *MMDVMClient) deliver(data []byte, stop <-chan struct{}) bool {
+// connection is replaced. A packet can still slip into the queue while
+// the connection is replaced; handleState drops it by its generation.
+func (h *MMDVMClient) deliver(pkt rxPacket, stop <-chan struct{}) bool {
 	select {
 	case <-stop:
 		return false
 	default:
 	}
 	select {
-	case h.connRX <- data:
+	case h.connRX <- pkt:
 		return true
 	default:
 	}
@@ -653,7 +663,7 @@ func (h *MMDVMClient) deliver(data []byte, stop <-chan struct{}) bool {
 		h.rxWaiting.Store(false)
 	}()
 	select {
-	case h.connRX <- data:
+	case h.connRX <- pkt:
 		return true
 	case <-stop:
 		return false
