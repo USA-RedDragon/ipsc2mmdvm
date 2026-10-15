@@ -28,7 +28,8 @@ type MMDVMClient struct {
 	wg           sync.WaitGroup
 	tx_chan      chan proto.Packet
 	conn         net.Conn
-	connMu       sync.Mutex // protects conn
+	connMu       sync.Mutex    // protects conn and connStop
+	connStop     chan struct{} // closed when conn is replaced
 	state        atomic.Uint32
 	stateSince   atomic.Int64 // UnixNano of the last state change
 	connRX       chan []byte
@@ -264,6 +265,7 @@ func (h *MMDVMClient) connect() (net.Conn, error) {
 	default:
 	}
 	h.conn = conn
+	h.connStop = make(chan struct{})
 	return conn, nil
 }
 
@@ -512,8 +514,15 @@ func (h *MMDVMClient) reconnect() {
 			slog.Error("Error closing connection", "network", h.cfg.Name, "error", err)
 		}
 		h.conn = nil
+		close(h.connStop)
 	}
 	h.connMu.Unlock()
+	for len(h.connRX) > 0 {
+		select {
+		case <-h.connRX:
+		default:
+		}
+	}
 	h.connectAndLogin()
 }
 
@@ -531,8 +540,11 @@ func (h *MMDVMClient) connectAndLogin() {
 		}
 		return
 	}
+	h.connMu.Lock()
+	stop := h.connStop
+	h.connMu.Unlock()
 	h.wg.Add(1)
-	go h.rx(conn)
+	go h.rx(conn, stop)
 	if h.metrics != nil {
 		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
 	}
@@ -568,7 +580,7 @@ func (h *MMDVMClient) tx() {
 // rx reads from one connection until it is closed. It records when the
 // master was last heard from and handles MSTPONG itself, so keepalive does
 // not depend on the handler goroutine.
-func (h *MMDVMClient) rx(conn net.Conn) {
+func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}) {
 	defer h.wg.Done()
 	for {
 		data := make([]byte, 512)
@@ -590,7 +602,7 @@ func (h *MMDVMClient) rx(conn net.Conn) {
 			h.handlePong()
 			continue
 		}
-		if !h.deliver(data[:n]) {
+		if !h.deliver(data[:n], stop) {
 			return
 		}
 	}
@@ -599,8 +611,14 @@ func (h *MMDVMClient) rx(conn net.Conn) {
 // deliver hands a packet to the handler. While it waits, rxWaiting tells
 // supervise that the master is still talking to us: the handler is busy
 // (for example replaying a buffered call), and MSTPONGs queued behind this
-// packet are not lost. Returns false when the client stops.
-func (h *MMDVMClient) deliver(data []byte) bool {
+// packet are not lost. Returns false when the client stops or the
+// connection is replaced, so a stale packet never reaches a new session.
+func (h *MMDVMClient) deliver(data []byte, stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return false
+	default:
+	}
 	select {
 	case h.connRX <- data:
 		return true
@@ -614,6 +632,8 @@ func (h *MMDVMClient) deliver(data []byte) bool {
 	select {
 	case h.connRX <- data:
 		return true
+	case <-stop:
+		return false
 	case <-h.done:
 		return false
 	}

@@ -485,7 +485,7 @@ func TestRxReceivesData(t *testing.T) {
 
 	client.started.Store(true)
 	client.wg.Add(1)
-	go client.rx(client.conn)
+	go client.rx(client.conn, client.connStop)
 
 	// Send a probe from the client so the server knows its address
 	client.connMu.Lock()
@@ -523,7 +523,7 @@ func TestRxStopsOnConnClose(t *testing.T) {
 
 	client.started.Store(false) // simulate not started → will exit on read error
 	client.wg.Add(1)
-	go client.rx(client.conn)
+	go client.rx(client.conn, client.connStop)
 
 	client.conn.Close()
 	client.wg.Wait()
@@ -775,7 +775,7 @@ func TestRxHandlesPongWithoutHandler(t *testing.T) {
 	client.metrics = metrics.NewMetrics()
 	client.lastPingSent.Store(time.Now().UnixNano())
 	client.wg.Add(1)
-	go client.rx(client.conn)
+	go client.rx(client.conn, client.connStop)
 
 	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
 		t.Fatalf("probe write: %v", err)
@@ -1349,7 +1349,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 
 	client.wg.Add(4)
 	go client.handler()
-	go client.rx(client.conn)
+	go client.rx(client.conn, client.connStop)
 	go client.tx()
 	go client.forwardTX()
 
@@ -2125,4 +2125,34 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconnectDiscardsPacketsFromOldConnection(t *testing.T) {
+	t.Parallel()
+	serverConn, client := udpPair(t)
+	client.timeout = time.Hour
+	client.wg.Add(1)
+	go client.rx(client.conn, client.connStop)
+
+	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	_, clientAddr := readFromServer(t, serverConn, time.Second)
+	for range cap(client.connRX) + 1 {
+		if _, err := serverConn.WriteToUDP([]byte("RPTACK\x01\x02\x03\x04"), clientAddr); err != nil {
+			t.Fatalf("server write: %v", err)
+		}
+	}
+	waitFor(t, time.Second, "rx to block on a full queue", client.rxWaiting.Load)
+
+	client.sessMu.Lock()
+	client.setState(STATE_SENT_LOGIN)
+	client.reconnect()
+	client.sessMu.Unlock()
+
+	waitFor(t, time.Second, "old rx to give up", func() bool { return !client.rxWaiting.Load() })
+	if n := len(client.connRX); n != 0 {
+		t.Fatalf("expected no stale packets queued after reconnect, got %d", n)
+	}
+	client.Stop()
 }
