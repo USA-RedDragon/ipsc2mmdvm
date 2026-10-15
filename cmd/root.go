@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -67,21 +68,14 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	// Create metrics and optionally start the metrics HTTP server.
 	var m *metrics.Metrics
 	var metricsSrv *http.Server
-	if cfg.Metrics.Enabled && cfg.Metrics.Address != "" {
+	if cfg.Metrics.Enabled {
 		m = metrics.NewMetrics()
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", m.Handler())
-		metricsSrv = &http.Server{
-			Addr:              cfg.Metrics.Address,
-			Handler:           mux,
-			ReadHeaderTimeout: 10 * time.Second,
+		metricsSrv, err = startMetricsServer(ctx, cfg.Metrics.Address, mux)
+		if err != nil {
+			return err
 		}
-		go func() {
-			slog.Info("Starting metrics server", "address", cfg.Metrics.Address)
-			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("Metrics server error", "error", err)
-			}
-		}()
 	}
 
 	ipscServer := ipsc.NewIPSCServer(cfg, m)
@@ -148,4 +142,26 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	shutdown.Listen(syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 
 	return nil
+}
+
+// startMetricsServer binds addr before it returns, so a bind failure stops
+// startup, then serves handler in the background.
+func startMetricsServer(ctx context.Context, addr string, handler http.Handler) (*http.Server, error) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen for metrics on %s: %w", addr, err)
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	slog.Info("Starting metrics server", "address", ln.Addr().String())
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Metrics server error", "error", err)
+		}
+	}()
+	return srv, nil
 }
