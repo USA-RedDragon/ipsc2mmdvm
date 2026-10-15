@@ -28,6 +28,7 @@ type IPSCTranslator struct {
 	metrics        *metrics.Metrics
 	peerID         uint32
 	repeaterID     uint32
+	colorCode      enums.ColorCode
 	streams        map[uint32]*streamState
 	reverseStreams map[uint32]*reverseStreamState
 	burst          layer2.Burst // reusable burst to reduce allocations
@@ -154,6 +155,14 @@ func (t *IPSCTranslator) removeReverseStreamLocked(callControl uint32) {
 // SetMetrics configures the metrics collector for this translator.
 func (t *IPSCTranslator) SetMetrics(m *metrics.Metrics) {
 	t.metrics = m
+}
+
+// SetColorCode sets the color code of the DMR bursts built for MMDVM: the
+// slot type of data bursts and the EMB of voice bursts.
+func (t *IPSCTranslator) SetColorCode(colorCode uint8) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.colorCode = enums.ColorCode(colorCode & 0x0F)
 }
 
 // SetPeerID sets the local peer ID used in outgoing IPSC packets.
@@ -489,14 +498,17 @@ func defaultLCSS(pos int) enums.LCSS {
 }
 
 // embByte encodes the IPSC EMB byte (color code, PI, and LCSS, FEC removed)
-// that follows the embedded data in bursts B-F. It uses the burst's decoded
-// EMB when available, otherwise the LCSS for the burst position.
+// that follows the embedded data in bursts B-F. It uses the color code and
+// LCSS of the burst's decoded EMB when available, otherwise the LCSS for
+// the burst position. PI, the pre-emption and power control indicator, is
+// always clear, as in ipsc2hbpc.
 func embByte(burst *layer2.Burst, pos int) byte {
 	emb := pdu.EmbeddedSignalling{LCSS: defaultLCSS(pos)}
 	if burst.HasEmbeddedSignalling() && !burst.EmbeddedSignalling.FEC.Uncorrectable {
 		emb = burst.EmbeddedSignalling
 	}
 	info := emb.Info()
+	info.SetPI(false)
 	return byte(info)
 }
 
@@ -851,7 +863,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	}
 
 	// Build the 33-byte DMR data burst
-	dmrData, err := layer2.BuildDataBurst(lcBytes, dataType, 0, layer2.SyncSourceBS)
+	dmrData, err := layer2.BuildDataBurst(lcBytes, dataType, t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
 		slog.Debug("IPSCTranslator: cannot build data burst", "dtype", dataType.String(), "error", err)
 	}
@@ -986,18 +998,18 @@ func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 // bursts B-F from an IPSC voice burst. MOTOTRBO repeaters put the 32-bit
 // embedded fragment in bytes 52-55 and the EMB in the last byte: byte 56 of
 // the 57-byte bursts, byte 65 of the 66-byte burst E, whose bytes 56-64
-// repeat the decoded LC. The color code and PI come from the EMB. The LCSS
-// follows the burst position, as every voice superframe uses the same
-// LCSS at each position, and on a weak signal the repeater's LCSS is wrong.
+// repeat the decoded LC. The repeater's EMB byte is not used, as on a weak
+// signal it is wrong: the LCSS follows the burst position, as every voice
+// superframe uses the same LCSS at each position, the color code is our
+// own, and PI is clear, as in ipsc2hbpc.
 func (t *IPSCTranslator) populateEmbeddedSignalling(raw *layer2.RawBurst, burstIdx int, ipscData []byte) {
 	emb := pdu.EmbeddedSignalling{
-		LCSS: defaultLCSS(burstIdx),
-	}
-	if len(ipscData) == 57 || len(ipscData) == 66 {
-		info := pdu.EMBInfo(ipscData[len(ipscData)-1])
-		emb.ColorCode = info.ColorCode()
-		emb.PreemptionAndPowerControlIndicator = info.PI()
-		raw.SetEmbeddedData([4]byte(ipscData[52:56]))
+		ColorCode: t.colorCode,
+		LCSS:      defaultLCSS(burstIdx),
 	}
 	raw.SetEMB(emb)
+	if len(ipscData) != 57 && len(ipscData) != 66 {
+		return
+	}
+	raw.SetEmbeddedData([4]byte(ipscData[52:56]))
 }

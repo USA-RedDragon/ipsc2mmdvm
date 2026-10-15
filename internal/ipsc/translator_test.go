@@ -1055,17 +1055,19 @@ func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
 func TestPopulateEmbeddedSignallingContinuation(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
+	tr.SetColorCode(1)
 
 	var raw layer2.RawBurst
 
 	// Bursts C and D continue the embedded LC; F carries a single fragment.
+	// The repeater's EMB byte has color code 7, which is not used.
 	for idx, want := range map[int]enums.LCSS{
 		2: enums.LCSSContinuationFragment,
 		3: enums.LCSSContinuationFragment,
 		5: enums.LCSSSingleFragment,
 	} {
 		ipscData := make([]byte, 57)
-		ipscData[56] = 0x10 | byte(want&0x03)<<1
+		ipscData[56] = 0x70 | byte(want&0x03)<<1
 		tr.populateEmbeddedSignalling(&raw, idx, ipscData)
 		if rawEMB(t, &raw).LCSS != want {
 			t.Fatalf("burst index %d: expected LCSS %d, got %d", idx, want, rawEMB(t, &raw).LCSS)
@@ -2028,5 +2030,69 @@ func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
 		if got, _ := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypePIHeader, 1), enums.DataTypePIHeader); got != lc {
 			t.Fatalf("round trip % X: got % X", lc, got)
 		}
+	}
+}
+
+// The EMB PI bit is the pre-emption and power control indicator, which
+// ipsc2hbpc always sends clear (dmr_const.c DMR_EMB). The color code of
+// the bursts sent to MMDVM is our own, not the repeater's EMB byte, which
+// can be corrupt on a weak signal.
+func TestTranslateToMMDVMUsesOwnColorCodeAndClearPI(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	tr.SetColorCode(5)
+
+	hdr := makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false)
+	out := tr.TranslateToMMDVM(0x80, hdr)
+	if len(out) != 1 {
+		t.Fatalf("header: expected 1 packet, got %d", len(out))
+	}
+	if cc := slotTypeColorCode(out[0].DMRData); cc != 5 {
+		t.Fatalf("header slot type color code %d, want 5", cc)
+	}
+
+	a := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false)[:52]
+	a[32] = ipscVoiceCtrlSync
+	binary.BigEndian.PutUint16(a[20:22], 1)
+	tr.TranslateToMMDVM(0x80, a)
+	for _, tc := range []struct {
+		seq    uint16
+		length int
+	}{{2, 57}, {5, 66}} {
+		seq, length := tc.seq, tc.length
+		b := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false)
+		b = append(b, make([]byte, length-len(b))...)
+		binary.BigEndian.PutUint16(b[20:22], seq)
+		b[length-1] = 0xE8 // CC 14, PI set
+		out := tr.TranslateToMMDVM(0x80, b)
+		if len(out) != 1 {
+			t.Fatalf("seq %d: expected 1 packet, got %d", seq, len(out))
+		}
+		raw := layer2.RawBurst(out[0].DMRData)
+		emb := raw.EMB()
+		if emb.FEC.Uncorrectable || emb.ColorCode != 5 || emb.PreemptionAndPowerControlIndicator {
+			t.Fatalf("seq %d: EMB %s, want color code 5 and PI clear", seq, emb.String())
+		}
+	}
+}
+
+func TestTranslateToIPSCClearsPI(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	b := layer2.Burst{Kind: layer2.KindVoice}
+	b.SyncPattern = enums.SyncNone
+	b.EmbeddedSignalling = pdu.EmbeddedSignalling{ColorCode: 2, PreemptionAndPowerControlIndicator: true, LCSS: enums.LCSSFirstFragment}
+	p := makeTestMMDVMPacket(true, false, mmdvmFrameTypeVoice, 1)
+	encoded, err := b.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.DMRData = encoded
+	out := tr.TranslateToIPSC(p)
+	if len(out) != 1 || len(out[0]) != 57 {
+		t.Fatalf("expected one 57-byte burst, got %d", len(out))
+	}
+	if out[0][56] != 0x22 {
+		t.Fatalf("EMB byte 0x%02X, want 0x22 (color code 2, PI clear, first fragment)", out[0][56])
 	}
 }
