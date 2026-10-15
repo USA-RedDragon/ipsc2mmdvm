@@ -2,6 +2,7 @@ package ipsc
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -1832,6 +1833,61 @@ func TestTranslateToIPSCDataSlotType(t *testing.T) {
 		}
 		if out[0][51] != 0x73 {
 			t.Fatalf("slot %t: slot type byte 0x%02X, want 0x73 (CC 7, CSBK)", slot, out[0][51])
+		}
+	}
+}
+
+func mustBurst(t *testing.T, h string) [33]byte {
+	t.Helper()
+	raw, err := hex.DecodeString(h)
+	if err != nil || len(raw) != 33 {
+		t.Fatalf("bad burst hex %q", h)
+	}
+	var b [33]byte
+	copy(b[:], raw)
+	return b
+}
+
+func TestDecodeBPTCPayloadRealBursts(t *testing.T) {
+	t.Parallel()
+	// Over-the-air bursts from an MMDVM DMRD stream. The decoded payloads are
+	// checked by their own CRC, not by re-encoding.
+	csbk := mustBurst(t, "53df0a83b7a8282c2509625014fdff57d75df5dcadde429028c87ae3341e24191c")
+	got, ok := decodeBPTCPayload(csbk)
+	want := [12]byte{0xbd, 0x00, 0x80, 0x1d, 0x23, 0x38, 0x63, 0x23, 0x38, 0x3b, 0x58, 0x89}
+	if !ok || got != want {
+		t.Fatalf("CSBK preamble: got % X (ok=%t), want % X", got, ok, want)
+	}
+	if !layer2.MMDVMHostAccepts(enums.DataTypeCSBK, got) {
+		t.Fatalf("CSBK CRC mismatch: % X", got)
+	}
+
+	// A single bit error in each half is corrected.
+	damaged := csbk
+	damaged[3] ^= 0x10
+	damaged[30] ^= 0x02
+	if got, ok := decodeBPTCPayload(damaged); !ok || got != want {
+		t.Fatalf("damaged CSBK: got % X (ok=%t)", got, ok)
+	}
+}
+
+func TestBuildLCDataBurstMatchesRealBurst(t *testing.T) {
+	t.Parallel()
+	onAir := mustBurst(t, "53df0a83b7a8282c2509625014fdff57d75df5dcadde429028c87ae3341e24191c")
+	payload, _ := decodeBPTCPayload(onAir)
+	built := buildLCDataBurst(t, payload, enums.DataTypeCSBK, slotTypeColorCode(onAir))
+	bit := func(b [33]byte, i int) byte { return (b[i/8] >> (7 - i%8)) & 1 }
+	for i := 0; i < 108; i++ {
+		if bit(built, i) != bit(onAir, i) || bit(built, 156+i) != bit(onAir, 156+i) {
+			t.Fatalf("BPTC or slot type bit %d differs from the onAir burst", i)
+		}
+	}
+	for _, lc := range [][12]byte{
+		{0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x2f, 0x7c, 0xca, 0x92, 0xaf, 0x70},
+		{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+	} {
+		if got, ok := decodeBPTCPayload(buildLCDataBurst(t, lc, enums.DataTypeVoiceLCHeader, 1)); !ok || got != lc {
+			t.Fatalf("round trip % X: got % X (ok=%t)", lc, got, ok)
 		}
 	}
 }
