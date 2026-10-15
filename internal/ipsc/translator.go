@@ -62,6 +62,13 @@ const (
 	mmdvmFrameTypeDataSync  uint = 2 // Data sync (header / terminator)
 )
 
+// IPSC user packet layout limits.
+const (
+	ipscMinUserPacketLen = 31 // through the burst type byte at offset 30
+	ipscMinLCPacketLen   = 50 // through the 12-byte LC/data payload at 38-49
+	ipscMinVoicePktLen   = 52 // through the 19-byte AMBE payload at 33-51
+)
+
 // RTP timestamp increment per burst (~60ms spacing in 16.16 format)
 const rtpTimestampIncrement = 480
 
@@ -294,7 +301,6 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt mmdvm.Packet, ss *streamState, isF
 	// Bytes 38-49: Full LC data (12 bytes)
 	// Extract from the DMR burst data — the header burst carries a Voice LC Header
 	// which contains FLCO, FID, ServiceOpt, Dst, Src, CRC
-	_ = t.burst.DecodeFromBytes(pkt.DMRData)
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])
 
@@ -324,7 +330,6 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState)
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060)
 
 	// Full LC data
-	_ = t.burst.DecodeFromBytes(pkt.DMRData)
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])
 
@@ -355,7 +360,6 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	binary.BigEndian.PutUint16(buf[36:38], 0x0060) // Data size (96 bits = 12 bytes)
 
 	// Bytes 38-49: Extract data from DMR burst via BPTC decode
-	_ = t.burst.DecodeFromBytes(pkt.DMRData)
 	// Use extractFullLCBytes which constructs from packet fields
 	flcBytes := extractFullLCBytes(pkt)
 	copy(buf[38:50], flcBytes[:12])
@@ -491,7 +495,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if len(data) < 30 {
+	if len(data) < ipscMinUserPacketLen {
 		slog.Debug("IPSCTranslator: IPSC packet too short", "length", len(data))
 		return nil
 	}
@@ -542,6 +546,16 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 
 	var results []mmdvm.Packet
 
+	minLen := ipscMinLCPacketLen
+	if burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2 {
+		minLen = ipscMinVoicePktLen
+	}
+	if len(data) < minLen {
+		slog.Debug("IPSCTranslator: IPSC burst too short",
+			"burstType", fmt.Sprintf("0x%02X", burstType), "length", len(data))
+		return nil
+	}
+
 	switch burstType {
 	case ipscBurstVoiceHead:
 		// Voice LC Header — only process the first one (IPSC sends 3)
@@ -567,11 +581,6 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
-		if len(data) < 52 {
-			slog.Debug("IPSCTranslator: voice burst too short", "length", len(data))
-			return nil
-		}
-
 		pkts := t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, data)
 		results = append(results, pkts...)
 
@@ -585,7 +594,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 		// Treat any other burst type as a generic data packet if it has
 		// the same structure as a voice header (54 bytes with LC data).
 		// The burst type byte maps directly to the DMR data type.
-		if len(data) >= 50 && burstType <= 10 {
+		if burstType <= 10 {
 			pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
 				enums.DataType(burstType), data)
 			results = append(results, pkt)
@@ -635,19 +644,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 
 	// Extract payload bytes from IPSC packet (bytes 38-49 = 12 bytes)
 	var lcBytes [12]byte
-	if len(ipscData) >= 50 {
-		copy(lcBytes[:], ipscData[38:50])
-	} else {
-		// Construct from packet fields
-		lcBytes[1] = 0x00
-		lcBytes[2] = 0x20
-		lcBytes[3] = byte((dst >> 16) & 0xFF)
-		lcBytes[4] = byte((dst >> 8) & 0xFF)
-		lcBytes[5] = byte(dst & 0xFF)
-		lcBytes[6] = byte((src >> 16) & 0xFF)
-		lcBytes[7] = byte((src >> 8) & 0xFF)
-		lcBytes[8] = byte(src & 0xFF)
-	}
+	copy(lcBytes[:], ipscData[38:50])
 
 	// For voice LC headers and terminators, override the FLCO byte to match
 	// the group/private flag from the IPSC packet type.

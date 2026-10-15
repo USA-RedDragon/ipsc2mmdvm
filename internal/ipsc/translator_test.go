@@ -2,6 +2,7 @@ package ipsc
 
 import (
 	"encoding/binary"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
@@ -1087,5 +1088,137 @@ func TestPopulateEmbeddedSignallingNoEmbeddedData(t *testing.T) {
 		if b != 0 {
 			t.Fatalf("expected zero embedded data byte %d, got 0x%02X", i, b)
 		}
+	}
+}
+
+func TestTranslateToMMDVMBoundsAllLengths(t *testing.T) {
+	t.Parallel()
+	burstTypes := []byte{
+		ipscBurstVoiceHead, ipscBurstVoiceTerm, ipscBurstCSBK,
+		ipscBurstSlot1, ipscBurstSlot2, 0x00, 0x06, 0x07, 0x08, 0x09, 0x0B, 0x3F, 0xFF,
+	}
+	for _, packetType := range []byte{0x80, 0x81, 0x83, 0x84} {
+		for _, burstType := range burstTypes {
+			for n := 0; n <= 80; n++ {
+				tr := newTestTranslator(t)
+				data := make([]byte, n)
+				for i := range data {
+					data[i] = byte(i*31 + 7)
+				}
+				if n > 30 {
+					data[30] = burstType
+				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("panic for type 0x%02X burst 0x%02X len %d: %v", packetType, burstType, n, r)
+						}
+					}()
+					tr.TranslateToMMDVM(packetType, data)
+				}()
+			}
+		}
+	}
+}
+
+func TestTranslateToMMDVM30BytePacket(t *testing.T) {
+	t.Parallel()
+	tr := newTestTranslator(t)
+	data := make([]byte, 30)
+	data[0] = 0x80
+	if got := tr.TranslateToMMDVM(0x80, data); got != nil {
+		t.Fatalf("expected nil for 30-byte packet, got %d packets", len(got))
+	}
+}
+
+// reservedSlotTypeBurst returns a data burst whose slot type carries the
+// reserved data type dt.
+func reservedSlotTypeBurst(tb testing.TB, dt enums.DataType) [33]byte {
+	tb.Helper()
+	burst, err := layer2.BuildDataBurst([12]byte{}, enums.DataTypeCSBK, 0, layer2.SyncSourceBS)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	burst.SetSlotType(pdu.SlotType{DataType: dt})
+	return burst
+}
+
+func TestTranslateToIPSCReservedSlotTypeDoesNotPanic(t *testing.T) {
+	t.Parallel()
+	for dt := 12; dt < 16; dt++ {
+		burst := reservedSlotTypeBurst(t, enums.DataType(dt)) //nolint:gosec // dt is in [12,15]
+		for _, ft := range []uint{mmdvmFrameTypeVoice, mmdvmFrameTypeVoiceSync, mmdvmFrameTypeDataSync} {
+			for _, dtype := range []uint{0, 1, 2, 3, 4, 5, 6, 7, 8, 10} {
+				tr := newTestTranslator(t)
+				hdr := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 1)
+				tr.TranslateToIPSC(hdr)
+				pkt := makeTestMMDVMPacket(true, false, ft, dtype)
+				pkt.DMRData = burst
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("panic for slot type %d frameType %d dtype %d: %v", dt, ft, dtype, r)
+						}
+					}()
+					tr.TranslateToIPSC(pkt)
+				}()
+			}
+		}
+	}
+}
+
+func FuzzTranslateToMMDVM(f *testing.F) {
+	f.Add(byte(0x80), make([]byte, 30))
+	f.Add(byte(0x80), make([]byte, 31))
+	f.Add(byte(0x83), makeTestIPSCPacket(0x83, ipscBurstCSBK, true, false))
+	f.Add(byte(0x80), makeTestIPSCPacket(0x80, ipscBurstVoiceHead, true, false))
+	f.Add(byte(0x80), makeTestIPSCPacket(0x80, ipscBurstVoiceTerm, true, true))
+	f.Add(byte(0x80), append(makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false), make([]byte, 12)...))
+	f.Fuzz(func(t *testing.T, packetType byte, data []byte) {
+		tr := newTestTranslator(t)
+		for i := 0; i < 3; i++ {
+			tr.TranslateToMMDVM(packetType, data)
+		}
+	})
+}
+
+func FuzzTranslateToIPSC(f *testing.F) {
+	f.Add(uint8(1), uint8(1), true, false, make([]byte, 33))
+	f.Add(uint8(0), uint8(3), true, true, make([]byte, 33))
+	reserved := reservedSlotTypeBurst(f, enums.DataTypeReserved)
+	f.Add(uint8(0), uint8(1), true, false, reserved[:])
+	f.Add(uint8(2), uint8(3), false, false, reserved[:])
+	f.Fuzz(func(t *testing.T, frameType, dtype uint8, group, slot bool, raw []byte) {
+		tr := newTestTranslator(t)
+		pkt := makeTestMMDVMPacket(group, slot, uint(frameType%4), uint(dtype))
+		copy(pkt.DMRData[:], raw)
+		for i := 0; i < 3; i++ {
+			tr.TranslateToIPSC(pkt)
+		}
+	})
+}
+
+func TestTranslateRandomInputsDoNotPanic(t *testing.T) {
+	t.Parallel()
+	rng := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // deterministic test input
+	tr := newTestTranslator(t)
+	for i := 0; i < 20000; i++ {
+		n := rng.IntN(130)
+		data := make([]byte, n)
+		for j := range data {
+			data[j] = byte(rng.UintN(256)) //nolint:gosec // bounded
+		}
+		packetType := []byte{0x80, 0x81, 0x83, 0x84}[rng.IntN(4)]
+		if n > 30 && rng.IntN(2) == 0 {
+			data[30] = []byte{ipscBurstVoiceHead, ipscBurstVoiceTerm, ipscBurstCSBK, ipscBurstSlot1, ipscBurstSlot2}[rng.IntN(5)]
+		}
+		tr.TranslateToMMDVM(packetType, data)
+
+		pkt := makeTestMMDVMPacket(rng.IntN(2) == 0, rng.IntN(2) == 0, rng.UintN(4), rng.UintN(16))
+		pkt.StreamID = rng.UintN(8)
+		for j := range pkt.DMRData {
+			pkt.DMRData[j] = byte(rng.UintN(256)) //nolint:gosec // bounded
+		}
+		tr.TranslateToIPSC(pkt)
 	}
 }
