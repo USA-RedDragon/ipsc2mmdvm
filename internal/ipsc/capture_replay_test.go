@@ -135,15 +135,20 @@ func headerTermDataPackets(t *testing.T, group, slot bool) [][]byte {
 	return out
 }
 
-// MOTOTRBO repeaters send call priority 0x02 in byte 12 for private calls
-// too: tests/pvt_ipsc_in.txt in the ipsc2hbpc test data has 0x02 on every
-// PVT_VOICE packet.
+// MOTOTRBO repeaters send 0x02 in byte 12 of voice packets for private
+// calls too: tests/pvt_ipsc_in.txt in the ipsc2hbpc test data has 0x02 on
+// every PVT_VOICE packet. The PVT_DATA captures in node-dmr-lib
+// (examples/protocols-examples.js and the DMRPayload.js sample) have 0x01.
 func TestTranslateToIPSCCallPriority(t *testing.T) {
 	t.Parallel()
 	for _, group := range []bool{true, false} {
 		for i, p := range headerTermDataPackets(t, group, false) {
-			if p[12] != 0x02 {
-				t.Errorf("group %t packet %d: byte 12 0x%02X, want 0x02", group, i, p[12])
+			want := byte(0x02)
+			if p[0] == 0x84 {
+				want = 0x01
+			}
+			if p[12] != want {
+				t.Errorf("group %t packet %d type 0x%02X: byte 12 0x%02X, want 0x%02X", group, i, p[0], p[12], want)
 			}
 		}
 	}
