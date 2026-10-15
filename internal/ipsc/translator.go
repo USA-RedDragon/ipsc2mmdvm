@@ -318,12 +318,9 @@ func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt mmdvm.Packet, ss *strea
 	buf[10] = byte((pkt.Dst >> 8) & 0xFF)
 	buf[11] = byte(pkt.Dst & 0xFF)
 
-	// Byte 12: Call type (0x02 = group call)
-	if pkt.GroupCall {
-		buf[12] = 0x02
-	} else {
-		buf[12] = 0x01
-	}
+	// Byte 12: call priority. MOTOTRBO repeaters send 0x02 for group and
+	// private calls alike.
+	buf[12] = 0x02
 
 	// Bytes 13-16: Call control (random per-call)
 	binary.BigEndian.PutUint32(buf[13:17], ss.callControl)

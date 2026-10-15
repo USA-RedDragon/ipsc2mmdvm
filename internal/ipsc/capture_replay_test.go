@@ -4,6 +4,9 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
 // Voice calls captured from a MOTOTRBO repeater on a weak signal, taken
@@ -104,6 +107,41 @@ func TestIPSCVoiceBurstPositionsFromCapture(t *testing.T) {
 	} {
 		if got := replayBurstPositions(t, tc.packets); got != tc.want {
 			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+// headerTermDataPackets translates a voice header, terminator, and PI
+// header on the given call type and slot to IPSC.
+func headerTermDataPackets(t *testing.T, group, slot bool) [][]byte {
+	t.Helper()
+	tr := newTestTranslator(t)
+	data := makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypePIHeader))
+	data.StreamID = 0x5678
+	out := make([][]byte, 0, 5)
+	for _, p := range []mmdvm.Packet{
+		makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader)),
+		makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC)),
+		data,
+	} {
+		out = append(out, tr.TranslateToIPSC(p)...)
+	}
+	if len(out) < 3 {
+		t.Fatalf("group %t slot %t: expected at least 3 packets, got %d", group, slot, len(out))
+	}
+	return out
+}
+
+// MOTOTRBO repeaters send call priority 0x02 in byte 12 for private calls
+// too: tests/pvt_ipsc_in.txt in the ipsc2hbpc test data has 0x02 on every
+// PVT_VOICE packet.
+func TestTranslateToIPSCCallPriority(t *testing.T) {
+	t.Parallel()
+	for _, group := range []bool{true, false} {
+		for i, p := range headerTermDataPackets(t, group, false) {
+			if p[12] != 0x02 {
+				t.Errorf("group %t packet %d: byte 12 0x%02X, want 0x02", group, i, p[12])
+			}
 		}
 	}
 }
