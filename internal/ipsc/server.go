@@ -104,7 +104,9 @@ const (
 	// removed. It matches the 120 second timeout DMRlink uses as a master.
 	peerTimeout = 24 * peerKeepAliveInterval
 	// defaultPace is the minimum gap between user packets sent to one peer.
-	defaultPace = 30 * time.Millisecond
+	// Two busy timeslots need one packet every 30 ms plus repeated voice
+	// headers, so the pace must stay well under 30 ms or a queue builds.
+	defaultPace = 15 * time.Millisecond
 )
 
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
@@ -764,9 +766,8 @@ func (s *IPSCServer) SendUserPacket(ctx context.Context, data []byte) {
 func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 	s.mu.Lock()
 	for {
-		last := s.lastSend[peerID]
-		wait := s.pace - time.Since(last)
-		if last.IsZero() || wait <= 0 {
+		wait := s.claimSendLocked(peerID, time.Now())
+		if wait <= 0 {
 			break
 		}
 		s.mu.Unlock()
@@ -782,7 +783,19 @@ func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 		}
 		s.mu.Lock()
 	}
-	s.lastSend[peerID] = time.Now()
 	s.mu.Unlock()
 	return true
+}
+
+// claimSendLocked claims now as the send time for peerID and returns 0, or
+// returns how long to wait if the last send was less than s.pace ago. s.mu
+// must be held.
+func (s *IPSCServer) claimSendLocked(peerID uint32, now time.Time) time.Duration {
+	if last := s.lastSend[peerID]; !last.IsZero() {
+		if wait := s.pace - now.Sub(last); wait > 0 {
+			return wait
+		}
+	}
+	s.lastSend[peerID] = now
+	return 0
 }

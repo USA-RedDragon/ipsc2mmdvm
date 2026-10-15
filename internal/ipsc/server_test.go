@@ -1292,8 +1292,8 @@ func TestPacePeerEnforcesInterval(t *testing.T) {
 	s.pacePeer(t.Context(), 1)
 	elapsed := time.Since(start)
 
-	if elapsed < 20*time.Millisecond {
-		t.Fatalf("expected pacePeer to sleep ~30ms, only waited %v", elapsed)
+	if elapsed < s.pace*2/3 {
+		t.Fatalf("expected pacePeer to sleep %v, only waited %v", s.pace, elapsed)
 	}
 }
 
@@ -2268,5 +2268,43 @@ func TestPacePeerSpacesConcurrentSenders(t *testing.T) {
 	gap := times[0].Sub(times[1]).Abs()
 	if gap < s.pace-5*time.Millisecond {
 		t.Fatalf("two senders released %v apart, want at least %v", gap, s.pace)
+	}
+}
+
+func TestPaceDrainsTwoBusySlots(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	const (
+		frame     = 60 * time.Millisecond
+		overshoot = time.Millisecond
+	)
+	start := time.Now()
+	arrivals := make([]time.Time, 0, 606)
+	for range 3 {
+		arrivals = append(arrivals, start, start)
+	}
+	for i := range 300 {
+		at := start.Add(time.Duration(i) * frame)
+		arrivals = append(arrivals, at, at)
+	}
+	var prev time.Time
+	var lag time.Duration
+	for _, arrived := range arrivals {
+		now := arrived
+		if prev.After(now) {
+			now = prev
+		}
+		for {
+			wait := s.claimSendLocked(1, now)
+			if wait <= 0 {
+				break
+			}
+			now = now.Add(wait + overshoot)
+		}
+		prev = now
+		lag = now.Sub(arrived)
+	}
+	if lag > 2*s.pace {
+		t.Fatalf("last packet sent %v after it arrived, want at most %v", lag, 2*s.pace)
 	}
 }
