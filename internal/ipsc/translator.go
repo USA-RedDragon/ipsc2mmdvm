@@ -46,13 +46,22 @@ type streamState struct {
 	firstPacket  bool // true for the very first packet
 }
 
-// IPSC burst data type constants (byte 30 of IPSC voice packet)
+// IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
+// terminator, and data bursts carry the DMR data type (ETSI TS 102 361-1
+// 9.3.6) in this byte; voice bursts use 0x0A (TS1) and 0x8A (TS2). Rate 3/4
+// (0x08) and rate 1 (0x0A) data are not carried: rate 1 is indistinguishable
+// from a TS1 voice burst.
 const (
-	ipscBurstVoiceHead byte = 0x01
-	ipscBurstVoiceTerm byte = 0x02
-	ipscBurstCSBK      byte = 0x03
-	ipscBurstSlot1     byte = 0x0A
-	ipscBurstSlot2     byte = 0x8A
+	ipscBurstPIHeader        byte = 0x00
+	ipscBurstVoiceHead       byte = 0x01
+	ipscBurstVoiceTerm       byte = 0x02
+	ipscBurstCSBK            byte = 0x03
+	ipscBurstMBCHeader       byte = 0x04
+	ipscBurstMBCContinuation byte = 0x05
+	ipscBurstDataHeader      byte = 0x06
+	ipscBurstRate12          byte = 0x07
+	ipscBurstSlot1           byte = 0x0A
+	ipscBurstSlot2           byte = 0x8A
 )
 
 // MMDVM FrameType values (bits 2-3 of DMRD byte 15)
@@ -153,8 +162,13 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) [][]byte {
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
 			enums.DataTypeRate34, enums.DataTypeRate1,
 			enums.DataTypeMBCHeader, enums.DataTypeMBCContinuation:
-			// Data packet — build IPSC data packet
-			data := t.buildIPSCDataPacket(pkt, ss, enums.DataType(dtypeOrVSeq))
+			burstType, ok := ipscDataBurstType(enums.DataType(dtypeOrVSeq))
+			if !ok {
+				slog.Debug("IPSCTranslator: dropping data burst with no verified IPSC encoding",
+					"dtype", enums.DataType(dtypeOrVSeq).String())
+				return nil
+			}
+			data := t.buildIPSCDataPacket(pkt, ss, burstType)
 			results = append(results, data)
 			ss.firstPacket = false
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
@@ -339,7 +353,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState)
 
 // buildIPSCDataPacket builds a 54-byte IPSC data packet for CSBK, Data Header, etc.
 // The structure is identical to voice header/terminator but with data packet types (0x83/0x84).
-func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, dataType enums.DataType) []byte {
+func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, burstType byte) []byte {
 	buf := make([]byte, 54)
 
 	t.buildIPSCHeader(buf, pkt, ss, false, true)
@@ -348,8 +362,8 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	t.buildRTPHeader(buf, ss, ss.firstPacket, 0x5D)
 
 	// RTP Payload — data burst
-	buf[30] = byte(dataType) // Burst type = DMR data type (e.g. 0x03 for CSBK)
-	buf[31] = 0xC0           // RSSI threshold / parity
+	buf[30] = burstType
+	buf[31] = 0xC0 // RSSI threshold / parity
 	binary.BigEndian.PutUint16(buf[32:34], 0x000A)
 	buf[34] = 0x80 // RSSI status
 	if pkt.Slot {
@@ -367,6 +381,33 @@ func (t *IPSCTranslator) buildIPSCDataPacket(pkt mmdvm.Packet, ss *streamState, 
 	// Bytes 50-53: trailing (zeros)
 	ss.ipscSeq++
 	return buf
+}
+
+// ipscDataBurstType maps a DMR data type to its IPSC burst type byte. It
+// reports false for data types that IPSC cannot carry: rate 3/4 and rate 1
+// payloads do not fit the verified 12-byte layout, and rate 1 (0x0A) would
+// read as a TS1 voice burst.
+func ipscDataBurstType(dataType enums.DataType) (byte, bool) {
+	switch dataType {
+	case enums.DataTypePIHeader:
+		return ipscBurstPIHeader, true
+	case enums.DataTypeCSBK:
+		return ipscBurstCSBK, true
+	case enums.DataTypeMBCHeader:
+		return ipscBurstMBCHeader, true
+	case enums.DataTypeMBCContinuation:
+		return ipscBurstMBCContinuation, true
+	case enums.DataTypeDataHeader:
+		return ipscBurstDataHeader, true
+	case enums.DataTypeRate12:
+		return ipscBurstRate12, true
+	case enums.DataTypeVoiceLCHeader, enums.DataTypeTerminatorWithLC,
+		enums.DataTypeRate34, enums.DataTypeIdle, enums.DataTypeRate1,
+		enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
+		return 0, false
+	default:
+		return 0, false
+	}
 }
 
 // buildVoiceBurst builds an IPSC voice burst packet.
@@ -584,24 +625,17 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []mmdvm.
 		pkts := t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, data)
 		results = append(results, pkts...)
 
-	case ipscBurstCSBK:
-		// CSBK or data burst — same 54-byte structure as voice header
+	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
+		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12:
+		// Data bursts carry the DMR data type in the burst type byte and the
+		// 12-byte BPTC(196,96) payload at the same offset as the voice LC.
 		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-			enums.DataTypeCSBK, data)
+			enums.DataType(burstType), data)
 		results = append(results, pkt)
 
 	default:
-		// Treat any other burst type as a generic data packet if it has
-		// the same structure as a voice header (54 bytes with LC data).
-		// The burst type byte maps directly to the DMR data type.
-		if burstType <= 10 {
-			pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-				enums.DataType(burstType), data)
-			results = append(results, pkt)
-		} else {
-			slog.Debug("IPSCTranslator: unknown IPSC burst type", "burstType", burstType)
-			return nil
-		}
+		slog.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
+		return nil
 	}
 
 	if isEnd && burstType != ipscBurstVoiceTerm {

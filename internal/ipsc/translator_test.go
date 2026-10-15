@@ -1222,3 +1222,80 @@ func TestTranslateRandomInputsDoNotPanic(t *testing.T) {
 		tr.TranslateToIPSC(pkt)
 	}
 }
+
+func TestTranslateToIPSCDataBurstTypes(t *testing.T) {
+	t.Parallel()
+	want := map[enums.DataType]byte{
+		enums.DataTypePIHeader:        0x00,
+		enums.DataTypeCSBK:            0x03,
+		enums.DataTypeMBCHeader:       0x04,
+		enums.DataTypeMBCContinuation: 0x05,
+		enums.DataTypeDataHeader:      0x06,
+		enums.DataTypeRate12:          0x07,
+	}
+	for dt, burstType := range want {
+		for _, slot := range []bool{false, true} {
+			tr := newTestTranslator(t)
+			out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(dt)))
+			if len(out) != 1 {
+				t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
+			}
+			if out[0][30] != burstType {
+				t.Fatalf("%s: expected burst type 0x%02X, got 0x%02X", dt.String(), burstType, out[0][30])
+			}
+		}
+	}
+}
+
+func TestTranslateToIPSCNeverEmitsVoiceBurstTypeForData(t *testing.T) {
+	t.Parallel()
+	for dt := enums.DataTypePIHeader; dt <= enums.DataTypeReserved; dt++ {
+		if dt == enums.DataTypeVoiceLCHeader || dt == enums.DataTypeTerminatorWithLC {
+			continue
+		}
+		for _, slot := range []bool{false, true} {
+			tr := newTestTranslator(t)
+			for _, p := range tr.TranslateToIPSC(makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(dt))) {
+				if p[30] == ipscBurstSlot1 || p[30] == ipscBurstSlot2 {
+					t.Fatalf("%s: emitted voice burst type 0x%02X", dt.String(), p[30])
+				}
+			}
+		}
+	}
+}
+
+func TestTranslateToIPSCDropsUnverifiedDataRates(t *testing.T) {
+	t.Parallel()
+	for _, dt := range []enums.DataType{enums.DataTypeRate34, enums.DataTypeRate1} {
+		tr := newTestTranslator(t)
+		if out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(dt))); out != nil {
+			t.Fatalf("%s: expected nil, got %d packets", dt.String(), len(out))
+		}
+	}
+}
+
+func TestTranslateToMMDVMDataBurstTypes(t *testing.T) {
+	t.Parallel()
+	for _, burstType := range []byte{0x00, 0x03, 0x04, 0x05, 0x06, 0x07} {
+		tr := newTestTranslator(t)
+		data := makeTestIPSCPacket(0x83, burstType, true, false)
+		out := tr.TranslateToMMDVM(0x83, data)
+		if len(out) != 1 {
+			t.Fatalf("burst 0x%02X: expected 1 packet, got %d", burstType, len(out))
+		}
+		if out[0].FrameType != mmdvmFrameTypeDataSync || out[0].DTypeOrVSeq != uint(burstType) {
+			t.Fatalf("burst 0x%02X: got frameType %d dtype %d", burstType, out[0].FrameType, out[0].DTypeOrVSeq)
+		}
+	}
+}
+
+func TestTranslateToMMDVMDropsUnsupportedDataBurstTypes(t *testing.T) {
+	t.Parallel()
+	for _, burstType := range []byte{0x08, 0x09, 0x0B, 0x0C, 0x40} {
+		tr := newTestTranslator(t)
+		data := makeTestIPSCPacket(0x83, burstType, true, false)
+		if out := tr.TranslateToMMDVM(0x83, data); out != nil {
+			t.Fatalf("burst 0x%02X: expected nil, got %d packets", burstType, len(out))
+		}
+	}
+}
