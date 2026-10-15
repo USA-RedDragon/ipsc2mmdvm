@@ -525,12 +525,7 @@ func (h *MMDVMClient) Stop() {
 // sendRPTCLDirect writes the disconnect message directly on the connection.
 // Must be called with connMu held.
 func (h *MMDVMClient) sendRPTCLDirect() {
-	hexid := make([]byte, 8)
-	copy(hexid, []byte(fmt.Sprintf("%08x", h.cfg.ID)))
-	data := make([]byte, len("RPTCL")+8)
-	n := copy(data, "RPTCL")
-	copy(data[n:], hexid)
-	if _, err := h.conn.Write(data); err != nil {
+	if _, err := h.conn.Write(h.rptclPacket()); err != nil {
 		slog.Error("Error sending RPTCL disconnect", "network", h.cfg.Name, "error", err)
 	}
 }

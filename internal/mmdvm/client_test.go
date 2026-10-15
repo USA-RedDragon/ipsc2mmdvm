@@ -142,9 +142,7 @@ func TestSendLoginPacket(t *testing.T) {
 func TestSendRPTCLPacket(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTCL()
-
-	data := <-client.connTX
+	data := client.rptclPacket()
 	if string(data[:5]) != tagRPTCL {
 		t.Fatalf("expected RPTCL prefix, got %q", string(data[:5]))
 	}
@@ -1299,9 +1297,11 @@ func TestSendRPTCLDirect(t *testing.T) {
 	if string(got[:5]) != tagRPTCL {
 		t.Fatalf("expected RPTCL, got %q", string(got[:min(5, len(got))]))
 	}
-	hexID := fmt.Sprintf("%08x", client.cfg.ID)
-	if string(got[5:13]) != hexID {
-		t.Fatalf("expected hex ID %q, got %q", hexID, string(got[5:13]))
+	if len(got) != 9 {
+		t.Fatalf("expected 9 bytes, got %d", len(got))
+	}
+	if id := binary.BigEndian.Uint32(got[5:9]); id != client.cfg.ID {
+		t.Fatalf("expected binary peer ID %d, got %d", client.cfg.ID, id)
 	}
 }
 

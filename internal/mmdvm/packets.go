@@ -19,13 +19,13 @@ func (h *MMDVMClient) sendLogin() {
 	h.connTX <- data
 }
 
-func (h *MMDVMClient) sendRPTCL() {
-	var (
-		data = make([]byte, len("RPTCL")+4)
-		n    = copy(data, "RPTCL")
-	)
+// rptclPacket builds the RPTCL disconnect packet: "RPTCL" followed by the
+// peer ID as 4 big-endian bytes.
+func (h *MMDVMClient) rptclPacket() []byte {
+	data := make([]byte, len("RPTCL")+4)
+	n := copy(data, "RPTCL")
 	binary.BigEndian.PutUint32(data[n:], h.cfg.ID)
-	h.connTX <- data
+	return data
 }
 
 func (h *MMDVMClient) sendRPTC() {
