@@ -360,9 +360,6 @@ func (h *MMDVMClient) handleReady(data []byte) {
 			if !h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet) {
 				slog.Debug("MMDVM DMRD buffered (timeslot busy)",
 					"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
-				if h.metrics != nil {
-					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_busy").Inc()
-				}
 				return
 			}
 		}
@@ -705,9 +702,6 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			if !h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt) {
 				slog.Debug("HandleIPSCBurst: buffered (timeslot busy)",
 					"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
-				if h.metrics != nil {
-					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_busy").Inc()
-				}
 				continue
 			}
 		}
