@@ -56,7 +56,9 @@ type slotState struct {
 	// draining is true while the active stream still has queued packets
 	// that must be delivered before its live packets.
 	draining bool
-	pending  []*stream
+	// sending is true while the slot's sender goroutine runs.
+	sending bool
+	pending []*stream
 }
 
 // Manager arbitrates access to DMR timeslots. Two timeslots exist
@@ -71,6 +73,8 @@ type Manager struct {
 	timeout   time.Duration
 	metrics   *metrics.Metrics
 	direction string // "inbound" or "outbound" (for metric labels)
+	stopped   bool
+	wg        sync.WaitGroup
 }
 
 // NewManager creates a Manager with the default timeout.
@@ -126,6 +130,9 @@ func (ss *slotState) findPending(streamID uint) *stream {
 func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, end bool, sink Sink) Verdict {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopped {
+		return Queued
+	}
 
 	ss := &m.slots[slotIndex(slot)]
 	now := time.Now()
@@ -185,36 +192,43 @@ func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) {
 }
 
 // Release frees a timeslot if it is currently held by the given stream.
-// If calls are waiting, the oldest one becomes active and its buffered
-// packets are delivered through its own sink, followed by any later
-// calls that are complete in the buffer.
+// If calls are waiting, the oldest one becomes active. Its buffered
+// packets, and those of later calls that are complete in the buffer,
+// are delivered in order through their own sinks by a per-slot sender
+// goroutine, so Release does not wait for the replay.
 func (m *Manager) Release(slot bool, streamID uint) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	ss := &m.slots[slotIndex(slot)]
-	if ss.active == nil || ss.active.id != streamID || ss.draining {
-		m.mu.Unlock()
+	if m.stopped || ss.active == nil || ss.active.id != streamID || ss.draining {
 		return
 	}
 	slog.Debug("timeslot released",
 		"slot", slot, "streamID", streamID, "network", ss.active.network,
 		"pendingCount", len(ss.pending))
-	replay := m.advanceLocked(slot, ss)
-	m.mu.Unlock()
-	if replay {
-		m.replay(slot)
-	}
+	m.advanceLocked(slot, ss)
 }
 
-// advanceLocked ends the active call and promotes the oldest pending
-// call. It returns true when the promoted call has packets to replay.
-func (m *Manager) advanceLocked(slot bool, ss *slotState) bool {
+// Stop halts replays and waits for any delivery in progress to return.
+// Packets still buffered are discarded and later Submit and Release
+// calls do nothing.
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	m.stopped = true
+	m.mu.Unlock()
+	m.wg.Wait()
+}
+
+// advanceLocked ends the active call, promotes the oldest pending call,
+// and starts the slot's sender if the promoted call has packets queued.
+func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	ss.draining = false
 	if len(ss.pending) == 0 {
 		ss.active = nil
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction).Set(0)
 		}
-		return false
+		return
 	}
 	next := ss.pending[0]
 	ss.pending[0] = nil
@@ -225,20 +239,26 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) bool {
 		"slot", slot, "streamID", next.id, "network", next.network,
 		"bufferedPackets", len(next.queue))
 	ss.draining = len(next.queue) > 0
-	return ss.draining
+	if ss.draining && !ss.sending && !m.stopped {
+		ss.sending = true
+		m.wg.Add(1)
+		go m.send(slot)
+	}
 }
 
-// replay delivers the active stream's queued packets in order. Packets
-// that arrive for the stream during the replay join its queue, so they
-// are delivered after the older ones. When a queued packet ends the
-// call, the next pending call is promoted and replayed in turn.
-func (m *Manager) replay(slot bool) {
+// send delivers the active stream's queued packets in order. Packets
+// that arrive for the stream while it runs join its queue, so they are
+// delivered after the older ones. When a queued packet ends the call,
+// the next pending call is promoted and replayed in turn.
+func (m *Manager) send(slot bool) {
+	defer m.wg.Done()
 	ss := &m.slots[slotIndex(slot)]
 	for {
 		m.mu.Lock()
 		s := ss.active
-		if s == nil || !ss.draining || len(s.queue) == 0 {
+		if m.stopped || s == nil || !ss.draining || len(s.queue) == 0 {
 			ss.draining = false
+			ss.sending = false
 			m.mu.Unlock()
 			return
 		}

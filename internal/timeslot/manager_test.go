@@ -345,3 +345,66 @@ func TestLivePacketsQueueBehindReplay(t *testing.T) {
 		t.Fatalf("live packet after replay got verdict %v, want Deliver", v)
 	}
 }
+
+func TestReleaseDoesNotWaitForReplay(t *testing.T) {
+	m := NewManager()
+	gate := make(chan struct{})
+	r := &recorder{}
+	sink := func(p any) {
+		<-gate
+		r.sink(p)
+	}
+	m.Submit(false, 100, "net1", "a1", false, sink)
+	m.Submit(false, 200, "net2", "b1", false, sink)
+
+	released := make(chan struct{})
+	go func() {
+		m.Release(false, 100)
+		close(released)
+	}()
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("Release waited for the replay")
+	}
+	close(gate)
+	r.waitPackets(t, "b1")
+	m.Stop()
+}
+
+func TestStopWaitsForSenderAndHaltsReplay(t *testing.T) {
+	m := NewManager()
+	blocked := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	r := &recorder{}
+	sink := func(p any) {
+		once.Do(func() {
+			close(blocked)
+			<-gate
+		})
+		r.sink(p)
+	}
+	m.Submit(false, 100, "net1", "a1", false, sink)
+	m.Submit(false, 200, "net2", "b1", false, sink)
+	m.Submit(false, 200, "net2", "b2", false, sink)
+	m.Release(false, 100)
+	<-blocked
+
+	stopped := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a delivery was in progress")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(gate)
+	<-stopped
+	time.Sleep(20 * time.Millisecond)
+	if got := r.packets(); !reflect.DeepEqual(got, []any{"b1"}) {
+		t.Fatalf("delivered %v after Stop, want only [b1]", got)
+	}
+}

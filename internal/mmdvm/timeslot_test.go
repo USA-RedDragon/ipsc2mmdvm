@@ -162,6 +162,31 @@ func TestQueuedCallIsSentByItsOwnClient(t *testing.T) {
 	}
 }
 
+func TestReplayDoesNotBlockHandler(t *testing.T) {
+	t.Parallel()
+	mgr := timeslot.NewManager()
+	t.Cleanup(mgr.Stop)
+	c1 := newSlotTestClient(t, "net1", mgr)
+	c2 := newSlotTestClient(t, "net2", mgr)
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	c1.SetIPSCHandler(func([]byte) {})
+	c2.SetIPSCHandler(func([]byte) { <-gate })
+
+	c1.handleReady(dmrdFrom(srcA, 0xA, 2, 1))
+	c2.handleReady(dmrdFrom(srcB, 0xB, 2, 1))
+	returned := make(chan struct{})
+	go func() {
+		c1.handleReady(dmrdFrom(srcA, 0xA, 2, 2))
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("handler blocked while the queued call was replayed")
+	}
+}
+
 func TestLivePacketsWaitBehindReplay(t *testing.T) {
 	t.Parallel()
 	mgr := timeslot.NewManager()
