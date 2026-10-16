@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
@@ -2024,6 +2025,37 @@ func TestSlowIPSCHandlerDoesNotHoldUpTheMaster(t *testing.T) {
 		if ts2 := p[17]&0x20 != 0; len(got) != 6 || ts2 != (i >= 3) {
 			t.Fatalf("packet %d of %d: timeslot 2 %v, want the 3 voice headers of TS1 then those of TS2", i, len(got), ts2)
 		}
+	}
+}
+
+// TestOutboundPacketKind checks what the outbound timeslot manager learns
+// about each kind of packet for its holds.
+func TestOutboundPacketKind(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		frameType uint
+		dtype     enums.DataType
+		want      timeslot.PacketKind
+	}{
+		{"voice burst", 0, 1, timeslot.KindVoice},
+		{"voice sync burst", 1, 0, timeslot.KindVoice},
+		{"voice LC header", 2, enums.DataTypeVoiceLCHeader, timeslot.KindVoice},
+		{"PI header", 2, enums.DataTypePIHeader, timeslot.KindVoice},
+		{"terminator", 2, enums.DataTypeTerminatorWithLC, timeslot.KindVoice},
+		{"data header", 2, enums.DataTypeDataHeader, timeslot.KindData},
+		{"rate 1/2 block", 2, enums.DataTypeRate12, timeslot.KindData},
+		{"rate 3/4 block", 2, enums.DataTypeRate34, timeslot.KindData},
+		{"rate 1 block", 2, enums.DataTypeRate1, timeslot.KindData},
+		{"CSBK", 2, enums.DataTypeCSBK, timeslot.KindOther},
+	} {
+		p := proto.Packet{FrameType: tc.frameType, DTypeOrVSeq: uint(tc.dtype)}
+		if got := OutboundPacketKind(p); got != tc.want {
+			t.Errorf("%s: kind %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if got := OutboundPacketKind(outboundEnd{}); got != timeslot.KindOther {
+		t.Errorf("end of a call of preambles: kind %d, want %d", got, timeslot.KindOther)
 	}
 }
 

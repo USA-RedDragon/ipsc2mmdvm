@@ -216,7 +216,7 @@ sudo journalctl -u ipsc2mmdvm -f
 
 - **Masters.** ipsc2mmdvm starts even if a master is down or its host name does not resolve yet. It tries to connect and log in again every keepalive interval (5 seconds) until the master answers. Only a malformed `master-server` value stops startup.
 - **Traffic to a master.** ipsc2mmdvm sends voice and data to a master only while it is logged in to that master. Traffic for a master that is not logged in is dropped, as DMRGateway does.
-- **Call hang.** After a voice call to the repeater ends on a timeslot, data and CSBK calls to the repeater on that timeslot wait for `ipsc.call-hang-hold` (2.5 s by default) and then go out at their original pace, because an XPR 8400 drops the data and CSBK calls it gets during its call hang of about 2 s. Voice never waits.
+- **Call hang.** After a voice call to the repeater ends on a timeslot, data and CSBK calls to the repeater on that timeslot wait for `ipsc.call-hang-hold` (2.5 s by default), and after a data call they wait for `ipsc.data-hang-hold` (1.2 s by default). Then they go out at their original pace. An XPR 8400 drops the data and CSBK calls it gets during its call hang of about 2 s after voice, and a data call that comes less than about 1 s after another. Voice never waits.
 - **Repeater registration.** The repeater must register with ipsc2mmdvm (IPSC master register request, `0x90`) before it gets any traffic. ipsc2mmdvm ignores keepalives and voice from a repeater that has not registered. With IPSC authentication on, a keepalive with a valid HMAC registers the repeater, so a repeater comes back within one keepalive interval after ipsc2mmdvm restarts. A repeater that sends nothing for 120 seconds is removed and must register again.
 
 ## Configuration Reference
@@ -280,6 +280,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `ipsc.auth.enabled`                | boolean         |               | `IPSC_AUTH_ENABLED`   | `--ipsc.auth.enabled`   | Whether to require authentication for IPSC clients                          |
 | `ipsc.auth.key`                    | string          |               | `IPSC_AUTH_KEY`       | `--ipsc.auth.key`       | Authentication key for IPSC clients. Required if auth is enabled (secret)   |
 | `ipsc.call-hang-hold`              | string          | `2.5s`        | `IPSC_CALL_HANG_HOLD` | `--ipsc.call-hang-hold` | Wait for data and CSBK calls to IPSC after a voice call on a slot; 0 is off |
+| `ipsc.data-hang-hold`              | string          | `1.2s`        | `IPSC_DATA_HANG_HOLD` | `--ipsc.data-hang-hold` | Wait for data and CSBK calls to IPSC after a data call on a slot; 0 is off  |
 
 <!-- configulator:end -->
 

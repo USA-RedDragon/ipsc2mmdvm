@@ -925,23 +925,29 @@ func (h *MMDVMClient) forwardIPSC() {
 	}
 }
 
-// IsVoiceCallPacket reports whether packet, as the outbound timeslot
-// manager gets it, belongs to a voice call: a voice burst, or a voice LC
-// header, PI header or terminator with LC. The manager holds back other
-// calls during a repeater's call hang (timeslot.Manager.SetCallHang).
-func IsVoiceCallPacket(packet any) bool {
+// OutboundPacketKind tells the outbound timeslot manager what packet is,
+// for the holds of timeslot.Manager.SetCallHang: a voice burst, voice LC
+// header, PI header or terminator with LC is voice, a data header or a
+// rate 1/2, 3/4 or 1 block is data, and anything else, such as a CSBK or
+// the end of a call of preambles, is neither.
+func OutboundPacketKind(packet any) timeslot.PacketKind {
 	p, ok := packet.(proto.Packet)
 	if !ok {
-		return false
+		return timeslot.KindOther
 	}
 	if p.FrameType != frameTypeDataSync {
-		return p.FrameType < frameTypeDataSync
+		if p.FrameType < frameTypeDataSync {
+			return timeslot.KindVoice
+		}
+		return timeslot.KindOther
 	}
-	switch enums.DataType(p.DTypeOrVSeq) { //nolint:exhaustive,gosec // the other data types are not voice; the data type has 4 bits
+	switch enums.DataType(p.DTypeOrVSeq) { //nolint:exhaustive,gosec // the other data types are neither; the data type has 4 bits
 	case enums.DataTypeVoiceLCHeader, enums.DataTypePIHeader, enums.DataTypeTerminatorWithLC:
-		return true
+		return timeslot.KindVoice
+	case enums.DataTypeDataHeader, enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
+		return timeslot.KindData
 	}
-	return false
+	return timeslot.KindOther
 }
 
 // outboundCallEnds reports whether pkt ends its call on the outbound

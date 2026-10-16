@@ -514,6 +514,122 @@ func TestReplayKeepsArrivalSpacing(t *testing.T) {
 	r.waitPackets(t, "b1", "b2", "b3")
 }
 
+// testPacketKind tells voice from the packet names that start with "v",
+// data from those that start with "d", and neither from the rest.
+func testPacketKind(p any) PacketKind {
+	s, _ := p.(string)
+	switch {
+	case strings.HasPrefix(s, "v"):
+		return KindVoice
+	case strings.HasPrefix(s, "d"):
+		return KindData
+	}
+	return KindOther
+}
+
+// dataHoldManager returns a manager with a 2.5 s call hang hold and a
+// data hold of dataHold on a fake clock at time.Unix(1, 0), with stream 1,
+// whose packet is first, on TS1, just ended.
+func dataHoldManager(t *testing.T, dataHold time.Duration, first string) (*Manager, *fakeClock, *recorder) {
+	t.Helper()
+	m := NewManager()
+	t.Cleanup(m.Stop)
+	m.PaceReplays()
+	m.SetCallHang(2500*time.Millisecond, dataHold, testPacketKind)
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	m.now = clock.Now
+	r := &recorder{}
+	if !submit(m, false, 1, "net1", first, r) {
+		t.Fatal("call 1 was not delivered")
+	}
+	m.Release(false, 1)
+	return m, clock, r
+}
+
+// TestDataHangHoldsData sends a data call 0.14 s after another data call
+// on the same timeslot. It waits until the 1.2 s data hold ends.
+func TestDataHangHoldsData(t *testing.T) {
+	m, clock, r := dataHoldManager(t, 1200*time.Millisecond, "d1")
+	clock.Advance(140 * time.Millisecond)
+	if submitEnd(m, 2, "net1", "d2", r) {
+		t.Fatal("data 0.14 s after data went out during the hold")
+	}
+	clock.Advance(1050 * time.Millisecond)
+	m.onTimer(false)
+	r.expectNone(t)
+	clock.Advance(20 * time.Millisecond)
+	m.onTimer(false)
+	r.waitPackets(t, "d2")
+}
+
+// TestDataHangLeavesOtherCalls checks the calls that the data hold must
+// not delay: data 1.5 s after data, voice after data, data after a call
+// of CSBKs only, data when the data hold is 0, and data on the other
+// timeslot.
+func TestDataHangLeavesOtherCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hold  time.Duration
+		first string
+		after time.Duration
+		slot  bool
+		pkt   string
+	}{
+		{"data after the hold", 1200 * time.Millisecond, "d1", 1500 * time.Millisecond, false, "d2"},
+		{"voice after data", 1200 * time.Millisecond, "d1", 140 * time.Millisecond, false, "v2"},
+		{"data after CSBKs only", 1200 * time.Millisecond, "c1", 140 * time.Millisecond, false, "d2"},
+		{"hold off", 0, "d1", 140 * time.Millisecond, false, "d2"},
+		{"data on the other slot", 1200 * time.Millisecond, "d1", 140 * time.Millisecond, true, "d2"},
+	} {
+		m, clock, r := dataHoldManager(t, tc.hold, tc.first)
+		clock.Advance(tc.after)
+		if !submit(m, tc.slot, 2, "net1", tc.pkt, r) {
+			t.Errorf("%s: %s was held", tc.name, tc.pkt)
+		}
+	}
+}
+
+// TestDataAndCallHangTakeTheLaterDeadline ends a data call, which holds
+// data until 1.2 s, then a voice call at 0.5 s, which holds it until
+// 3.0 s. Data at 1.5 s waits for the later deadline.
+func TestDataAndCallHangTakeTheLaterDeadline(t *testing.T) {
+	m, clock, r := dataHoldManager(t, 1200*time.Millisecond, "d1")
+	clock.Advance(500 * time.Millisecond)
+	if !submit(m, false, 2, "net1", "v1", r) {
+		t.Fatal("voice after data was held")
+	}
+	m.Release(false, 2)
+	clock.Advance(time.Second)
+	if submitEnd(m, 3, "net1", "d2", r) {
+		t.Fatal("data 1.5 s after data and 1 s after voice went out")
+	}
+	clock.Advance(1400 * time.Millisecond)
+	m.onTimer(false)
+	r.expectNone(t)
+	clock.Advance(200 * time.Millisecond)
+	m.onTimer(false)
+	r.waitPackets(t, "d2")
+}
+
+// TestVoiceCallWithDataTakesTheLaterDeadline ends a call that carries
+// voice and then data. Its voice holds data until 2.5 s, which counts over
+// the 1.2 s that its data gives.
+func TestVoiceCallWithDataTakesTheLaterDeadline(t *testing.T) {
+	m, clock, r := dataHoldManager(t, 1200*time.Millisecond, "d0")
+	clock.Advance(2 * time.Second)
+	if !submit(m, false, 2, "net1", "v1", r) {
+		t.Fatal("voice was held")
+	}
+	if !submit(m, false, 2, "net1", "d1", r) {
+		t.Fatal("data of the active call was held")
+	}
+	m.Release(false, 2)
+	clock.Advance(2 * time.Second)
+	if submitEnd(m, 3, "net1", "d2", r) {
+		t.Fatal("data 2 s after a call with voice went out during the call hang")
+	}
+}
+
 // holdManager returns a manager with a 2.5 s call hang hold, in which the
 // packets whose names start with "v" are voice, on a fake clock at
 // time.Unix(1, 0), with stream 1 a voice call on TS1 that has just ended.
@@ -522,7 +638,7 @@ func holdManager(t *testing.T, hold time.Duration) (*Manager, *fakeClock, *recor
 	m := NewManager()
 	t.Cleanup(m.Stop)
 	m.PaceReplays()
-	m.SetCallHang(hold, func(p any) bool { s, _ := p.(string); return strings.HasPrefix(s, "v") })
+	m.SetCallHang(hold, 0, testPacketKind)
 	clock := &fakeClock{now: time.Unix(1, 0)}
 	m.now = clock.Now
 	r := &recorder{}

@@ -77,6 +77,7 @@ type stream struct {
 	queue    []entry
 	ended    bool // the call's terminator is in queue
 	voice    bool // the first packet of the call is voice (SetCallHang)
+	data     bool // a packet of the call is data (SetCallHang)
 	lastSeen time.Time
 
 	// The arrival time of the last packet the sender replayed, and when
@@ -110,8 +111,8 @@ type slotState struct {
 	sending bool
 	pending []*stream // waiting calls in arrival order
 	byID    map[uint]*stream
-	// holdUntil is when the call hang after the last voice call on the
-	// slot ends (SetCallHang).
+	// holdUntil is when the hold after the last voice or data call on
+	// the slot ends (SetCallHang).
 	holdUntil time.Time
 	// timer reclaims the slot when the active call goes stale, so
 	// waiting calls do not depend on a new packet to be promoted.
@@ -143,9 +144,10 @@ type Manager struct {
 	pace bool
 	// logs holds the records made while mu is held.
 	logs logging.Queue
-	// hold and isVoice are set by SetCallHang.
-	hold    time.Duration
-	isVoice func(packet any) bool
+	// hold, dataHold and kind are set by SetCallHang.
+	hold     time.Duration
+	dataHold time.Duration
+	kind     func(packet any) PacketKind
 }
 
 // NewManager creates a Manager with the default timeout.
@@ -208,9 +210,13 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		m.sweepLocked(slot, ss, now)
 	}
 
-	voice := m.isVoice != nil && m.isVoice(packet)
-	if ss.active == nil && ss.byID[streamID] == nil && (voice || len(ss.pending) == 0) && !m.holdingLocked(ss, packet, now) {
-		ss.active = &stream{id: streamID, network: network, sink: sink, voice: voice, lastSeen: now}
+	kind := KindOther
+	if m.kind != nil {
+		kind = m.kind(packet)
+	}
+	voice, data := kind == KindVoice, kind == KindData
+	if ss.active == nil && ss.byID[streamID] == nil && (voice || len(ss.pending) == 0) && !m.holdingLocked(ss, kind, now) {
+		ss.active = &stream{id: streamID, network: network, sink: sink, voice: voice, data: data, lastSeen: now}
 		m.armLocked(slot, ss, now)
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(1)
@@ -222,6 +228,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 
 	if ss.active != nil && ss.active.id == streamID {
 		ss.active.lastSeen = now
+		ss.active.data = ss.active.data || data
 		if !ss.draining {
 			return Deliver
 		}
@@ -244,6 +251,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 			"slot", slot, "pendingStream", streamID, "network", network)
 	}
 	ps.lastSeen = now
+	ps.data = ps.data || data
 	v := m.enqueueLocked(slot, ps, packet, end)
 	if ss.active == nil {
 		m.armLocked(slot, ss, now)
@@ -406,8 +414,13 @@ func (m *Manager) Stop() {
 func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	ss.draining = false
 	now := m.now()
-	if ss.active != nil && ss.active.voice && m.hold > 0 {
-		ss.holdUntil = now.Add(m.hold)
+	if a := ss.active; a != nil {
+		if a.voice && m.hold > 0 {
+			ss.holdUntil = later(ss.holdUntil, now.Add(m.hold))
+		}
+		if a.data && m.dataHold > 0 {
+			ss.holdUntil = later(ss.holdUntil, now.Add(m.dataHold))
+		}
 	}
 	i := 0
 	if now.Before(ss.holdUntil) {
@@ -441,24 +454,47 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	}
 }
 
+// PacketKind is what a packet is for the holds of SetCallHang.
+type PacketKind int
+
+const (
+	// KindOther is a packet that is neither voice nor data, such as a CSBK.
+	KindOther PacketKind = iota
+	// KindVoice is a packet of a voice call.
+	KindVoice
+	// KindData is a data header or data block.
+	KindData
+)
+
 // SetCallHang makes the manager hold back a call that is not voice, as
-// isVoice tells from its first packet, while hold has not passed since
-// the last voice call on its timeslot ended. The held call waits as if
-// the slot were busy, and goes out when the hold ends, paced as a queued
-// call. A voice call is never held: it starts at once, and the held calls
-// then wait for the hold after it. A hold of 0 turns this off. An XPR
-// 8400 drops the data and CSBK calls that it gets during the call hang
-// after a voice call.
-func (m *Manager) SetCallHang(hold time.Duration, isVoice func(packet any) bool) {
+// kind tells from its first packet, while hold has not passed since the
+// last voice call on its timeslot ended, or dataHold since the last call
+// with data on it ended; the later of the two deadlines counts. The held
+// call waits as if the slot were busy, and goes out when the hold ends,
+// paced as a queued call. A voice call is never held: it starts at once,
+// and the held calls then wait for the hold after it. A call without data,
+// such as one of preamble CSBKs only, starts no data hold. A hold of 0
+// turns it off. An XPR 8400 drops the data and CSBK calls that it gets
+// during its call hang after a voice call, and those it gets too soon
+// after a data call.
+func (m *Manager) SetCallHang(hold, dataHold time.Duration, kind func(packet any) PacketKind) {
 	m.mu.Lock()
 	defer m.logs.Unlock(&m.mu)
-	m.hold, m.isVoice = hold, isVoice
+	m.hold, m.dataHold, m.kind = hold, dataHold, kind
 }
 
-// holdingLocked reports whether a call on ss whose first packet is packet
-// must wait for the call hang at now. The caller must hold m.mu.
-func (m *Manager) holdingLocked(ss *slotState, packet any, now time.Time) bool {
-	return m.hold > 0 && m.isVoice != nil && now.Before(ss.holdUntil) && !m.isVoice(packet)
+// holdingLocked reports whether a call on ss whose first packet is of kind
+// must wait for a hold at now. The caller must hold m.mu.
+func (m *Manager) holdingLocked(ss *slotState, kind PacketKind, now time.Time) bool {
+	return kind != KindVoice && now.Before(ss.holdUntil)
+}
+
+// later returns the later of a and b.
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // PaceReplays makes the manager replay a queued call at the spacing its
