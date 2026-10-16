@@ -386,13 +386,7 @@ func (s *IPSCServer) handleMasterRegisterRequest(data []byte, addr *net.UDPAddr)
 		return err
 	}
 
-	mode := s.defaultModeByte()
-	flags := s.defaultFlagsBytes()
-	if len(data) >= 10 {
-		mode = data[5]
-		copy(flags[:], data[6:10])
-	}
-
+	mode, flags := s.peerModeAndFlags(data)
 	if err := s.upsertPeer(peerID, addr, mode, flags); err != nil {
 		return err
 	}
@@ -405,6 +399,27 @@ func (s *IPSCServer) handleMasterRegisterRequest(data []byte, addr *net.UDPAddr)
 	return nil
 }
 
+// peerModeAndFlags returns the mode byte and the 4 flag bytes that follow
+// the peer ID in a master register or alive request, or the defaults when
+// the request is too short to carry them.
+func (s *IPSCServer) peerModeAndFlags(data []byte) (byte, [4]byte) {
+	mode := s.defaultModeByte()
+	flags := s.defaultFlagsBytes()
+	if len(data) >= 10 {
+		mode = data[5]
+		copy(flags[:], data[6:10])
+	}
+	return mode, flags
+}
+
+// handleMasterAliveRequest answers a keepalive from a registered peer. With
+// authentication on, handlePacket has checked the HMAC of the keepalive, so
+// a keepalive from a peer that is not registered, or whose registration
+// expired, registers it as a master register request would. A repeater
+// that lost its master goes on sending keepalives for three intervals
+// before it registers again, so this brings a restarted bridge back in one
+// keepalive interval. With authentication off, the peer must register
+// first, as in DMRlink.
 func (s *IPSCServer) handleMasterAliveRequest(data []byte, addr *net.UDPAddr) error {
 	peerID, err := parsePeerID(data)
 	if err != nil {
@@ -412,7 +427,14 @@ func (s *IPSCServer) handleMasterAliveRequest(data []byte, addr *net.UDPAddr) er
 	}
 
 	if !s.markPeerAlive(peerID) {
-		return fmt.Errorf("keepalive from peer %d: %w", peerID, ErrUnregisteredPeer)
+		if !s.cfg.IPSC.Auth.Enabled {
+			return fmt.Errorf("keepalive from peer %d: %w", peerID, ErrUnregisteredPeer)
+		}
+		mode, flags := s.peerModeAndFlags(data)
+		if err := s.upsertPeer(peerID, addr, mode, flags); err != nil {
+			return err
+		}
+		slog.Info("IPSC peer registered from an authenticated keepalive", "peerID", peerID, "peer", addr)
 	}
 
 	packet := &Packet{data: s.buildMasterAliveReply()}

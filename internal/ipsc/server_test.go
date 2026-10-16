@@ -796,6 +796,58 @@ func TestHandleMasterAliveRequestFlow(t *testing.T) {
 	}
 }
 
+// TestKeepaliveRegistersPeerWithAuth sends a master alive request, signed
+// or not, from a peer that never registered. With authentication on, a
+// keepalive with a valid HMAC registers the peer from its own fields and
+// gets the alive reply; one with a bad HMAC does nothing. With
+// authentication off, a keepalive from an unregistered peer does nothing.
+func TestKeepaliveRegistersPeerWithAuth(t *testing.T) {
+	t.Parallel()
+	const key = "00000000000000000000000000001234567890ab"
+	const peerID = uint32(314926)
+	alive := mustDecodeHex(t, "960004ce2e6a0000805c04020401")
+	for _, tc := range []struct {
+		name     string
+		auth     bool
+		sign     func([]byte) []byte
+		register bool
+	}{
+		{"auth on, valid HMAC", true, func(b []byte) []byte { return signPacket(t, b, key) }, true},
+		{"auth on, bad HMAC", true, func(b []byte) []byte {
+			p := signPacket(t, b, key)
+			p[len(p)-1] ^= 0x01
+			return p
+		}, false},
+		{"auth off", false, func(b []byte) []byte { return b }, false},
+	} {
+		s, _ := newTestServerWithUDP(t, tc.auth, key)
+		peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerAddr, _ := peer.LocalAddr().(*net.UDPAddr)
+		_, err = s.handlePacket(tc.sign(append([]byte(nil), alive...)), peerAddr)
+		if (err == nil) != tc.register {
+			t.Errorf("%s: handlePacket error %v", tc.name, err)
+		}
+		if got := s.isRegistered(peerID); got != tc.register {
+			t.Errorf("%s: registered %v, want %v", tc.name, got, tc.register)
+		}
+		if tc.register {
+			s.mu.RLock()
+			p := s.peers[peerID]
+			s.mu.RUnlock()
+			if p.Addr.String() != peerAddr.String() || p.Mode != 0x6A || p.Flags != [4]byte{0x00, 0x00, 0x80, 0x5C} {
+				t.Errorf("%s: peer %v mode %02x flags % x", tc.name, p.Addr, p.Mode, p.Flags)
+			}
+			if reply := readUDP(t, peer); reply[0] != byte(PacketType_MasterAliveReply) {
+				t.Errorf("%s: reply type 0x%02X, want 0x%02X", tc.name, reply[0], PacketType_MasterAliveReply)
+			}
+		}
+		peer.Close()
+	}
+}
+
 func TestHandlePeerListRequestFlow(t *testing.T) {
 	t.Parallel()
 	s, srvAddr := newTestServerWithUDP(t, false, "")
