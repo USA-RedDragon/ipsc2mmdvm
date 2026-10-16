@@ -65,6 +65,7 @@ type Sink func(packet any)
 type entry struct {
 	packet any
 	end    bool
+	at     time.Time // when Submit got the packet
 }
 
 // stream is one call on a timeslot, either active or waiting.
@@ -75,6 +76,12 @@ type stream struct {
 	queue    []entry
 	ended    bool // the call's terminator is in queue
 	lastSeen time.Time
+
+	// The arrival time of the last packet the sender replayed, and when
+	// the sender replayed it, so that it replays the next packet as far
+	// after it as the packet arrived.
+	replayedAt time.Time
+	replayedOn time.Time
 }
 
 // expired reports whether a waiting call should be discarded. A call
@@ -121,8 +128,14 @@ type Manager struct {
 	network   string // network name, or "all" for a shared manager (for metric labels)
 	stopped   bool
 	wg        sync.WaitGroup
-	// now returns the current time. Tests replace it to control timeouts.
-	now func() time.Time
+	// now returns the current time and after waits as time.After does.
+	// Tests replace them to control time.
+	now   func() time.Time
+	after func(time.Duration) <-chan time.Time
+	stop  chan struct{} // closed by Stop
+	// pace makes the sender replay a queued call at the spacing its
+	// packets arrived with (PaceReplays).
+	pace bool
 }
 
 // NewManager creates a Manager with the default timeout.
@@ -130,6 +143,8 @@ func NewManager() *Manager {
 	return &Manager{
 		timeout: DefaultTimeout,
 		now:     time.Now,
+		after:   time.After,
+		stop:    make(chan struct{}),
 	}
 }
 
@@ -319,7 +334,7 @@ func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) Verd
 		m.dropLocked(slot, dropQueueFull, 1)
 		return Dropped
 	}
-	s.queue = append(s.queue, entry{packet: packet, end: end})
+	s.queue = append(s.queue, entry{packet: packet, end: end, at: m.now()})
 	if end {
 		s.ended = true
 	}
@@ -352,6 +367,9 @@ func (m *Manager) Release(slot bool, streamID uint) {
 // Submit and Release calls do nothing.
 func (m *Manager) Stop() {
 	m.mu.Lock()
+	if !m.stopped {
+		close(m.stop)
+	}
 	m.stopped = true
 	for i := range m.slots {
 		if t := m.slots[i].timer; t != nil {
@@ -395,10 +413,51 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	}
 }
 
-// send delivers the active stream's queued packets in order. Packets
-// that arrive for the stream while it runs join its queue, so they are
-// delivered after the older ones. When a queued packet ends the call,
-// the next pending call is promoted and replayed in turn.
+// PaceReplays makes the manager replay a queued call at the spacing its
+// packets arrived with, so a replayed call goes out at the pace of a live
+// one and leaves room for the calls on the other timeslot. Without it a
+// queued call goes out as fast as its sink takes it.
+func (m *Manager) PaceReplays() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pace = true
+}
+
+// Paced reports whether PaceReplays was called.
+func (m *Manager) Paced() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pace
+}
+
+// waitReplay waits, when the manager paces replays, until the queued
+// packet of s that arrived at "at" is due: as long after the packet
+// replayed before it as it arrived after that packet. It returns false if
+// the manager stops first.
+func (m *Manager) waitReplay(s *stream, at time.Time) bool {
+	if !m.pace {
+		return true
+	}
+	due := m.now()
+	if !s.replayedAt.IsZero() {
+		due = s.replayedOn.Add(at.Sub(s.replayedAt))
+	}
+	if wait := due.Sub(m.now()); wait > 0 {
+		select {
+		case <-m.after(wait):
+		case <-m.stop:
+			return false
+		}
+	}
+	s.replayedAt, s.replayedOn = at, due
+	return true
+}
+
+// send delivers the active stream's queued packets in order, paced by
+// waitReplay. Packets that arrive
+// for the stream while it runs join its queue, so they are delivered
+// after the older ones. When a queued packet ends the call, the next
+// pending call is promoted and replayed in turn.
 func (m *Manager) send(slot bool) {
 	defer m.wg.Done()
 	ss := &m.slots[slotIndex(slot)]
@@ -417,6 +476,13 @@ func (m *Manager) send(slot bool) {
 		s.lastSeen = m.now()
 		m.mu.Unlock()
 
+		if !m.waitReplay(s, e.at) {
+			m.mu.Lock()
+			ss.draining = false
+			ss.sending = false
+			m.mu.Unlock()
+			return
+		}
 		if s.sink != nil {
 			s.sink(e.packet)
 		}

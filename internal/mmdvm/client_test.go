@@ -1960,6 +1960,17 @@ func TestStopEndsOpenIPSCCalls(t *testing.T) {
 	}
 }
 
+// TestInboundReplaysAreNotPaced checks that a client's inbound timeslot
+// manager, toward its master, replays a queued call at once: paced, the
+// queue behind a call that held the slot would never catch up.
+func TestInboundReplaysAreNotPaced(t *testing.T) {
+	t.Parallel()
+	c := NewMMDVMClient(testMMDVMConfig(), nil)
+	if c.inboundTSMgr.Paced() {
+		t.Error("the inbound timeslot manager paces its replays")
+	}
+}
+
 func testSlotTypeColorCode(data [33]byte) uint8 {
 	return uint8(layer2.RawBurst(data).SlotType().ColorCode)
 }

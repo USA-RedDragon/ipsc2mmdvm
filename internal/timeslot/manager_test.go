@@ -453,6 +453,66 @@ func TestSubmit_TouchExtendsTimeout(t *testing.T) {
 	r.waitPackets(t, "b1")
 }
 
+// nextWait returns the next wait that the manager asked for.
+func nextWait(t *testing.T, waits <-chan time.Duration) time.Duration {
+	t.Helper()
+	select {
+	case d := <-waits:
+		return d
+	case <-time.After(2 * time.Second):
+		t.Fatal("the replay did not wait")
+		return 0
+	}
+}
+
+// TestReplayKeepsArrivalSpacing queues three packets of stream 200 behind
+// stream 100 on TS1, 60 ms apart on a fake clock. When stream 100 ends, the
+// sender replays them 60 ms apart instead of at once, and a call on TS2 is
+// delivered at once while the replay waits.
+func TestReplayKeepsArrivalSpacing(t *testing.T) {
+	m := NewManager()
+	t.Cleanup(m.Stop)
+	m.PaceReplays()
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	m.now = clock.Now
+	waits := make(chan time.Duration, 4)
+	fire := make(chan time.Time)
+	m.after = func(d time.Duration) <-chan time.Time {
+		waits <- d
+		return fire
+	}
+	r := &recorder{}
+
+	submit(m, false, 100, "net1", "a1", r)
+	for _, p := range []string{"b1", "b2", "b3"} {
+		if submit(m, false, 200, "net2", p, r) {
+			t.Fatalf("%s should wait behind stream 100", p)
+		}
+		clock.Advance(60 * time.Millisecond)
+	}
+	m.Release(false, 100)
+
+	r.waitPackets(t, "b1")
+	if d := nextWait(t, waits); d != 60*time.Millisecond {
+		t.Fatalf("replay waited %v before b2, want 60ms", d)
+	}
+	if !submit(m, true, 300, "net3", "c1", r) {
+		t.Fatal("a call on TS2 was not delivered while TS1 replays")
+	}
+	if got := r.packets(); !reflect.DeepEqual(got, []any{"b1"}) {
+		t.Fatalf("delivered %v before b2 was due, want only b1", got)
+	}
+	clock.Advance(60 * time.Millisecond)
+	fire <- clock.Now()
+	r.waitPackets(t, "b1", "b2")
+	if d := nextWait(t, waits); d != 60*time.Millisecond {
+		t.Fatalf("replay waited %v before b3, want 60ms", d)
+	}
+	clock.Advance(60 * time.Millisecond)
+	fire <- clock.Now()
+	r.waitPackets(t, "b1", "b2", "b3")
+}
+
 func TestRelease_NoOp_EmptySlot(t *testing.T) {
 	m := NewManager()
 	m.Release(false, 100)

@@ -91,6 +91,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	// All clients share a single outbound timeslot manager so that
 	// only one master can feed a given timeslot toward IPSC at a time.
 	outboundTSMgr := timeslot.NewManager()
+	outboundTSMgr.PaceReplays()
 	if m != nil {
 		outboundTSMgr.SetMetrics(m, "outbound", timeslot.AllNetworks)
 	}
