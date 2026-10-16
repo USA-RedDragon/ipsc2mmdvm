@@ -37,6 +37,10 @@ type IPSCTranslator struct {
 	now            func() time.Time
 	lastPrune      time.Time
 
+	// endedData holds when each IPSC data call that ended with the end
+	// flag ended, by call control, until pruning drops it.
+	endedData map[uint32]time.Time
+
 	nextCallControl uint32
 	nextCallSeq     uint8
 	nextStreamID    uint32
@@ -134,6 +138,7 @@ func NewIPSCTranslator() (*IPSCTranslator, error) {
 	return &IPSCTranslator{
 		streams:        make(map[uint32]*streamState),
 		reverseStreams: make(map[uint32]*reverseStreamState),
+		endedData:      make(map[uint32]time.Time),
 		now:            time.Now,
 	}, nil
 }
@@ -157,6 +162,19 @@ func (t *IPSCTranslator) pruneLocked(now time.Time) {
 			t.removeReverseStreamLocked(callControl)
 		}
 	}
+	for callControl, at := range t.endedData {
+		if now.Sub(at) > streamIdleTimeout {
+			delete(t.endedData, callControl)
+		}
+	}
+}
+
+// endReverseDataCallLocked removes the IPSC-to-MMDVM stream of the data call
+// callControl, which ended with the end flag at now. The caller must hold
+// t.mu.
+func (t *IPSCTranslator) endReverseDataCallLocked(callControl uint32, now time.Time) {
+	t.removeReverseStreamLocked(callControl)
+	t.endedData[callControl] = now
 }
 
 // removeStreamLocked deletes MMDVM-to-IPSC stream state and updates the
@@ -1036,15 +1054,10 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	// Use call control bytes as stream identifier
 	callControl := binary.BigEndian.Uint32(data[13:17])
 
-	// Get or create reverse stream state
 	rss, existed := t.reverseStreams[callControl]
 	if !existed {
-		rss = &reverseStreamState{
-			streamID: t.newStreamIDLocked(),
-		}
-		t.reverseStreams[callControl] = rss
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Inc()
+		if rss = t.newReverseStreamLocked(callControl, burstType); rss == nil {
+			return nil
 		}
 	}
 	rss.lastSeen = now
@@ -1110,7 +1123,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	}
 
 	if isEnd && burstType != ipscBurstSlot1 && burstType != ipscBurstSlot2 {
-		t.removeReverseStreamLocked(callControl)
+		t.endReverseCallLocked(packetType, callControl, now)
 	}
 
 	if t.metrics != nil && len(results) > 0 {
@@ -1135,7 +1148,7 @@ func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool
 	rss.lastSeen = now
 	superframeRestartsAfter(rss, binary.BigEndian.Uint16(data[20:22]))
 	if isEnd && isDataPacket(packetType) {
-		t.removeReverseStreamLocked(callControl)
+		t.endReverseDataCallLocked(callControl, now)
 	}
 }
 
@@ -1143,6 +1156,43 @@ func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool
 // packet.
 func isDataPacket(packetType byte) bool {
 	return packetType == 0x83 || packetType == 0x84
+}
+
+// newReverseStreamLocked starts the IPSC-to-MMDVM stream of the call
+// callControl, whose first packet has burstType, and returns it. It returns
+// nil for a data block of a data call that ended with the end flag: it has
+// no header to start a call with, and MMDVMHost discards such a block. The
+// caller must hold t.mu.
+func (t *IPSCTranslator) newReverseStreamLocked(callControl uint32, burstType byte) *reverseStreamState {
+	if _, ended := t.endedData[callControl]; ended && isDataBlock(burstType) {
+		slog.Debug("IPSCTranslator: dropping data block after the end of its call",
+			"burstType", fmt.Sprintf("0x%02X", burstType), "callControl", callControl)
+		return nil
+	}
+	rss := &reverseStreamState{streamID: t.newStreamIDLocked()}
+	t.reverseStreams[callControl] = rss
+	if t.metrics != nil {
+		t.metrics.TranslatorActiveStreams.WithLabelValues("ipsc_to_mmdvm").Inc()
+	}
+	return rss
+}
+
+// endReverseCallLocked ends the IPSC-to-MMDVM stream of the call
+// callControl, whose packet of packetType carried the end flag at now. The
+// caller must hold t.mu.
+func (t *IPSCTranslator) endReverseCallLocked(packetType byte, callControl uint32, now time.Time) {
+	if isDataPacket(packetType) {
+		t.endReverseDataCallLocked(callControl, now)
+		return
+	}
+	t.removeReverseStreamLocked(callControl)
+}
+
+// isDataBlock reports whether burstType is a data block that continues a
+// packet or MBC and so cannot start a call: a rate 1/2 or 3/4 block or an
+// MBC continuation.
+func isDataBlock(burstType byte) bool {
+	return burstType == ipscBurstRate12 || burstType == ipscBurstRate34 || burstType == ipscBurstMBCContinuation
 }
 
 // ReverseStreamID returns the MMDVM stream ID of the IPSC call that data,

@@ -3,6 +3,7 @@ package ipsc
 import (
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
@@ -942,5 +943,56 @@ func TestDataCallInProgress(t *testing.T) {
 				t.Errorf("bad CRC %v burst %d: last %v in progress %v", badCRC, i, last, c.asm.InProgress())
 			}
 		}
+	}
+}
+
+// TestDataBlockAfterEndIsDropped replays call control 0x6A7C of
+// gen/cap1248.txt, a capture of uncertain origin in the form an XPR 8400
+// sends: a confirmed data header, a second 0x06 packet that fails its CRC
+// and carries the end flag, a 0x13 end packet, and then a rate 3/4 block
+// without the end flag. The call ended before the block, which has no
+// header of its own, so the block must not start a new MMDVM stream. The
+// same holds when the 0x13 packet alone ends the call.
+func TestDataBlockAfterEndIsDropped(t *testing.T) {
+	t.Parallel()
+	packets := []string{
+		"840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679",
+		"840004ce2e2e30b43c30b43c0100006a7c40805eedeb3659f1a9000000000642000a800a0060b800000004ce2e30b43cd6a800764692",
+		"840004ce2e2e30b43c30b43c0100006a7c40805eedec3659f3890000000013000000",
+		"840004ce2e2e30b43c30b43c0100006a7c00805deded3659f569000000000840000d800a0090444d52474f20544553540000a3ecda7c002e0078469b",
+	}
+	for _, skip := range []int{-1, 1} {
+		tr := newTestTranslator(t)
+		var got []mmdvm.Packet
+		for i, h := range packets {
+			if i == skip {
+				continue
+			}
+			d, _ := hex.DecodeString(h)
+			got = append(got, tr.TranslateToMMDVM(d[0], d)...)
+		}
+		if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeDataHeader) {
+			t.Fatalf("without packet %d: got %+v, want the data header only", skip, got)
+		}
+		if len(tr.reverseStreams) != 0 {
+			t.Fatalf("without packet %d: %d streams open after the call ended", skip, len(tr.reverseStreams))
+		}
+	}
+}
+
+// TestDataBlockLongAfterEndPasses sends the rate 3/4 block of
+// TestDataBlockAfterEndIsDropped long after its call ended. It is then no
+// longer taken for a part of that call and goes to MMDVM.
+func TestDataBlockLongAfterEndPasses(t *testing.T) {
+	t.Parallel()
+	tr, clock, _ := newClockedTranslator(t)
+	hdr, _ := hex.DecodeString("840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679")
+	end, _ := hex.DecodeString("840004ce2e2e30b43c30b43c0100006a7c40805eedec3659f3890000000013000000")
+	block, _ := hex.DecodeString("840004ce2e2e30b43c30b43c0100006a7c00805deded3659f569000000000840000d800a0090444d52474f20544553540000a3ecda7c002e0078469b")
+	tr.TranslateToMMDVM(hdr[0], hdr)
+	tr.TranslateToMMDVM(end[0], end)
+	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
+	if out := tr.TranslateToMMDVM(block[0], block); len(out) != 1 {
+		t.Fatalf("block long after the end: got %d packets", len(out))
 	}
 }
