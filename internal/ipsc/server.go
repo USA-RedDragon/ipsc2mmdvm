@@ -30,7 +30,8 @@ type IPSCServer struct {
 	authKey  []byte // 20-byte HMAC key decoded from hex
 	peers    map[uint32]*Peer
 	lastSend map[uint32]time.Time
-	pace     time.Duration // minimum gap between packets to one peer
+	pace     time.Duration                   // minimum gap between packets to one peer
+	newTimer func(time.Duration) *time.Timer // time.NewTimer; tests replace it
 
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
 	bursts       chan burst
@@ -150,6 +151,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		peers:    map[uint32]*Peer{},
 		lastSend: map[uint32]time.Time{},
 		pace:     defaultPace,
+		newTimer: time.NewTimer,
 		bursts:   make(chan burst, burstQueueSize),
 		done:     make(chan struct{}),
 	}
@@ -867,7 +869,7 @@ func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 			break
 		}
 		s.mu.Unlock()
-		timer := time.NewTimer(wait)
+		timer := s.newTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():

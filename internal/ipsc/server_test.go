@@ -1353,13 +1353,12 @@ func TestPacePeerFirstCallNoDelay(t *testing.T) {
 	cfg := testConfig(false, "")
 	s := NewIPSCServer(cfg, nil)
 
-	start := time.Now()
-	s.pacePeer(t.Context(), 1)
-	elapsed := time.Since(start)
-
-	// First call should not sleep
-	if elapsed > 10*time.Millisecond {
-		t.Fatalf("first pacePeer took too long: %v", elapsed)
+	s.newTimer = func(d time.Duration) *time.Timer {
+		t.Errorf("first pacePeer waited %v", d)
+		return time.NewTimer(0)
+	}
+	if !s.pacePeer(t.Context(), 1) {
+		t.Fatal("first pacePeer did not claim a send")
 	}
 }
 
