@@ -410,22 +410,43 @@ func TestSubmit_NotYetTimedOut(t *testing.T) {
 	}
 }
 
+// fakeClock is a clock that moves only when the test advances it.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
 func TestSubmit_TouchExtendsTimeout(t *testing.T) {
 	m := NewManager()
+	t.Cleanup(m.Stop)
 	m.timeout = 30 * time.Millisecond
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	m.now = clock.Now
 	r := &recorder{}
 
 	submit(m, false, 100, "net1", "a1", r)
-	time.Sleep(15 * time.Millisecond)
+	clock.Advance(15 * time.Millisecond)
 
 	submit(m, false, 100, "net1", "a2", r)
-	time.Sleep(15 * time.Millisecond)
+	clock.Advance(15 * time.Millisecond)
 
 	if submit(m, false, 200, "net2", "b1", r) {
 		t.Fatal("slot should still be held; touch extended the timeout")
 	}
 
-	time.Sleep(20 * time.Millisecond)
+	clock.Advance(20 * time.Millisecond)
 	if submit(m, false, 300, "net3", "c1", r) {
 		t.Fatal("stream 300 should wait behind stream 200 after the reclaim")
 	}

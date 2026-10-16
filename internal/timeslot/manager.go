@@ -121,12 +121,15 @@ type Manager struct {
 	network   string // network name, or "all" for a shared manager (for metric labels)
 	stopped   bool
 	wg        sync.WaitGroup
+	// now returns the current time. Tests replace it to control timeouts.
+	now func() time.Time
 }
 
 // NewManager creates a Manager with the default timeout.
 func NewManager() *Manager {
 	return &Manager{
 		timeout: DefaultTimeout,
+		now:     time.Now,
 	}
 }
 
@@ -174,7 +177,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 	}
 
 	ss := &m.slots[slotIndex(slot)]
-	now := time.Now()
+	now := m.now()
 
 	if ss.active == nil || ss.active.id != streamID {
 		m.sweepLocked(slot, ss, now)
@@ -288,7 +291,7 @@ func (m *Manager) onTimer(slot bool) {
 		return
 	}
 	ss := &m.slots[slotIndex(slot)]
-	now := time.Now()
+	now := m.now()
 	m.sweepLocked(slot, ss, now)
 	m.armLocked(slot, ss, now)
 }
@@ -377,7 +380,7 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	ss.pending[0] = nil
 	ss.pending = ss.pending[1:]
 	delete(ss.byID, next.id)
-	now := time.Now()
+	now := m.now()
 	next.lastSeen = now
 	ss.active = next
 	slog.Debug("timeslot activating pending stream",
@@ -411,7 +414,7 @@ func (m *Manager) send(slot bool) {
 		e := s.queue[0]
 		s.queue[0] = entry{}
 		s.queue = s.queue[1:]
-		s.lastSeen = time.Now()
+		s.lastSeen = m.now()
 		m.mu.Unlock()
 
 		if s.sink != nil {
