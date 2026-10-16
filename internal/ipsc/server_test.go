@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2331,28 +2332,68 @@ func TestSendUserPacketGivesUpWhenServerStops(t *testing.T) {
 	requireReturns(t, "SendUserPacket", func() { s.SendUserPacket(t.Context(), []byte("x")) })
 }
 
+// TestPacePeerSpacesConcurrentSenders starts two senders to one peer at
+// once, on a fake clock, right after a send to the peer. They get send
+// times one and two paces later, whichever comes first.
 func TestPacePeerSpacesConcurrentSenders(t *testing.T) {
 	t.Parallel()
 	s := NewIPSCServer(testConfig(false, ""), nil)
 	s.pace = 50 * time.Millisecond
-	s.lastSend[1] = time.Now()
+	now := time.Unix(1, 0)
+	s.now = func() time.Time { return now }
+	s.lastSend[1] = now
+	waits := make(chan time.Duration, 2)
+	s.newTimer = func(d time.Duration) *time.Timer {
+		waits <- d
+		return time.NewTimer(0)
+	}
 	var wg sync.WaitGroup
-	times := make([]time.Time, 2)
-	for i := range times {
+	for range 2 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if !s.pacePeer(t.Context(), 1) {
 				t.Error("pacePeer gave up")
 			}
-			times[i] = time.Now()
 		}()
 	}
 	wg.Wait()
-	gap := times[0].Sub(times[1]).Abs()
-	if gap < s.pace-5*time.Millisecond {
-		t.Fatalf("two senders released %v apart, want at least %v", gap, s.pace)
+	got := []time.Duration{<-waits, <-waits}
+	slices.Sort(got)
+	if got[0] != s.pace || got[1] != 2*s.pace {
+		t.Fatalf("senders wait %v, want %v and %v", got, s.pace, 2*s.pace)
 	}
+}
+
+// TestPacePeerIsFIFO starts three senders to one peer, one after another,
+// on a fake clock while a send to the peer was just claimed. Each must wait
+// one pace longer than the one before it, in the order they came, so a
+// sender that keeps sending cannot hold off one that came after it.
+func TestPacePeerIsFIFO(t *testing.T) {
+	t.Parallel()
+	s := NewIPSCServer(testConfig(false, ""), nil)
+	now := time.Unix(1, 0)
+	s.now = func() time.Time { return now }
+	s.lastSend[1] = now
+	waits := make(chan time.Duration)
+	s.newTimer = func(d time.Duration) *time.Timer {
+		waits <- d
+		return time.NewTimer(0)
+	}
+	var wg sync.WaitGroup
+	for i := 1; i <= 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !s.pacePeer(t.Context(), 1) {
+				t.Error("pacePeer gave up")
+			}
+		}()
+		if d := <-waits; d != time.Duration(i)*s.pace {
+			t.Errorf("sender %d waits %v, want %v", i, d, time.Duration(i)*s.pace)
+		}
+	}
+	wg.Wait()
 }
 
 func TestPaceDrainsTwoBusySlots(t *testing.T) {
@@ -2371,22 +2412,9 @@ func TestPaceDrainsTwoBusySlots(t *testing.T) {
 		at := start.Add(time.Duration(i) * frame)
 		arrivals = append(arrivals, at, at)
 	}
-	var prev time.Time
 	var lag time.Duration
 	for _, arrived := range arrivals {
-		now := arrived
-		if prev.After(now) {
-			now = prev
-		}
-		for {
-			wait := s.claimSendLocked(1, now)
-			if wait <= 0 {
-				break
-			}
-			now = now.Add(wait + overshoot)
-		}
-		prev = now
-		lag = now.Sub(arrived)
+		lag = s.claimSendLocked(1, arrived).Add(overshoot).Sub(arrived)
 	}
 	if lag > 2*s.pace {
 		t.Fatalf("last packet sent %v after it arrived, want at most %v", lag, 2*s.pace)

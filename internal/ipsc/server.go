@@ -32,6 +32,7 @@ type IPSCServer struct {
 	lastSend map[uint32]time.Time
 	pace     time.Duration                   // minimum gap between packets to one peer
 	newTimer func(time.Duration) *time.Timer // time.NewTimer; tests replace it
+	now      func() time.Time                // time.Now; tests replace it
 
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
 	bursts       chan burst
@@ -152,6 +153,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		lastSend: map[uint32]time.Time{},
 		pace:     defaultPace,
 		newTimer: time.NewTimer,
+		now:      time.Now,
 		bursts:   make(chan burst, burstQueueSize),
 		done:     make(chan struct{}),
 	}
@@ -858,42 +860,40 @@ func (s *IPSCServer) SendUserPacket(ctx context.Context, data []byte) {
 	}
 }
 
-// pacePeer waits until a packet may be sent to peerID and claims that send
-// time. It checks again after each wait, so concurrent callers are spaced
-// out too. It returns false if ctx is done or the server stops first.
+// pacePeer waits until a packet may be sent to peerID. It claims the send
+// time of the packet when it is called, so concurrent callers send in the
+// order they called, each s.pace after the one before: a sender that keeps
+// sending cannot hold off another. It returns false if ctx is done or the
+// server stops first.
 func (s *IPSCServer) pacePeer(ctx context.Context, peerID uint32) bool {
 	s.mu.Lock()
-	for {
-		wait := s.claimSendLocked(peerID, time.Now())
-		if wait <= 0 {
-			break
-		}
-		s.mu.Unlock()
-		timer := s.newTimer(wait)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return false
-		case <-s.done:
-			timer.Stop()
-			return false
-		}
-		s.mu.Lock()
-	}
+	now := s.now()
+	wait := s.claimSendLocked(peerID, now).Sub(now)
 	s.mu.Unlock()
-	return true
+	if wait <= 0 {
+		return true
+	}
+	timer := s.newTimer(wait)
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-s.done:
+		timer.Stop()
+		return false
+	}
 }
 
-// claimSendLocked claims now as the send time for peerID and returns 0, or
-// returns how long to wait if the last send was less than s.pace ago. s.mu
+// claimSendLocked claims the next send time for peerID and returns it: now,
+// or s.pace after the send time claimed before it when that is later. s.mu
 // must be held.
-func (s *IPSCServer) claimSendLocked(peerID uint32, now time.Time) time.Duration {
-	if last := s.lastSend[peerID]; !last.IsZero() {
-		if wait := s.pace - now.Sub(last); wait > 0 {
-			return wait
-		}
+func (s *IPSCServer) claimSendLocked(peerID uint32, now time.Time) time.Time {
+	at := now
+	if next := s.lastSend[peerID].Add(s.pace); !s.lastSend[peerID].IsZero() && next.After(at) {
+		at = next
 	}
-	s.lastSend[peerID] = now
-	return 0
+	s.lastSend[peerID] = at
+	return at
 }
