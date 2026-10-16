@@ -980,10 +980,11 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 	}
 }
 
-// TestDataBlockLongAfterEndPasses sends the rate 3/4 block of
-// TestDataBlockAfterEndIsDropped long after its call ended. It is then no
-// longer taken for a part of that call and goes to MMDVM.
-func TestDataBlockLongAfterEndPasses(t *testing.T) {
+// TestDataBlockLongAfterEndIsDropped sends the rate 3/4 block of
+// TestDataBlockAfterEndIsDropped long after its call ended. It starts a
+// new call with no data header, so it is dropped as well, and no stream is
+// left open.
+func TestDataBlockLongAfterEndIsDropped(t *testing.T) {
 	t.Parallel()
 	tr, clock, _ := newClockedTranslator(t)
 	hdr, _ := hex.DecodeString("840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679")
@@ -992,7 +993,10 @@ func TestDataBlockLongAfterEndPasses(t *testing.T) {
 	tr.TranslateToMMDVM(hdr[0], hdr)
 	tr.TranslateToMMDVM(end[0], end)
 	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
-	if out := tr.TranslateToMMDVM(block[0], block); len(out) != 1 {
+	if out := tr.TranslateToMMDVM(block[0], block); len(out) != 0 {
 		t.Fatalf("block long after the end: got %d packets", len(out))
+	}
+	if len(tr.reverseStreams) != 0 {
+		t.Fatalf("%d streams open", len(tr.reverseStreams))
 	}
 }

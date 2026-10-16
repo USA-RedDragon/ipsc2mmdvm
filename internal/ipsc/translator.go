@@ -573,11 +573,7 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 // its CRC or never came, or its packet already ended. MMDVMHost discards
 // such a block from the network (CDMRSlot::writeNetwork).
 func (ss *streamState) headerless(dataType enums.DataType) bool {
-	switch dataType { //nolint:exhaustive // only data blocks belong to a packet
-	case enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
-		return !ss.data.asm.InProgress()
-	}
-	return false
+	return ss.data.headerless(dataType)
 }
 
 // lastDataBlock adds a data burst to the data packet of the call and
@@ -592,6 +588,16 @@ type DataCall struct {
 	// pHead is set after a first header with the proprietary SAP, which a
 	// P_HEAD should follow.
 	pHead bool
+}
+
+// headerless reports whether dataType is a rate 1/2, 3/4 or 1 data block
+// and c has no data packet in progress for it.
+func (c *DataCall) headerless(dataType enums.DataType) bool {
+	switch dataType { //nolint:exhaustive // only data blocks belong to a packet
+	case enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
+		return !c.asm.InProgress()
+	}
+	return false
 }
 
 // DataBurstEndsCall adds the data burst data, a data header or a rate 1/2,
@@ -1052,6 +1058,9 @@ type reverseStreamState struct {
 	slot      bool
 	headerLC  [12]byte
 	hasLC     bool
+
+	// data is the data packet of the call so far, sent to MMDVM.
+	data DataCall
 }
 
 // rtpMaxForward is the largest forward RTP timestamp step (8 kHz units,
@@ -1168,13 +1177,10 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		results = append(results, pkts...)
 
 	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
-		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12:
-		if pkt, ok := t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, data); ok {
+		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12, ipscBurstRate34:
+		if pkt, ok := t.reverseDataBurstLocked(src, dst, groupCall, slot, rss, burstType, data); ok {
 			results = append(results, pkt)
 		}
-
-	case ipscBurstRate34:
-		results = append(results, t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data))
 
 	default:
 		t.logs.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
@@ -1217,6 +1223,32 @@ func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool
 	if isEnd && isDataPacket(packetType) {
 		t.endReverseDataCallLocked(callControl, now)
 	}
+}
+
+// reverseDataBurstLocked builds the MMDVM packet for the IPSC data burst
+// data of burstType in the call of rss, and adds it to the data packet of
+// the call. It drops a rate 1/2 or 3/4 block that is not part of a data
+// packet in progress. An XPR 8400 sends a copy of the last preamble CSBK in
+// place of a Defined Short Data header, so the blocks of such a message
+// arrive with no header. MMDVMHost discards them. The caller must hold
+// t.mu.
+func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint, groupCall, slot bool, rss *reverseStreamState, burstType byte, data []byte) (mmdvm.Packet, bool) {
+	if rss.data.headerless(enums.DataType(burstType)) {
+		t.logs.Debug("IPSCTranslator: dropping data block outside a data packet",
+			"burstType", fmt.Sprintf("0x%02X", burstType))
+		return mmdvm.Packet{}, false
+	}
+	var pkt mmdvm.Packet
+	if burstType == ipscBurstRate34 {
+		pkt = t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data)
+	} else {
+		var ok bool
+		if pkt, ok = t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, data); !ok {
+			return mmdvm.Packet{}, false
+		}
+	}
+	DataBurstEndsCall(&rss.data, pkt.DMRData)
+	return pkt, true
 }
 
 // isDataPacket reports whether packetType is a group or private data

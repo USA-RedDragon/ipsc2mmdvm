@@ -1321,6 +1321,9 @@ func TestTranslateToMMDVMDataBurstTypes(t *testing.T) {
 	for _, burstType := range []byte{0x00, 0x03, 0x04, 0x05, 0x06, 0x07} {
 		tr := newTestTranslator(t)
 		data := makeTestIPSCPacket(0x83, burstType, true, false)
+		if burstType == ipscBurstRate12 {
+			startIPSCDataPacket(t, tr, data)
+		}
 		out := tr.TranslateToMMDVM(0x83, data)
 		if len(out) != 1 {
 			t.Fatalf("burst 0x%02X: expected 1 packet, got %d", burstType, len(out))
@@ -1367,7 +1370,11 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 			t.Fatalf("%s: payload\n got % X\nwant % X", dt.String(), got, payload)
 		}
 
-		back := newTestTranslator(t).TranslateToMMDVM(out[0][0], out[0])
+		rev := newTestTranslator(t)
+		if dt == enums.DataTypeRate12 {
+			startIPSCDataPacket(t, rev, out[0])
+		}
+		back := rev.TranslateToMMDVM(out[0][0], out[0])
 		if len(back) != 1 {
 			t.Fatalf("%s: expected 1 packet back, got %d", dt.String(), len(back))
 		}
@@ -1375,6 +1382,31 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 		if !ok || got != payload {
 			t.Fatalf("%s: round trip payload % X (ok=%t), want % X", dt.String(), got, ok, payload)
 		}
+	}
+}
+
+// startIPSCDataPacket sends tr an IPSC unconfirmed data header with two
+// blocks to follow, with the call fields of data, an IPSC user packet, so
+// that a data block of the call of data belongs to a data packet.
+func startIPSCDataPacket(t *testing.T, tr *IPSCTranslator, data []byte) {
+	t.Helper()
+	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+		SAP: enums.SAPIPBasedPacketData, LLIDDestination: 200, LLIDSource: 100, BlocksToFollow: 2,
+	}}
+	burst, err := layer2.BuildBurst(&h, 0, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := decodeBPTCPayload(burst, enums.DataTypeDataHeader)
+	if !ok {
+		t.Fatal("cannot decode the data header")
+	}
+	hp := append([]byte(nil), data...)
+	hp[17] &^= ipscCallInfoEnd
+	hp[30] = ipscBurstDataHeader
+	copy(hp[38:50], payload[:])
+	if out := tr.TranslateToMMDVM(hp[0], hp); len(out) != 1 {
+		t.Fatalf("data header: got %d MMDVM packets, want 1", len(out))
 	}
 }
 
