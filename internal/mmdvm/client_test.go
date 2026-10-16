@@ -1916,6 +1916,50 @@ func TestStartSetsTranslatorColorCode(t *testing.T) {
 	}
 }
 
+// TestStopEndsOpenIPSCCalls starts a voice call from the master toward IPSC
+// and stops the client before the call ends. Stop sends IPSC the voice
+// terminator of the call, so the repeater does not hold the slot.
+func TestStopEndsOpenIPSCCalls(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.state.Store(uint32(STATE_READY))
+	client.netRewrites = []rewrite.Rule{
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+	}
+	var mu sync.Mutex
+	var got [][]byte
+	client.SetIPSCHandler(func(_ context.Context, data []byte) {
+		mu.Lock()
+		got = append(got, data)
+		mu.Unlock()
+	})
+	client.wg.Add(1)
+	go client.handler()
+
+	pkt := proto.Packet{
+		Signature: tagDMRD, Src: 100, Dst: 200, Repeater: 3001, GroupCall: true,
+		FrameType: 2, DTypeOrVSeq: 1, StreamID: 0x5555,
+	}
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: pkt.Encode()}
+	waitFor(t, 2*time.Second, "voice headers", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 3
+	})
+	client.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 4 {
+		t.Fatalf("got %d IPSC packets, want 3 voice headers and a terminator", len(got))
+	}
+	term := got[3]
+	if len(term) != 54 || term[30] != 0x02 || term[17]&0x40 == 0 ||
+		string(term[13:17]) != string(got[0][13:17]) {
+		t.Fatalf("last packet %x, want the voice terminator of call % x", term, got[0][13:17])
+	}
+}
+
 func testSlotTypeColorCode(data [33]byte) uint8 {
 	return uint8(layer2.RawBurst(data).SlotType().ColorCode)
 }

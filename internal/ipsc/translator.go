@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -69,6 +71,7 @@ type streamState struct {
 	embedded     embeddedFragments // embedded LC fragments of bursts B-E
 	lastVoicePos int               // superframe position of the last voice burst
 	firstPacket  bool              // true for the very first packet
+	last         mmdvm.Packet      // the last MMDVM packet of the stream
 }
 
 // IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
@@ -237,6 +240,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 
 	ss, existed := t.streamLocked(uint32(streamID))
 	ss.lastSeen = now
+	ss.last = pkt
 	defer func(id uint32) {
 		if !existed && len(results) == 0 {
 			t.removeStreamLocked(id)
@@ -387,6 +391,54 @@ func (t *IPSCTranslator) EndDataCall(pkt mmdvm.Packet) [][]byte {
 		t.metrics.TranslatorPackets.WithLabelValues("mmdvm_to_ipsc").Add(float64(len(results)))
 	}
 	return results
+}
+
+// EndStreams ends every MMDVM-to-IPSC call that is still open, as on
+// shutdown, and returns the IPSC packets that end them: the voice terminator
+// of a voice call, with the LC of the call, and the end packet of a data
+// call (see endDataCall). An XPR 8400 that gets no voice terminator goes on
+// to send Idle bursts with the carrier up for about 7 s.
+func (t *IPSCTranslator) EndStreams() [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var results [][]byte
+	for _, id := range slices.Sorted(maps.Keys(t.streams)) {
+		ss := t.streams[id]
+		if !isVoiceCallPacket(ss.last) {
+			results = append(results, t.endDataCall(ss.last, ss, id)...)
+			continue
+		}
+		lc := pdu.LCBytes(ss.lc)
+		if !ss.hasLC {
+			lc = constructLC(ss.last.Src, ss.last.Dst, ss.last.GroupCall)
+		}
+		term := ss.last
+		term.FrameType, term.DTypeOrVSeq = mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC)
+		dmrData, err := layer2.BuildDataBurst(fullLCCodeword(lc, enums.DataTypeTerminatorWithLC),
+			enums.DataTypeTerminatorWithLC, t.colorCode, layer2.SyncSourceBS)
+		if err != nil {
+			slog.Debug("IPSCTranslator: cannot build terminator", "error", err)
+		}
+		term.DMRData = dmrData
+		results = append(results, t.buildVoiceTerminator(term, ss, fullLCFromBurst(term, enums.DataTypeTerminatorWithLC)))
+		t.removeStreamLocked(id)
+	}
+	if t.metrics != nil && len(results) > 0 {
+		t.metrics.TranslatorPackets.WithLabelValues("mmdvm_to_ipsc").Add(float64(len(results)))
+	}
+	return results
+}
+
+// isVoiceCallPacket reports whether pkt is a packet of a voice call: a
+// voice burst, or a voice LC header or PI header.
+func isVoiceCallPacket(pkt mmdvm.Packet) bool {
+	switch pkt.FrameType {
+	case mmdvmFrameTypeVoice, mmdvmFrameTypeVoiceSync:
+		return true
+	case mmdvmFrameTypeDataSync:
+		return pkt.DTypeOrVSeq == uint(enums.DataTypeVoiceLCHeader) || pkt.DTypeOrVSeq == uint(enums.DataTypePIHeader)
+	}
+	return false
 }
 
 // CleanupStream removes state for an MMDVM stream ID in both directions

@@ -150,6 +150,10 @@ type outboundDataCall struct {
 // outDataIdle is how long an unfinished outbound data call is kept.
 const outDataIdle = 30 * time.Second
 
+// endCallsTimeout bounds how long Stop spends sending IPSC the packets
+// that end the calls still open toward it.
+const endCallsTimeout = time.Second
+
 // rxPacket is a datagram read from the connection of generation gen.
 type rxPacket struct {
 	gen  uint64
@@ -810,6 +814,27 @@ func (h *MMDVMClient) Stop() {
 
 	// Wait for all goroutines to finish.
 	h.wg.Wait()
+	h.endOutboundCalls()
+}
+
+// endOutboundCalls sends IPSC the packets that end the calls this client
+// still has open toward it, so that a repeater ends them at once rather
+// than holding the slot. Stop calls it after the goroutines that translate
+// have returned, while the IPSC server still runs; it gives up after
+// endCallsTimeout.
+func (h *MMDVMClient) endOutboundCalls() {
+	handler := h.ipscHandler.Load()
+	if handler == nil || h.translator == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), endCallsTimeout)
+	defer cancel()
+	for _, data := range h.translator.EndStreams() {
+		if ctx.Err() != nil {
+			return
+		}
+		(*handler)(ctx, data)
+	}
 }
 
 // sendRPTCLDirect writes the disconnect message directly on the connection.
