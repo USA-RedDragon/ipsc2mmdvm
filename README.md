@@ -219,6 +219,13 @@ sudo journalctl -u ipsc2mmdvm -f
 - **Call hang.** After a voice call to the repeater ends on a timeslot, data and CSBK calls to the repeater on that timeslot wait for `ipsc.call-hang-hold` (2.5 s by default), and after a data call they wait for `ipsc.data-hang-hold` (1.2 s by default). Then they go out at their original pace. An XPR 8400 drops the data and CSBK calls it gets during its call hang of about 2 s after voice, and a data call that comes less than about 1 s after another. Voice never waits.
 - **Repeater registration.** The repeater must register with ipsc2mmdvm (IPSC master register request, `0x90`) before it gets any traffic. ipsc2mmdvm ignores keepalives and voice from a repeater that has not registered. With IPSC authentication on, a keepalive with a valid HMAC registers the repeater, so a repeater comes back within one keepalive interval after ipsc2mmdvm restarts. A repeater that sends nothing for 120 seconds is removed and must register again.
 
+### Repeater Limits
+
+These limits were seen on an XPR 8400. ipsc2mmdvm cannot work around them.
+
+- **Defined Short Data.** The repeater does not send a Defined Short Data header (data header format 13) over IPSC. It sends a copy of the last preamble CSBK in its place, then the rate 1/2 blocks. The SAP and format of the header are lost, so ipsc2mmdvm cannot send these messages to a master. It sends the preambles and drops the blocks that have no header, as MMDVMHost does.
+- **Rate 1 data.** The repeater does not relay rate 1 data correctly. It sends a clean rate 1 block as a data header packet with a meaningless payload, and a marginal one as a packet with the raw bits. ipsc2mmdvm does not send rate 1 data in either direction.
+
 ## Configuration Reference
 
 Settings can be given in the config file, as environment variables, or as command-line flags.
