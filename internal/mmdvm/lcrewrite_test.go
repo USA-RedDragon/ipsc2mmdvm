@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
@@ -106,6 +107,11 @@ func TestSrcRewriteRewritesLinkControlToIPSC(t *testing.T) {
 		}
 	}
 
+	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 3+6+1
+	})
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 3+6+1 {
@@ -201,8 +207,8 @@ func TestSrcRewriteRewritesCSBKToIPSC(t *testing.T) {
 	c := newTestClient(t)
 	c.state.Store(uint32(STATE_READY))
 	c.netRewrites = []rewrite.Rule{&rewrite.SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 1, ToTG: 9, Range: 1}}
-	var got [][]byte
-	c.SetIPSCHandler(func(_ context.Context, d []byte) { got = append(got, d) })
+	got := make(chan []byte, 4)
+	c.SetIPSCHandler(func(_ context.Context, d []byte) { got <- d })
 
 	src, err := ipsc.NewIPSCTranslator()
 	if err != nil {
@@ -213,8 +219,14 @@ func TestSrcRewriteRewritesCSBKToIPSC(t *testing.T) {
 		t.Fatalf("expected 1 MMDVM packet, got %d", len(pkts))
 	}
 	c.handleReady(pkts[0].Encode())
-	if len(got) != 1 || got[0][0] != 0x83 || hex.EncodeToString(got[0][38:50]) != "bd00c0010000090004d2fc72" {
-		t.Fatalf("IPSC CSBK %v, want group data with BD 00 C0 01 00 00 09 00 04 D2 FC 72", got)
+	var p []byte
+	select {
+	case p = <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no IPSC packet")
+	}
+	if len(got) != 0 || p[0] != 0x83 || hex.EncodeToString(p[38:50]) != "bd00c0010000090004d2fc72" {
+		t.Fatalf("IPSC CSBK %x, want group data with BD 00 C0 01 00 00 09 00 04 D2 FC 72", p)
 	}
 }
 

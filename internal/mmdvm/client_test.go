@@ -1971,6 +1971,62 @@ func TestInboundReplaysAreNotPaced(t *testing.T) {
 	}
 }
 
+// TestSlowIPSCHandlerDoesNotHoldUpTheMaster sends a voice header from the
+// master on each timeslot while the IPSC handler is stuck in a send, as
+// when it waits for its pace to a peer. Reading from the master goes on,
+// and once the handler returns, every packet goes out in the order it came.
+func TestSlowIPSCHandlerDoesNotHoldUpTheMaster(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	client.state.Store(uint32(STATE_READY))
+	client.netRewrites = []rewrite.Rule{
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
+		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 2, FromTG: 1, ToSlot: 2, ToTG: 1, Range: 999999},
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var mu sync.Mutex
+	var got [][]byte
+	client.SetIPSCHandler(func(_ context.Context, data []byte) {
+		<-release
+		mu.Lock()
+		got = append(got, data)
+		mu.Unlock()
+	})
+	t.Cleanup(client.Stop)
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		for _, slot := range []bool{false, true} {
+			pkt := proto.Packet{
+				Signature: tagDMRD, Src: 100, Dst: 200, Repeater: 3001, GroupCall: true, Slot: slot,
+				FrameType: 2, DTypeOrVSeq: 1, StreamID: uint(slotIndex(slot)) + 0x100,
+			}
+			client.handleReady(pkt.Encode())
+		}
+	}()
+	select {
+	case <-read:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading from the master waited for the IPSC handler")
+	}
+	releaseOnce.Do(func() { close(release) })
+	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) >= 6
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for i, p := range got {
+		if ts2 := p[17]&0x20 != 0; len(got) != 6 || ts2 != (i >= 3) {
+			t.Fatalf("packet %d of %d: timeslot 2 %v, want the 3 voice headers of TS1 then those of TS2", i, len(got), ts2)
+		}
+	}
+}
+
 func testSlotTypeColorCode(data [33]byte) uint8 {
 	return uint8(layer2.RawBurst(data).SlotType().ColorCode)
 }

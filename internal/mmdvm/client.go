@@ -44,14 +44,19 @@ type MMDVMClient struct {
 	rxWaiting    atomic.Bool  // rx holds a packet the handler has not taken yet
 	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
 	ipscHandler  atomic.Pointer[func(ctx context.Context, data []byte)]
-	translator   *ipsc.IPSCTranslator
-	netLC        *ipsc.LCRewriter // re-encodes LC after netRewrites
-	rfLC         *ipsc.LCRewriter // re-encodes LC after rfRewrites
-	dial         func(ctx context.Context, network, address string) (net.Conn, error)
-	dialTimeout  time.Duration
-	sessMu       sync.Mutex // serializes handshake transitions with supervise
-	salt         []byte     // last RPTACK salt, guarded by sessMu
-	resentAt     time.Time  // last handshake resend, guarded by sessMu
+	// ipscOut queues the IPSC packets for forwardIPSC, which closes
+	// ipscOutDone when it returns. ipscOnce starts it on first use.
+	ipscOnce    sync.Once
+	ipscOut     chan []byte
+	ipscOutDone chan struct{}
+	translator  *ipsc.IPSCTranslator
+	netLC       *ipsc.LCRewriter // re-encodes LC after netRewrites
+	rfLC        *ipsc.LCRewriter // re-encodes LC after rfRewrites
+	dial        func(ctx context.Context, network, address string) (net.Conn, error)
+	dialTimeout time.Duration
+	sessMu      sync.Mutex // serializes handshake transitions with supervise
+	salt        []byte     // last RPTACK salt, guarded by sessMu
+	resentAt    time.Time  // last handshake resend, guarded by sessMu
 
 	// Rewrite rules built from config, applied to packets
 	// flowing through this network.
@@ -149,6 +154,10 @@ type outboundDataCall struct {
 
 // outDataIdle is how long an unfinished outbound data call is kept.
 const outDataIdle = 30 * time.Second
+
+// ipscQueueSize is how many IPSC packets a client queues for the IPSC
+// handler, about 4 s of voice on both timeslots.
+const ipscQueueSize = 256
 
 // endCallsTimeout bounds how long Stop spends sending IPSC the packets
 // that end the calls still open toward it.
@@ -814,6 +823,8 @@ func (h *MMDVMClient) Stop() {
 
 	// Wait for all goroutines to finish.
 	h.wg.Wait()
+	h.ipscQueue()
+	<-h.ipscOutDone
 	h.endOutboundCalls()
 }
 
@@ -864,18 +875,53 @@ func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
 	}
 }
 
-// sendIPSC sends IPSC packets through the IPSC handler.
+// sendIPSC queues IPSC packets for the IPSC handler, which forwardIPSC
+// calls in order. It never waits for the handler, which paces its sends,
+// so a slow send cannot hold up the goroutine that reads the master. A
+// packet that finds the queue full is dropped.
 func (h *MMDVMClient) sendIPSC(ipscPackets [][]byte) {
-	handler := h.ipscHandler.Load()
-	if handler == nil {
+	if h.ipscHandler.Load() == nil {
 		return
 	}
-	ctx := stopContext{h.done}
+	queue := h.ipscQueue()
 	for _, ipscData := range ipscPackets {
-		if ctx.Err() != nil {
+		select {
+		case <-h.done:
 			return
+		case queue <- ipscData:
+		default:
+			slog.Warn("IPSC send queue full, dropping packet", "network", h.cfg.Name)
+			if h.metrics != nil {
+				h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "ipsc_queue_full").Inc()
+			}
 		}
-		(*handler)(ctx, ipscData)
+	}
+}
+
+// ipscQueue returns the queue of forwardIPSC, and starts it the first time.
+func (h *MMDVMClient) ipscQueue() chan<- []byte {
+	h.ipscOnce.Do(func() {
+		h.ipscOut = make(chan []byte, ipscQueueSize)
+		h.ipscOutDone = make(chan struct{})
+		go h.forwardIPSC()
+	})
+	return h.ipscOut
+}
+
+// forwardIPSC passes the packets that sendIPSC queues to the IPSC handler,
+// one at a time in order, until the client stops.
+func (h *MMDVMClient) forwardIPSC() {
+	defer close(h.ipscOutDone)
+	ctx := stopContext{h.done}
+	for {
+		select {
+		case <-h.done:
+			return
+		case data := <-h.ipscOut:
+			if handler := h.ipscHandler.Load(); handler != nil {
+				(*handler)(ctx, data)
+			}
+		}
 	}
 }
 
