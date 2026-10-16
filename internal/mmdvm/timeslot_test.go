@@ -68,6 +68,8 @@ type ipscRecord struct {
 	src         uint32
 	callControl uint32
 	burstType   byte
+	raw         []byte
+	at          time.Time
 }
 
 type ipscRecorder struct {
@@ -83,6 +85,8 @@ func (r *ipscRecorder) handler(name string) func(context.Context, []byte) {
 			src:         uint32(d[6])<<16 | uint32(d[7])<<8 | uint32(d[8]),
 			callControl: binary.BigEndian.Uint32(d[13:17]),
 			burstType:   d[30],
+			raw:         append([]byte(nil), d...),
+			at:          time.Now(),
 		}
 		r.mu.Lock()
 		hook := r.hook

@@ -70,6 +70,13 @@ type MMDVMClient struct {
 	outDataMu sync.Mutex
 	outData   map[uint]*outboundDataCall
 
+	// preambles holds the outbound call with preambles on each timeslot,
+	// to send its preambles and data as one call. slotStreams holds when
+	// each outbound stream on each timeslot was last seen.
+	preambleMu  sync.Mutex
+	preambles   [2]*preambleCall
+	slotStreams [2]map[uint]time.Time
+
 	// inboundSlots holds the timeslot of each inbound call that has not
 	// ended, to end a data call whose last packet was dropped.
 	inboundMu    sync.Mutex
@@ -778,6 +785,12 @@ func (h *MMDVMClient) Stop() {
 		// Signal all goroutines to stop.
 		close(h.done)
 
+		h.preambleMu.Lock()
+		for slot := range h.preambles {
+			h.forgetPreambleCallLocked(slot)
+		}
+		h.preambleMu.Unlock()
+
 		// Must follow close(done): Manager.Stop waits for replays, and
 		// a replay blocked in sendInbound only returns once done closes.
 		if h.inboundTSMgr != nil {
@@ -821,16 +834,23 @@ func (h *MMDVMClient) forwardTX() {
 
 // translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
 func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
+	if h.ipscHandler.Load() != nil && h.translator != nil {
+		h.sendIPSC(h.translator.TranslateToIPSC(packet))
+	}
+}
+
+// sendIPSC sends IPSC packets through the IPSC handler.
+func (h *MMDVMClient) sendIPSC(ipscPackets [][]byte) {
 	handler := h.ipscHandler.Load()
-	if handler != nil && h.translator != nil {
-		ipscPackets := h.translator.TranslateToIPSC(packet)
-		ctx := stopContext{h.done}
-		for _, ipscData := range ipscPackets {
-			if ctx.Err() != nil {
-				return
-			}
-			(*handler)(ctx, ipscData)
+	if handler == nil {
+		return
+	}
+	ctx := stopContext{h.done}
+	for _, ipscData := range ipscPackets {
+		if ctx.Err() != nil {
+			return
 		}
+		(*handler)(ctx, ipscData)
 	}
 }
 
@@ -923,11 +943,18 @@ func isTerminator(pkt proto.Packet) bool {
 // the shared timeslot manager. Buffered packets are later sent by
 // forwardOutbound on this client, so a call always uses one translator.
 func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
+	packet, ended := h.joinPreambleCall(packet)
+	if ended != nil {
+		h.endOutboundCall(ended)
+	}
+	end := h.outboundCallEnds(packet)
+	if end {
+		h.preambleCallEnded(packet)
+	}
 	if h.outboundTSMgr == nil {
 		h.translateAndForwardToIPSC(packet)
 		return
 	}
-	end := h.outboundCallEnds(packet)
 	switch h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet, end, h.forwardOutbound) {
 	case timeslot.Deliver:
 		h.translateAndForwardToIPSC(packet)
@@ -951,8 +978,13 @@ func (h *MMDVMClient) countTimeslotDrop(pkt proto.Packet) {
 }
 
 func (h *MMDVMClient) forwardOutbound(packet any) {
-	if pkt, ok := packet.(proto.Packet); ok {
-		h.translateAndForwardToIPSC(pkt)
+	switch p := packet.(type) {
+	case proto.Packet:
+		h.translateAndForwardToIPSC(p)
+	case outboundEnd:
+		if h.translator != nil {
+			h.sendIPSC(h.translator.EndDataCall(p.pkt))
+		}
 	}
 }
 

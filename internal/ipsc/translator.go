@@ -367,6 +367,28 @@ func (t *IPSCTranslator) streamLocked(streamID uint32) (*streamState, bool) {
 	return ss, false
 }
 
+// EndDataCall ends the data call of the MMDVM stream pkt.StreamID when no
+// burst of it carries the end flag, such as a call of preamble CSBKs that
+// no data follows, and returns the packet that ends it on IPSC, as an XPR
+// 8400 ends a call when the signal ends. pkt gives the call fields. It
+// returns nothing when no packet of the call was sent.
+func (t *IPSCTranslator) EndDataCall(pkt mmdvm.Packet) [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if pkt.StreamID > math.MaxUint32 {
+		return nil
+	}
+	ss, ok := t.streams[uint32(pkt.StreamID)]
+	if !ok {
+		return nil
+	}
+	results := t.endDataCall(pkt, ss, uint32(pkt.StreamID))
+	if t.metrics != nil && len(results) > 0 {
+		t.metrics.TranslatorPackets.WithLabelValues("mmdvm_to_ipsc").Add(float64(len(results)))
+	}
+	return results
+}
+
 // CleanupStream removes state for an MMDVM stream ID in both directions
 // (e.g. on timeout): the MMDVM-to-IPSC stream with that ID and any
 // IPSC-to-MMDVM stream that was assigned that ID.
