@@ -9,6 +9,7 @@ package timeslot
 
 import (
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -75,6 +76,7 @@ type stream struct {
 	sink     Sink
 	queue    []entry
 	ended    bool // the call's terminator is in queue
+	voice    bool // the first packet of the call is voice (SetCallHang)
 	lastSeen time.Time
 
 	// The arrival time of the last packet the sender replayed, and when
@@ -108,6 +110,9 @@ type slotState struct {
 	sending bool
 	pending []*stream // waiting calls in arrival order
 	byID    map[uint]*stream
+	// holdUntil is when the call hang after the last voice call on the
+	// slot ends (SetCallHang).
+	holdUntil time.Time
 	// timer reclaims the slot when the active call goes stale, so
 	// waiting calls do not depend on a new packet to be promoted.
 	timer *time.Timer
@@ -136,6 +141,9 @@ type Manager struct {
 	// pace makes the sender replay a queued call at the spacing its
 	// packets arrived with (PaceReplays).
 	pace bool
+	// hold and isVoice are set by SetCallHang.
+	hold    time.Duration
+	isVoice func(packet any) bool
 }
 
 // NewManager creates a Manager with the default timeout.
@@ -198,8 +206,9 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		m.sweepLocked(slot, ss, now)
 	}
 
-	if ss.active == nil {
-		ss.active = &stream{id: streamID, network: network, sink: sink, lastSeen: now}
+	voice := m.isVoice != nil && m.isVoice(packet)
+	if ss.active == nil && ss.byID[streamID] == nil && (voice || len(ss.pending) == 0) && !m.holdingLocked(ss, packet, now) {
+		ss.active = &stream{id: streamID, network: network, sink: sink, voice: voice, lastSeen: now}
 		m.armLocked(slot, ss, now)
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(1)
@@ -209,7 +218,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		return Deliver
 	}
 
-	if ss.active.id == streamID {
+	if ss.active != nil && ss.active.id == streamID {
 		ss.active.lastSeen = now
 		if !ss.draining {
 			return Deliver
@@ -223,18 +232,21 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 			m.dropLocked(slot, dropPendingFull, 1)
 			return Dropped
 		}
-		ps = &stream{id: streamID, network: network, sink: sink}
+		ps = &stream{id: streamID, network: network, sink: sink, voice: voice}
 		ss.pending = append(ss.pending, ps)
 		if ss.byID == nil {
 			ss.byID = make(map[uint]*stream)
 		}
 		ss.byID[streamID] = ps
-		slog.Debug("timeslot busy, buffering new stream",
-			"slot", slot, "activeStream", ss.active.id,
-			"pendingStream", streamID, "network", network)
+		slog.Debug("timeslot busy or in call hang, buffering new stream",
+			"slot", slot, "pendingStream", streamID, "network", network)
 	}
 	ps.lastSeen = now
-	return m.enqueueLocked(slot, ps, packet, end)
+	v := m.enqueueLocked(slot, ps, packet, end)
+	if ss.active == nil {
+		m.armLocked(slot, ss, now)
+	}
+	return v
 }
 
 // expirePendingLocked discards waiting calls that went idle.
@@ -279,13 +291,17 @@ func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
 }
 
 // armLocked schedules the next stale check on slot: when the active call
-// or the first waiting call can expire.
+// or the first waiting call can expire, or when the call hang that holds
+// the waiting calls ends.
 func (m *Manager) armLocked(slot bool, ss *slotState, now time.Time) {
-	if m.stopped || ss.active == nil {
+	if m.stopped || (ss.active == nil && len(ss.pending) == 0) {
 		return
 	}
 	d := m.timeout
-	if !ss.draining {
+	switch {
+	case ss.active == nil:
+		d = ss.holdUntil.Sub(now)
+	case !ss.draining:
 		d = ss.active.lastSeen.Add(m.timeout).Sub(now)
 	}
 	for _, p := range ss.pending {
@@ -308,6 +324,9 @@ func (m *Manager) onTimer(slot bool) {
 	ss := &m.slots[slotIndex(slot)]
 	now := m.now()
 	m.sweepLocked(slot, ss, now)
+	if ss.active == nil && len(ss.pending) > 0 && !now.Before(ss.holdUntil) {
+		m.advanceLocked(slot, ss)
+	}
 	m.armLocked(slot, ss, now)
 }
 
@@ -384,7 +403,15 @@ func (m *Manager) Stop() {
 // and starts the slot's sender if the promoted call has packets queued.
 func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	ss.draining = false
-	if len(ss.pending) == 0 {
+	now := m.now()
+	if ss.active != nil && ss.active.voice && m.hold > 0 {
+		ss.holdUntil = now.Add(m.hold)
+	}
+	i := 0
+	if now.Before(ss.holdUntil) {
+		i = slices.IndexFunc(ss.pending, func(s *stream) bool { return s.voice })
+	}
+	if i < 0 || len(ss.pending) == 0 {
 		ss.active = nil
 		if ss.timer != nil {
 			ss.timer.Stop()
@@ -392,13 +419,12 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(0)
 		}
+		m.armLocked(slot, ss, now)
 		return
 	}
-	next := ss.pending[0]
-	ss.pending[0] = nil
-	ss.pending = ss.pending[1:]
+	next := ss.pending[i]
+	ss.pending = slices.Delete(ss.pending, i, i+1)
 	delete(ss.byID, next.id)
-	now := m.now()
 	next.lastSeen = now
 	ss.active = next
 	slog.Debug("timeslot activating pending stream",
@@ -411,6 +437,26 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 		m.wg.Add(1)
 		go m.send(slot)
 	}
+}
+
+// SetCallHang makes the manager hold back a call that is not voice, as
+// isVoice tells from its first packet, while hold has not passed since
+// the last voice call on its timeslot ended. The held call waits as if
+// the slot were busy, and goes out when the hold ends, paced as a queued
+// call. A voice call is never held: it starts at once, and the held calls
+// then wait for the hold after it. A hold of 0 turns this off. An XPR
+// 8400 drops the data and CSBK calls that it gets during the call hang
+// after a voice call.
+func (m *Manager) SetCallHang(hold time.Duration, isVoice func(packet any) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hold, m.isVoice = hold, isVoice
+}
+
+// holdingLocked reports whether a call on ss whose first packet is packet
+// must wait for the call hang at now. The caller must hold m.mu.
+func (m *Manager) holdingLocked(ss *slotState, packet any, now time.Time) bool {
+	return m.hold > 0 && m.isVoice != nil && now.Before(ss.holdUntil) && !m.isVoice(packet)
 }
 
 // PaceReplays makes the manager replay a queued call at the spacing its

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"time"
 
 	"github.com/vishvananda/netlink"
 )
@@ -42,7 +43,14 @@ type IPSC struct {
 	IP         string   `name:"ip" description:"IP address to listen for IPSC packets on" default:"10.10.250.1"`
 	SubnetMask int      `name:"subnet-mask" description:"Subnet mask for the virtual network interface created for IPSC packets" default:"24"`
 	Auth       IPSCAuth `name:"auth" description:"Authentication configuration for the IPSC server"`
+	// CallHangHold is how long after a voice call to IPSC ends on a
+	// timeslot that data and CSBK calls to IPSC wait. An XPR 8400 drops
+	// the data and CSBK calls it gets during its call hang, about 2 s.
+	CallHangHold time.Duration `name:"call-hang-hold" description:"Wait for data and CSBK calls to IPSC after a voice call on a slot; 0 is off" default:"2.5s"`
 }
+
+// MaxCallHangHold is the longest ipsc.call-hang-hold that Validate accepts.
+const MaxCallHangHold = 10 * time.Second
 
 type IPSCAuth struct {
 	Enabled bool   `name:"enabled" description:"Whether to require authentication for IPSC clients"`
@@ -148,6 +156,7 @@ var (
 	ErrInvalidRewriteTG         = errors.New("invalid rewrite talkgroup (must be >= 1)")
 	ErrInvalidIPSCInterface     = errors.New("invalid IPSC interface provided")
 	ErrInvalidIPSCPort          = errors.New("invalid IPSC port provided")
+	ErrInvalidCallHangHold      = errors.New("invalid ipsc.call-hang-hold: want a duration from 0 to 10s")
 	ErrInvalidIPSCIP            = errors.New("invalid IPSC IP address provided (must be a unicast IPv4 address)")
 	ErrInvalidIPSCSubnetMask    = errors.New("invalid IPSC subnet mask provided")
 	ErrInvalidIPSCAuthKey       = errors.New("invalid IPSC authentication key provided")
@@ -214,6 +223,10 @@ func (c Config) Validate() error {
 
 	if c.IPSC.Port == 0 {
 		return ErrInvalidIPSCPort
+	}
+
+	if c.IPSC.CallHangHold < 0 || c.IPSC.CallHangHold > MaxCallHangHold {
+		return ErrInvalidCallHangHold
 	}
 
 	if !validIPv4Unicast(c.IPSC.IP) {

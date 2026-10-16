@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/USA-RedDragon/configulator/v2"
 	cpflag "github.com/USA-RedDragon/configulator/v2/flags/pflag"
@@ -88,11 +89,12 @@ type iPSCAuthShadow struct {
 }
 
 type iPSCShadow struct {
-	Interface  *string         `json:"interface"   toml:"interface"   yaml:"interface"`
-	Port       *uint16         `json:"port"        toml:"port"        yaml:"port"`
-	IP         *string         `json:"ip"          toml:"ip"          yaml:"ip"`
-	SubnetMask *int            `json:"subnet-mask" toml:"subnet-mask" yaml:"subnet-mask"`
-	Auth       *iPSCAuthShadow `json:"auth"        toml:"auth"        yaml:"auth"`
+	Interface    *string         `json:"interface"      toml:"interface"      yaml:"interface"`
+	Port         *uint16         `json:"port"           toml:"port"           yaml:"port"`
+	IP           *string         `json:"ip"             toml:"ip"             yaml:"ip"`
+	SubnetMask   *int            `json:"subnet-mask"    toml:"subnet-mask"    yaml:"subnet-mask"`
+	Auth         *iPSCAuthShadow `json:"auth"           toml:"auth"           yaml:"auth"`
+	CallHangHold *impl.Duration  `json:"call-hang-hold" toml:"call-hang-hold" yaml:"call-hang-hold"`
 }
 
 type configShadow struct {
@@ -122,6 +124,8 @@ func configApplyDefaults(cfg *Config, _ string, set configulator.SetOrigin) erro
 	set("ipsc.ip", configulator.LayerDefault, "default tag")
 	cfg.IPSC.SubnetMask = 24
 	set("ipsc.subnet-mask", configulator.LayerDefault, "default tag")
+	cfg.IPSC.CallHangHold = time.Duration(int64(2500000000))
+	set("ipsc.call-hang-hold", configulator.LayerDefault, "default tag")
 	return nil
 }
 
@@ -390,6 +394,17 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 				set("ipsc.auth.key", configulator.LayerFile, file)
 			}
 		}
+		if s.IPSC.CallHangHold != nil {
+			v, ok := s.IPSC.CallHangHold.Value()
+			if !ok {
+				return &configulator.OpaqueSpellingError{
+					Hint: "\"30s\"",
+					Path: "ipsc.call-hang-hold",
+				}
+			}
+			cfg.IPSC.CallHangHold = v
+			set("ipsc.call-hang-hold", configulator.LayerFile, file)
+		}
 	}
 	return nil
 }
@@ -467,6 +482,19 @@ func configApplyEnv(cfg *Config, ec configulator.EnvContext, set configulator.Se
 		cfg.IPSC.Auth.Key = v
 		set("ipsc.auth.key", configulator.LayerEnv, n)
 	}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "call-hang-hold"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.call-hang-hold",
+				Source: n,
+				Value:  v,
+			}
+		}
+		cfg.IPSC.CallHangHold = d
+		set("ipsc.call-hang-hold", configulator.LayerEnv, n)
+	}
 	return nil
 }
 
@@ -489,6 +517,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 		"ipsc" + o.Separator + "subnet-mask",
 		"ipsc" + o.Separator + "auth" + o.Separator + "enabled",
 		"ipsc" + o.Separator + "auth" + o.Separator + "key",
+		"ipsc" + o.Separator + "call-hang-hold",
 	}
 	for i, name := range names {
 		if f := fs.Lookup(name); f != nil {
@@ -513,6 +542,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.Var(impl.NewInt(24), names[6], "Subnet mask for the virtual network interface created for IPSC packets")
 	fs.Bool(names[7], false, "Whether to require authentication for IPSC clients")
 	fs.String(names[8], "", "Authentication key for IPSC clients. Required if auth is enabled")
+	fs.Duration(names[9], time.Duration(int64(2500000000)), "Wait for data and CSBK calls to IPSC after a voice call on a slot; 0 is off")
 	return nil
 }
 
@@ -624,6 +654,18 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, _ stri
 		}
 		cfg.IPSC.Auth.Key = v
 		set("ipsc.auth.key", configulator.LayerCLI, "--"+n)
+	}
+	if n := "ipsc" + o.Separator + "call-hang-hold"; fs.Changed(n) {
+		v, err := fs.GetDuration(n)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.call-hang-hold",
+				Source: "--" + n,
+			}
+		}
+		cfg.IPSC.CallHangHold = v
+		set("ipsc.call-hang-hold", configulator.LayerCLI, "--"+n)
 	}
 	return nil
 }
@@ -1886,6 +1928,22 @@ func (s *iPSCShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 				}
 				s.Auth = &sub
 			}
+		case "call-hang-hold":
+			v, err := dec.ReadToken()
+			if err != nil {
+				return err
+			}
+			switch v.Kind() {
+			case jsontext.KindNull:
+			case jsontext.KindString:
+				var slot impl.Duration
+				if err := slot.UnmarshalText([]byte(v.String())); err != nil {
+					return configJSONError(path+".call-hang-hold", v, err)
+				}
+				s.CallHangHold = &slot
+			default:
+				return configJSONError(path+".call-hang-hold", v, fmt.Errorf("expected a text scalar (e.g. \"30s\"), got %v", v.Kind()))
+			}
 		default:
 			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
 				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
@@ -1979,6 +2037,7 @@ func (c Config) PrintConfig() string {
 	fmt.Fprintf(&b, "ipsc.subnet-mask = %v\n", c.IPSC.SubnetMask)
 	fmt.Fprintf(&b, "ipsc.auth.enabled = %v\n", c.IPSC.Auth.Enabled)
 	b.WriteString("ipsc.auth.key = (redacted)\n")
+	fmt.Fprintf(&b, "ipsc.call-hang-hold = %v\n", c.IPSC.CallHangHold)
 	return b.String()
 }
 

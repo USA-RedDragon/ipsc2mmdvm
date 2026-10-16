@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validZero = "valid 0"
@@ -374,6 +375,10 @@ func TestValidateFieldLimits(t *testing.T) {
 		{"pass-all-tg slot 5", func(c *Config) { c.MMDVM[0].PassAllTG = []int{5} }, ErrInvalidPassAllSlot},
 		{"pass-all-pc slot 0", func(c *Config) { c.MMDVM[0].PassAllPC = []int{0} }, ErrInvalidPassAllSlot},
 		{"ipsc port zero", func(c *Config) { c.IPSC.Port = 0 }, ErrInvalidIPSCPort},
+		{"call hang hold negative", func(c *Config) { c.IPSC.CallHangHold = -time.Second }, ErrInvalidCallHangHold},
+		{"call hang hold too long", func(c *Config) { c.IPSC.CallHangHold = MaxCallHangHold + time.Millisecond }, ErrInvalidCallHangHold},
+		{"call hang hold off", func(c *Config) { c.IPSC.CallHangHold = 0 }, nil},
+		{"call hang hold at the cap", func(c *Config) { c.IPSC.CallHangHold = MaxCallHangHold }, nil},
 		{"ipsc ip empty", func(c *Config) { c.IPSC.IP = "" }, ErrInvalidIPSCIP},
 		{"ipsc ip garbage", func(c *Config) { c.IPSC.IP = "not-an-ip" }, ErrInvalidIPSCIP},
 		{"ipsc ip with mask", func(c *Config) { c.IPSC.IP = "10.10.250.1/24" }, ErrInvalidIPSCIP},

@@ -92,6 +92,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	// only one master can feed a given timeslot toward IPSC at a time.
 	outboundTSMgr := timeslot.NewManager()
 	outboundTSMgr.PaceReplays()
+	outboundTSMgr.SetCallHang(cfg.IPSC.CallHangHold, mmdvm.IsVoiceCallPacket)
 	if m != nil {
 		outboundTSMgr.SetMetrics(m, "outbound", timeslot.AllNetworks)
 	}

@@ -513,6 +513,88 @@ func TestReplayKeepsArrivalSpacing(t *testing.T) {
 	r.waitPackets(t, "b1", "b2", "b3")
 }
 
+// holdManager returns a manager with a 2.5 s call hang hold, in which the
+// packets whose names start with "v" are voice, on a fake clock at
+// time.Unix(1, 0), with stream 1 a voice call on TS1 that has just ended.
+func holdManager(t *testing.T, hold time.Duration) (*Manager, *fakeClock, *recorder) {
+	t.Helper()
+	m := NewManager()
+	t.Cleanup(m.Stop)
+	m.PaceReplays()
+	m.SetCallHang(hold, func(p any) bool { s, _ := p.(string); return strings.HasPrefix(s, "v") })
+	clock := &fakeClock{now: time.Unix(1, 0)}
+	m.now = clock.Now
+	r := &recorder{}
+	if !submit(m, false, 1, "net1", "v1", r) {
+		t.Fatal("voice call 1 was not delivered")
+	}
+	m.Release(false, 1)
+	return m, clock, r
+}
+
+// TestCallHangHoldsData sends a data call 2.1 s after a voice call on the
+// same timeslot. It waits until the 2.5 s hold ends, then goes out.
+func TestCallHangHoldsData(t *testing.T) {
+	m, clock, r := holdManager(t, 2500*time.Millisecond)
+	clock.Advance(2100 * time.Millisecond)
+	if submitEnd(m, 2, "net1", "d1", r) {
+		t.Fatal("data 2.1 s after voice went out during the hold")
+	}
+	clock.Advance(390 * time.Millisecond)
+	m.onTimer(false)
+	r.expectNone(t)
+	clock.Advance(20 * time.Millisecond)
+	m.onTimer(false)
+	r.waitPackets(t, "d1")
+}
+
+// TestCallHangLeavesOtherCalls checks the calls that the hold must not
+// delay: data 3 s after the voice call, voice during the hold, data on
+// the other timeslot during the hold, and data when the hold is 0.
+func TestCallHangLeavesOtherCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hold  time.Duration
+		after time.Duration
+		slot  bool
+		pkt   string
+	}{
+		{"data after the hold", 2500 * time.Millisecond, 3 * time.Second, false, "d1"},
+		{"voice during the hold", 2500 * time.Millisecond, 2100 * time.Millisecond, false, "v2"},
+		{"data on the other slot", 2500 * time.Millisecond, 2100 * time.Millisecond, true, "d1"},
+		{"hold off", 0, 2100 * time.Millisecond, false, "d1"},
+	} {
+		m, clock, r := holdManager(t, tc.hold)
+		clock.Advance(tc.after)
+		if !submit(m, tc.slot, 2, "net1", tc.pkt, r) {
+			t.Errorf("%s: %s was held", tc.name, tc.pkt)
+		}
+	}
+}
+
+// TestCallHangVoiceDuringHoldPushesData holds a data call 1 s after a
+// voice call, then starts another voice call. The voice call goes out at
+// once, and the data waits for the hold after that call ends.
+func TestCallHangVoiceDuringHoldPushesData(t *testing.T) {
+	m, clock, r := holdManager(t, 2500*time.Millisecond)
+	clock.Advance(time.Second)
+	if submitEnd(m, 2, "net1", "d1", r) {
+		t.Fatal("data 1 s after voice went out during the hold")
+	}
+	clock.Advance(500 * time.Millisecond)
+	if !submit(m, false, 3, "net1", "v2", r) {
+		t.Fatal("voice during the hold was held")
+	}
+	clock.Advance(1500 * time.Millisecond)
+	m.Release(false, 3)
+	clock.Advance(2400 * time.Millisecond)
+	m.onTimer(false)
+	r.expectNone(t)
+	clock.Advance(200 * time.Millisecond)
+	m.onTimer(false)
+	r.waitPackets(t, "d1")
+}
+
 func TestRelease_NoOp_EmptySlot(t *testing.T) {
 	m := NewManager()
 	m.Release(false, 100)

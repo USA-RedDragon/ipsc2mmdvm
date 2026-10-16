@@ -925,6 +925,25 @@ func (h *MMDVMClient) forwardIPSC() {
 	}
 }
 
+// IsVoiceCallPacket reports whether packet, as the outbound timeslot
+// manager gets it, belongs to a voice call: a voice burst, or a voice LC
+// header, PI header or terminator with LC. The manager holds back other
+// calls during a repeater's call hang (timeslot.Manager.SetCallHang).
+func IsVoiceCallPacket(packet any) bool {
+	p, ok := packet.(proto.Packet)
+	if !ok {
+		return false
+	}
+	if p.FrameType != frameTypeDataSync {
+		return p.FrameType < frameTypeDataSync
+	}
+	switch enums.DataType(p.DTypeOrVSeq) { //nolint:exhaustive,gosec // the other data types are not voice; the data type has 4 bits
+	case enums.DataTypeVoiceLCHeader, enums.DataTypePIHeader, enums.DataTypeTerminatorWithLC:
+		return true
+	}
+	return false
+}
+
 // outboundCallEnds reports whether pkt ends its call on the outbound
 // timeslot: a voice terminator, a CSBK that nothing of its call follows, or
 // the burst that completes a data packet. Data calls have no terminator, so

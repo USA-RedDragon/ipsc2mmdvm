@@ -216,6 +216,7 @@ sudo journalctl -u ipsc2mmdvm -f
 
 - **Masters.** ipsc2mmdvm starts even if a master is down or its host name does not resolve yet. It tries to connect and log in again every keepalive interval (5 seconds) until the master answers. Only a malformed `master-server` value stops startup.
 - **Traffic to a master.** ipsc2mmdvm sends voice and data to a master only while it is logged in to that master. Traffic for a master that is not logged in is dropped, as DMRGateway does.
+- **Call hang.** After a voice call to the repeater ends on a timeslot, data and CSBK calls to the repeater on that timeslot wait for `ipsc.call-hang-hold` (2.5 s by default) and then go out at their original pace, because an XPR 8400 drops the data and CSBK calls it gets during its call hang of about 2 s. Voice never waits.
 - **Repeater registration.** The repeater must register with ipsc2mmdvm (IPSC master register request, `0x90`) before it gets any traffic. ipsc2mmdvm ignores keepalives and voice from a repeater that has not registered. With IPSC authentication on, a keepalive with a valid HMAC registers the repeater, so a repeater comes back within one keepalive interval after ipsc2mmdvm restarts. A repeater that sends nothing for 120 seconds is removed and must register again.
 
 ## Configuration Reference
@@ -224,60 +225,61 @@ Settings can be given in the config file, as environment variables, or as comman
 
 <!-- configulator:begin -->
 
-| Key                                | Type            | Default       | Environment         | Flag                  | Description                                                               |
-|------------------------------------|-----------------|---------------|---------------------|-----------------------|---------------------------------------------------------------------------|
-| `log-level`                        | string          | `info`        | `LOG_LEVEL`         | `--log-level`         | Logging level for the application. One of debug, info, warn, or error     |
-| `metrics.enabled`                  | boolean         |               | `METRICS_ENABLED`   | `--metrics.enabled`   | Whether to enable Prometheus metrics endpoint                             |
-| `metrics.address`                  | string          | `:9100`       | `METRICS_ADDRESS`   | `--metrics.address`   | Address to serve Prometheus metrics on                                    |
-| `mmdvm`                            | list of objects |               | —                   | —                     | Configuration for MMDVM clients (multiple DMR masters)                    |
-| `mmdvm[].name`                     | string          |               | —                   | —                     | Name for this MMDVM network (used in logging)                             |
-| `mmdvm[].callsign`                 | string          |               | —                   | —                     | Callsign to use for the MMDVM connection                                  |
-| `mmdvm[].radio-id`                 | integer         |               | —                   | —                     | Radio ID for the MMDVM connection                                         |
-| `mmdvm[].rx-freq`                  | integer         |               | —                   | —                     | Receive frequency in Hz for the MMDVM connection                          |
-| `mmdvm[].tx-freq`                  | integer         |               | —                   | —                     | Transmit frequency in Hz for the MMDVM connection                         |
-| `mmdvm[].tx-power`                 | integer         |               | —                   | —                     | Transmit power in dBm for the MMDVM connection                            |
-| `mmdvm[].color-code`               | integer         |               | —                   | —                     | DMR color code for the MMDVM connection                                   |
-| `mmdvm[].latitude`                 | number          |               | —                   | —                     | Latitude with north as positive [-90,+90] for the MMDVM connection        |
-| `mmdvm[].longitude`                | number          |               | —                   | —                     | Longitude with east as positive [-180+,180] for the MMDVM connection      |
-| `mmdvm[].height`                   | integer         |               | —                   | —                     | Height in meters for the MMDVM connection                                 |
-| `mmdvm[].location`                 | string          |               | —                   | —                     | Location for the MMDVM connection                                         |
-| `mmdvm[].description`              | string          |               | —                   | —                     | Description for the MMDVM connection                                      |
-| `mmdvm[].url`                      | string          |               | —                   | —                     | URL for the MMDVM connection                                              |
-| `mmdvm[].slots`                    | integer         | `3`           | —                   | —                     | Active timeslots bitmask (1=TS1, 2=TS2, 3=both)                           |
-| `mmdvm[].master-server`            | string          |               | —                   | —                     | Master server for the MMDVM connection                                    |
-| `mmdvm[].password`                 | string          |               | —                   | —                     | Password for the MMDVM connection (secret)                                |
-| `mmdvm[].tg-rewrite`               | list of objects |               | —                   | —                     | Talkgroup rewrite rules                                                   |
-| `mmdvm[].tg-rewrite[].from-slot`   | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
-| `mmdvm[].tg-rewrite[].from-tg`     | integer         |               | —                   | —                     | Source talkgroup start                                                    |
-| `mmdvm[].tg-rewrite[].to-slot`     | integer         |               | —                   | —                     | Destination timeslot (1 or 2)                                             |
-| `mmdvm[].tg-rewrite[].to-tg`       | integer         |               | —                   | —                     | Destination talkgroup start                                               |
-| `mmdvm[].tg-rewrite[].range`       | integer         | `1`           | —                   | —                     | Number of contiguous TGs to map                                           |
-| `mmdvm[].pc-rewrite`               | list of objects |               | —                   | —                     | Private call rewrite rules                                                |
-| `mmdvm[].pc-rewrite[].from-slot`   | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
-| `mmdvm[].pc-rewrite[].from-id`     | integer         |               | —                   | —                     | Source private call ID start                                              |
-| `mmdvm[].pc-rewrite[].to-slot`     | integer         |               | —                   | —                     | Destination timeslot (1 or 2)                                             |
-| `mmdvm[].pc-rewrite[].to-id`       | integer         |               | —                   | —                     | Destination private call ID start                                         |
-| `mmdvm[].pc-rewrite[].range`       | integer         | `1`           | —                   | —                     | Number of contiguous IDs to map                                           |
-| `mmdvm[].type-rewrite`             | list of objects |               | —                   | —                     | Type rewrite rules (group TG to private call)                             |
-| `mmdvm[].type-rewrite[].from-slot` | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
-| `mmdvm[].type-rewrite[].from-tg`   | integer         |               | —                   | —                     | Source talkgroup start                                                    |
-| `mmdvm[].type-rewrite[].to-slot`   | integer         |               | —                   | —                     | Destination timeslot (1 or 2)                                             |
-| `mmdvm[].type-rewrite[].to-id`     | integer         |               | —                   | —                     | Destination private call ID start                                         |
-| `mmdvm[].type-rewrite[].range`     | integer         | `1`           | —                   | —                     | Number of contiguous entries to map                                       |
-| `mmdvm[].src-rewrite`              | list of objects |               | —                   | —                     | Source rewrite rules (private call by source to group TG)                 |
-| `mmdvm[].src-rewrite[].from-slot`  | integer         |               | —                   | —                     | Source timeslot (1 or 2)                                                  |
-| `mmdvm[].src-rewrite[].from-id`    | integer         |               | —                   | —                     | Source ID start                                                           |
-| `mmdvm[].src-rewrite[].to-slot`    | integer         |               | —                   | —                     | Destination timeslot (1 or 2)                                             |
-| `mmdvm[].src-rewrite[].to-tg`      | integer         |               | —                   | —                     | Destination talkgroup for the converted group call                        |
-| `mmdvm[].src-rewrite[].range`      | integer         | `1`           | —                   | —                     | Number of contiguous source IDs to match                                  |
-| `mmdvm[].pass-all-pc`              | list of integer |               | —                   | —                     | Timeslots on which all private calls pass through unchanged (e.g. [1, 2]) |
-| `mmdvm[].pass-all-tg`              | list of integer |               | —                   | —                     | Timeslots on which all group calls pass through unchanged (e.g. [1, 2])   |
-| `ipsc.interface`                   | string          |               | `IPSC_INTERFACE`    | `--ipsc.interface`    | Interface to listen for IPSC packets on                                   |
-| `ipsc.port`                        | integer         | `50000`       | `IPSC_PORT`         | `--ipsc.port`         | Port to listen for IPSC packets on                                        |
-| `ipsc.ip`                          | string          | `10.10.250.1` | `IPSC_IP`           | `--ipsc.ip`           | IP address to listen for IPSC packets on                                  |
-| `ipsc.subnet-mask`                 | integer         | `24`          | `IPSC_SUBNET_MASK`  | `--ipsc.subnet-mask`  | Subnet mask for the virtual network interface created for IPSC packets    |
-| `ipsc.auth.enabled`                | boolean         |               | `IPSC_AUTH_ENABLED` | `--ipsc.auth.enabled` | Whether to require authentication for IPSC clients                        |
-| `ipsc.auth.key`                    | string          |               | `IPSC_AUTH_KEY`     | `--ipsc.auth.key`     | Authentication key for IPSC clients. Required if auth is enabled (secret) |
+| Key                                | Type            | Default       | Environment           | Flag                    | Description                                                                 |
+|------------------------------------|-----------------|---------------|-----------------------|-------------------------|-----------------------------------------------------------------------------|
+| `log-level`                        | string          | `info`        | `LOG_LEVEL`           | `--log-level`           | Logging level for the application. One of debug, info, warn, or error       |
+| `metrics.enabled`                  | boolean         |               | `METRICS_ENABLED`     | `--metrics.enabled`     | Whether to enable Prometheus metrics endpoint                               |
+| `metrics.address`                  | string          | `:9100`       | `METRICS_ADDRESS`     | `--metrics.address`     | Address to serve Prometheus metrics on                                      |
+| `mmdvm`                            | list of objects |               | —                     | —                       | Configuration for MMDVM clients (multiple DMR masters)                      |
+| `mmdvm[].name`                     | string          |               | —                     | —                       | Name for this MMDVM network (used in logging)                               |
+| `mmdvm[].callsign`                 | string          |               | —                     | —                       | Callsign to use for the MMDVM connection                                    |
+| `mmdvm[].radio-id`                 | integer         |               | —                     | —                       | Radio ID for the MMDVM connection                                           |
+| `mmdvm[].rx-freq`                  | integer         |               | —                     | —                       | Receive frequency in Hz for the MMDVM connection                            |
+| `mmdvm[].tx-freq`                  | integer         |               | —                     | —                       | Transmit frequency in Hz for the MMDVM connection                           |
+| `mmdvm[].tx-power`                 | integer         |               | —                     | —                       | Transmit power in dBm for the MMDVM connection                              |
+| `mmdvm[].color-code`               | integer         |               | —                     | —                       | DMR color code for the MMDVM connection                                     |
+| `mmdvm[].latitude`                 | number          |               | —                     | —                       | Latitude with north as positive [-90,+90] for the MMDVM connection          |
+| `mmdvm[].longitude`                | number          |               | —                     | —                       | Longitude with east as positive [-180+,180] for the MMDVM connection        |
+| `mmdvm[].height`                   | integer         |               | —                     | —                       | Height in meters for the MMDVM connection                                   |
+| `mmdvm[].location`                 | string          |               | —                     | —                       | Location for the MMDVM connection                                           |
+| `mmdvm[].description`              | string          |               | —                     | —                       | Description for the MMDVM connection                                        |
+| `mmdvm[].url`                      | string          |               | —                     | —                       | URL for the MMDVM connection                                                |
+| `mmdvm[].slots`                    | integer         | `3`           | —                     | —                       | Active timeslots bitmask (1=TS1, 2=TS2, 3=both)                             |
+| `mmdvm[].master-server`            | string          |               | —                     | —                       | Master server for the MMDVM connection                                      |
+| `mmdvm[].password`                 | string          |               | —                     | —                       | Password for the MMDVM connection (secret)                                  |
+| `mmdvm[].tg-rewrite`               | list of objects |               | —                     | —                       | Talkgroup rewrite rules                                                     |
+| `mmdvm[].tg-rewrite[].from-slot`   | integer         |               | —                     | —                       | Source timeslot (1 or 2)                                                    |
+| `mmdvm[].tg-rewrite[].from-tg`     | integer         |               | —                     | —                       | Source talkgroup start                                                      |
+| `mmdvm[].tg-rewrite[].to-slot`     | integer         |               | —                     | —                       | Destination timeslot (1 or 2)                                               |
+| `mmdvm[].tg-rewrite[].to-tg`       | integer         |               | —                     | —                       | Destination talkgroup start                                                 |
+| `mmdvm[].tg-rewrite[].range`       | integer         | `1`           | —                     | —                       | Number of contiguous TGs to map                                             |
+| `mmdvm[].pc-rewrite`               | list of objects |               | —                     | —                       | Private call rewrite rules                                                  |
+| `mmdvm[].pc-rewrite[].from-slot`   | integer         |               | —                     | —                       | Source timeslot (1 or 2)                                                    |
+| `mmdvm[].pc-rewrite[].from-id`     | integer         |               | —                     | —                       | Source private call ID start                                                |
+| `mmdvm[].pc-rewrite[].to-slot`     | integer         |               | —                     | —                       | Destination timeslot (1 or 2)                                               |
+| `mmdvm[].pc-rewrite[].to-id`       | integer         |               | —                     | —                       | Destination private call ID start                                           |
+| `mmdvm[].pc-rewrite[].range`       | integer         | `1`           | —                     | —                       | Number of contiguous IDs to map                                             |
+| `mmdvm[].type-rewrite`             | list of objects |               | —                     | —                       | Type rewrite rules (group TG to private call)                               |
+| `mmdvm[].type-rewrite[].from-slot` | integer         |               | —                     | —                       | Source timeslot (1 or 2)                                                    |
+| `mmdvm[].type-rewrite[].from-tg`   | integer         |               | —                     | —                       | Source talkgroup start                                                      |
+| `mmdvm[].type-rewrite[].to-slot`   | integer         |               | —                     | —                       | Destination timeslot (1 or 2)                                               |
+| `mmdvm[].type-rewrite[].to-id`     | integer         |               | —                     | —                       | Destination private call ID start                                           |
+| `mmdvm[].type-rewrite[].range`     | integer         | `1`           | —                     | —                       | Number of contiguous entries to map                                         |
+| `mmdvm[].src-rewrite`              | list of objects |               | —                     | —                       | Source rewrite rules (private call by source to group TG)                   |
+| `mmdvm[].src-rewrite[].from-slot`  | integer         |               | —                     | —                       | Source timeslot (1 or 2)                                                    |
+| `mmdvm[].src-rewrite[].from-id`    | integer         |               | —                     | —                       | Source ID start                                                             |
+| `mmdvm[].src-rewrite[].to-slot`    | integer         |               | —                     | —                       | Destination timeslot (1 or 2)                                               |
+| `mmdvm[].src-rewrite[].to-tg`      | integer         |               | —                     | —                       | Destination talkgroup for the converted group call                          |
+| `mmdvm[].src-rewrite[].range`      | integer         | `1`           | —                     | —                       | Number of contiguous source IDs to match                                    |
+| `mmdvm[].pass-all-pc`              | list of integer |               | —                     | —                       | Timeslots on which all private calls pass through unchanged (e.g. [1, 2])   |
+| `mmdvm[].pass-all-tg`              | list of integer |               | —                     | —                       | Timeslots on which all group calls pass through unchanged (e.g. [1, 2])     |
+| `ipsc.interface`                   | string          |               | `IPSC_INTERFACE`      | `--ipsc.interface`      | Interface to listen for IPSC packets on                                     |
+| `ipsc.port`                        | integer         | `50000`       | `IPSC_PORT`           | `--ipsc.port`           | Port to listen for IPSC packets on                                          |
+| `ipsc.ip`                          | string          | `10.10.250.1` | `IPSC_IP`             | `--ipsc.ip`             | IP address to listen for IPSC packets on                                    |
+| `ipsc.subnet-mask`                 | integer         | `24`          | `IPSC_SUBNET_MASK`    | `--ipsc.subnet-mask`    | Subnet mask for the virtual network interface created for IPSC packets      |
+| `ipsc.auth.enabled`                | boolean         |               | `IPSC_AUTH_ENABLED`   | `--ipsc.auth.enabled`   | Whether to require authentication for IPSC clients                          |
+| `ipsc.auth.key`                    | string          |               | `IPSC_AUTH_KEY`       | `--ipsc.auth.key`       | Authentication key for IPSC clients. Required if auth is enabled (secret)   |
+| `ipsc.call-hang-hold`              | string          | `2.5s`        | `IPSC_CALL_HANG_HOLD` | `--ipsc.call-hang-hold` | Wait for data and CSBK calls to IPSC after a voice call on a slot; 0 is off |
 
 <!-- configulator:end -->
 
