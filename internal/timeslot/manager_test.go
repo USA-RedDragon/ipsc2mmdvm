@@ -2,6 +2,7 @@ package timeslot
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -593,6 +594,50 @@ func TestCallHangVoiceDuringHoldPushesData(t *testing.T) {
 	clock.Advance(200 * time.Millisecond)
 	m.onTimer(false)
 	r.waitPackets(t, "d1")
+}
+
+// firstWriteBlocks blocks the first Write until release is closed, and
+// closes blocked when that Write starts.
+type firstWriteBlocks struct {
+	once    *sync.Once
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func (w firstWriteBlocks) Write(p []byte) (int, error) {
+	first := false
+	w.once.Do(func() { first = true })
+	if first {
+		close(w.blocked)
+		<-w.release
+	}
+	return len(p), nil
+}
+
+// TestManagerLockIsFreeWhileLogging makes the manager log a debug record
+// into a log output whose first write is stuck. Its lock must be free
+// meanwhile, so it logs only after it releases it. It changes the default
+// logger, so it does not run in parallel.
+func TestManagerLockIsFreeWhileLogging(t *testing.T) {
+	w := firstWriteBlocks{once: new(sync.Once), blocked: make(chan struct{}), release: make(chan struct{})}
+	defer close(w.release)
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(old)
+	m := NewManager()
+	r := &recorder{}
+	go submit(m, false, 1, "net1", "a1", r)
+	<-w.blocked
+	done := make(chan struct{})
+	go func() {
+		m.Paced()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the manager lock was held while a log write was stuck")
+	}
 }
 
 func TestRelease_NoOp_EmptySlot(t *testing.T) {

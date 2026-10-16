@@ -1,13 +1,13 @@
 package ipsc
 
 import (
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
@@ -30,6 +30,7 @@ type LCRewriter struct {
 	streams   map[uint]*lcStream
 	now       func() time.Time
 	lastPrune time.Time
+	logs      logging.Queue // records made while mu is held
 }
 
 type lcStream struct {
@@ -164,7 +165,7 @@ func NewLCRewriter() *LCRewriter {
 // source, destination, or call type of orig. Other packets are not changed.
 func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer r.logs.Unlock(&r.mu)
 	now := r.now()
 	r.pruneLocked(now)
 	if orig.Src == pkt.Src && orig.Dst == pkt.Dst && orig.GroupCall == pkt.GroupCall {
@@ -189,7 +190,7 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 		default:
 			return
 		}
-		lc := rewrittenLC(pkt, dataType)
+		lc := rewrittenLC(&r.logs, pkt, dataType)
 		(*layer2.RawBurst)(&pkt.DMRData).SetBPTCPayload(fullLCCodeword(lc, dataType))
 		if dataType == enums.DataTypeTerminatorWithLC {
 			delete(r.streams, pkt.StreamID)
@@ -286,16 +287,17 @@ func rewriteDataHeader(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 	return h, true
 }
 
-// rewrittenLC returns the 9-byte LC for pkt. It starts from the valid LC
+// rewrittenLC returns the 9-byte LC for pkt, and queues its log records
+// in logs. It starts from the valid LC
 // in the burst, or from one built from the packet fields, and sets the
 // call type, destination, and source from pkt. The protect flag stays as
 // it is. A call type change clears the reserved bit, as DMRGateway does.
-func rewrittenLC(pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
+func rewrittenLC(logs *logging.Queue, pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
 	var lc pdu.LCBytes
 	if payload, ok := decodeBPTCPayload(pkt.DMRData, dataType); ok {
 		lc = pdu.LCBytes(payload[:9])
 	} else {
-		slog.Debug("invalid full LC in burst, constructing from packet fields",
+		logs.Debug("invalid full LC in burst, constructing from packet fields",
 			"dtype", dataType.String())
 		lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
 	}

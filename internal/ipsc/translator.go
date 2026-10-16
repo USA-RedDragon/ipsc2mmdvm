@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"math"
 	"slices"
@@ -16,6 +15,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
@@ -35,7 +35,8 @@ type IPSCTranslator struct {
 	colorCode      enums.ColorCode
 	streams        map[uint32]*streamState
 	reverseStreams map[uint32]*reverseStreamState
-	burst          layer2.Burst // reusable burst to reduce allocations
+	burst          layer2.Burst  // reusable burst to reduce allocations
+	logs           logging.Queue // records made while mu is held
 	now            func() time.Time
 	lastPrune      time.Time
 
@@ -155,13 +156,13 @@ func (t *IPSCTranslator) pruneLocked(now time.Time) {
 	t.lastPrune = now
 	for id, ss := range t.streams {
 		if now.Sub(ss.lastSeen) > streamIdleTimeout {
-			slog.Debug("IPSCTranslator: pruning idle MMDVM stream", "streamID", id)
+			t.logs.Debug("IPSCTranslator: pruning idle MMDVM stream", "streamID", id)
 			t.removeStreamLocked(id)
 		}
 	}
 	for callControl, rss := range t.reverseStreams {
 		if now.Sub(rss.lastSeen) > streamIdleTimeout {
-			slog.Debug("IPSCTranslator: pruning idle IPSC stream", "callControl", callControl)
+			t.logs.Debug("IPSCTranslator: pruning idle IPSC stream", "callControl", callControl)
 			t.removeReverseStreamLocked(callControl)
 		}
 	}
@@ -213,7 +214,7 @@ func (t *IPSCTranslator) SetMetrics(m *metrics.Metrics) {
 // slot type of data bursts and the EMB of voice bursts.
 func (t *IPSCTranslator) SetColorCode(colorCode uint8) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 	t.colorCode = enums.ColorCode(colorCode & 0x0F)
 }
 
@@ -228,7 +229,7 @@ func (t *IPSCTranslator) SetPeerID(peerID uint32) {
 // cannot be translated (e.g. non-voice data we don't handle yet).
 func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 
 	streamID := pkt.StreamID
 	if streamID > math.MaxUint32 {
@@ -253,18 +254,18 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	switch frameType {
 	case mmdvmFrameTypeDataSync:
 		if dtypeOrVSeq > 255 {
-			slog.Debug("IPSCTranslator: invalid dtype", "dtype", dtypeOrVSeq)
+			t.logs.Debug("IPSCTranslator: invalid dtype", "dtype", dtypeOrVSeq)
 			return nil
 		}
 		if ss.headerless(enums.DataType(dtypeOrVSeq)) {
-			slog.Debug("IPSCTranslator: dropping data block outside a data packet",
+			t.logs.Debug("IPSCTranslator: dropping data block outside a data packet",
 				"dtype", enums.DataType(dtypeOrVSeq).String())
 			return nil
 		}
 		// Voice LC Header, Terminator, or Data
 		switch enums.DataType(dtypeOrVSeq) {
 		case enums.DataTypeVoiceLCHeader:
-			lc := fullLCFromBurst(pkt, enums.DataTypeVoiceLCHeader)
+			lc := fullLCFromBurst(&t.logs, pkt, enums.DataTypeVoiceLCHeader)
 			copy(ss.lc[:], lc[:9])
 			ss.hasLC = true
 			ss.privacy = ss.privacy || lcPrivacy(ss.lc)
@@ -276,14 +277,14 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 			ss.headersSent = 3
 			ss.firstPacket = false
 		case enums.DataTypeTerminatorWithLC:
-			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(pkt, enums.DataTypeTerminatorWithLC))
+			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(&t.logs, pkt, enums.DataTypeTerminatorWithLC))
 			results = append(results, data)
 			t.removeStreamLocked(uint32(streamID))
 		case enums.DataTypeRate34:
 			last := ss.lastDataBlock(pkt.DMRData)
 			payload, res := layer2.RawBurst(pkt.DMRData).Rate34Payload()
 			if res.Uncorrectable {
-				slog.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
+				t.logs.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
 				if last {
 					results = t.endDataCall(pkt, ss, uint32(streamID))
 				}
@@ -308,7 +309,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 				payload, ok = decodeBPTCPayload(pkt.DMRData, enums.DataType(dtypeOrVSeq))
 			}
 			if !ok {
-				slog.Debug("IPSCTranslator: dropping data burst with no IPSC encoding or uncorrectable BPTC errors",
+				t.logs.Debug("IPSCTranslator: dropping data burst with no IPSC encoding or uncorrectable BPTC errors",
 					"dtype", enums.DataType(dtypeOrVSeq).String())
 				if last {
 					results = t.endDataCall(pkt, ss, uint32(streamID))
@@ -324,7 +325,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
 			return nil
 		default:
-			slog.Debug("IPSCTranslator: unhandled data sync dtype", "dtype", dtypeOrVSeq)
+			t.logs.Debug("IPSCTranslator: unhandled data sync dtype", "dtype", dtypeOrVSeq)
 			return nil
 		}
 
@@ -336,7 +337,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 		}
 
 	default:
-		slog.Debug("IPSCTranslator: unknown frame type", "frameType", frameType)
+		t.logs.Debug("IPSCTranslator: unknown frame type", "frameType", frameType)
 		return nil
 	}
 
@@ -378,7 +379,7 @@ func (t *IPSCTranslator) streamLocked(streamID uint32) (*streamState, bool) {
 // returns nothing when no packet of the call was sent.
 func (t *IPSCTranslator) EndDataCall(pkt mmdvm.Packet) [][]byte {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 	if pkt.StreamID > math.MaxUint32 {
 		return nil
 	}
@@ -400,7 +401,7 @@ func (t *IPSCTranslator) EndDataCall(pkt mmdvm.Packet) [][]byte {
 // to send Idle bursts with the carrier up for about 7 s.
 func (t *IPSCTranslator) EndStreams() [][]byte {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 	var results [][]byte
 	for _, id := range slices.Sorted(maps.Keys(t.streams)) {
 		ss := t.streams[id]
@@ -417,10 +418,10 @@ func (t *IPSCTranslator) EndStreams() [][]byte {
 		dmrData, err := layer2.BuildDataBurst(fullLCCodeword(lc, enums.DataTypeTerminatorWithLC),
 			enums.DataTypeTerminatorWithLC, t.colorCode, layer2.SyncSourceBS)
 		if err != nil {
-			slog.Debug("IPSCTranslator: cannot build terminator", "error", err)
+			t.logs.Debug("IPSCTranslator: cannot build terminator", "error", err)
 		}
 		term.DMRData = dmrData
-		results = append(results, t.buildVoiceTerminator(term, ss, fullLCFromBurst(term, enums.DataTypeTerminatorWithLC)))
+		results = append(results, t.buildVoiceTerminator(term, ss, fullLCFromBurst(&t.logs, term, enums.DataTypeTerminatorWithLC)))
 		t.removeStreamLocked(id)
 	}
 	if t.metrics != nil && len(results) > 0 {
@@ -446,7 +447,7 @@ func isVoiceCallPacket(pkt mmdvm.Packet) bool {
 // IPSC-to-MMDVM stream that was assigned that ID.
 func (t *IPSCTranslator) CleanupStream(streamID uint32) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 	t.removeStreamLocked(streamID)
 	for callControl, rss := range t.reverseStreams {
 		if rss.streamID == streamID {
@@ -846,7 +847,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 
 	burstIdx, ok := mmdvmVoiceBurstPosition(pkt)
 	if !ok {
-		slog.Debug("IPSCTranslator: invalid voice sequence", "frameType", pkt.FrameType, "vseq", pkt.DTypeOrVSeq)
+		t.logs.Debug("IPSCTranslator: invalid voice sequence", "frameType", pkt.FrameType, "vseq", pkt.DTypeOrVSeq)
 		return nil
 	}
 	emb := embByte(&t.burst, burstIdx)
@@ -1023,8 +1024,8 @@ func mmdvmVoiceDecodeOptions(pkt mmdvm.Packet) *layer2.DecodeOptions {
 // terminator burst. The feature set ID and service options come from the LC
 // in the burst when it is valid; the call type, destination, and source come
 // from the packet fields, which a rewrite rule may have changed.
-func fullLCFromBurst(pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
-	return fullLCCodeword(rewrittenLC(&pkt, dataType), dataType)
+func fullLCFromBurst(logs *logging.Queue, pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
+	return fullLCCodeword(rewrittenLC(logs, &pkt, dataType), dataType)
 }
 
 // reverseStreamState tracks per-call state for IPSC→MMDVM translation.
@@ -1064,13 +1065,13 @@ const rtpMaxForward = 8000
 // Returns nil if the packet cannot be translated.
 func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results []mmdvm.Packet) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 
 	now := t.now()
 	t.pruneLocked(now)
 
 	if len(data) < ipscMinUserPacketLen {
-		slog.Debug("IPSCTranslator: IPSC packet too short", "length", len(data))
+		t.logs.Debug("IPSCTranslator: IPSC packet too short", "length", len(data))
 		return nil
 	}
 
@@ -1079,7 +1080,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	case 0x80, 0x81, 0x83, 0x84:
 		// OK — supported packet types
 	default:
-		slog.Debug("IPSCTranslator: ignoring unsupported IPSC packet", "type", packetType)
+		t.logs.Debug("IPSCTranslator: ignoring unsupported IPSC packet", "type", packetType)
 		return nil
 	}
 
@@ -1091,7 +1092,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	slot := (callInfo & 0x20) != 0 // true = TS2
 	isEnd := (callInfo & ipscCallInfoEnd) != 0
 
-	slog.Debug("IPSCTranslator: TranslateToMMDVM",
+	t.logs.Debug("IPSCTranslator: TranslateToMMDVM",
 		"packetType", fmt.Sprintf("0x%02X", packetType),
 		"src", src, "dst", dst, "groupCall", groupCall,
 		"slot", slot, "isEnd", isEnd)
@@ -1112,7 +1113,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		minLen = ipscMinRate34Len
 	}
 	if len(data) < minLen {
-		slog.Debug("IPSCTranslator: IPSC burst too short",
+		t.logs.Debug("IPSCTranslator: IPSC burst too short",
 			"burstType", fmt.Sprintf("0x%02X", burstType), "length", len(data))
 		return nil
 	}
@@ -1176,7 +1177,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		results = append(results, t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data))
 
 	default:
-		slog.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
+		t.logs.Debug("IPSCTranslator: unsupported IPSC burst type", "burstType", fmt.Sprintf("0x%02X", burstType))
 	}
 
 	// MOTOTRBO repeaters also set the end bit on voice bursts in the middle
@@ -1231,7 +1232,7 @@ func isDataPacket(packetType byte) bool {
 // caller must hold t.mu.
 func (t *IPSCTranslator) newReverseStreamLocked(callControl uint32, burstType byte) *reverseStreamState {
 	if _, ended := t.endedData[callControl]; ended && isDataBlock(burstType) {
-		slog.Debug("IPSCTranslator: dropping data block after the end of its call",
+		t.logs.Debug("IPSCTranslator: dropping data block after the end of its call",
 			"burstType", fmt.Sprintf("0x%02X", burstType), "callControl", callControl)
 		return nil
 	}
@@ -1268,7 +1269,7 @@ func (t *IPSCTranslator) ReverseStreamID(data []byte) (uint32, bool) {
 		return 0, false
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	defer t.logs.Unlock(&t.mu)
 	rss, ok := t.reverseStreams[binary.BigEndian.Uint32(data[13:17])]
 	if !ok {
 		return 0, false
@@ -1306,7 +1307,7 @@ func (t *IPSCTranslator) checkRTPContinuity(rss *reverseStreamState, ts uint32) 
 	case -step <= rtpMaxForward:
 		return nil
 	default:
-		slog.Debug("IPSCTranslator: RTP discontinuity, starting a new stream", "streamID", rss.streamID)
+		t.logs.Debug("IPSCTranslator: RTP discontinuity, starting a new stream", "streamID", rss.streamID)
 		out := t.restartReverseStream(rss)
 		rss.rtpTimestamp, rss.hasTimestamp = ts, true
 		return out
@@ -1327,7 +1328,7 @@ func (t *IPSCTranslator) restartReverseStream(rss *reverseStreamState) []mmdvm.P
 		}
 		dmrData, err := layer2.BuildDataBurst(lc, enums.DataTypeTerminatorWithLC, t.colorCode, layer2.SyncSourceBS)
 		if err != nil {
-			slog.Debug("IPSCTranslator: cannot build terminator", "error", err)
+			t.logs.Debug("IPSCTranslator: cannot build terminator", "error", err)
 		}
 		out = append(out, mmdvm.Packet{
 			Signature:   mmdvm.DMRDSignature,
@@ -1381,7 +1382,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 		if lc, ok := lateEntryLC(lcBytes, src, dst, groupCall); ok {
 			lcBytes = fullLCCodeword(lc, dataType)
 		} else {
-			slog.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
+			t.logs.Debug("IPSCTranslator: invalid full LC from IPSC, constructing from packet fields",
 				"dtype", dataType.String())
 			lcBytes = constructFullLC(src, dst, groupCall, dataType)
 		}
@@ -1393,7 +1394,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	// Build the 33-byte DMR data burst
 	dmrData, err := layer2.BuildDataBurst(lcBytes, dataType, t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
-		slog.Debug("IPSCTranslator: cannot build data burst", "dtype", dataType.String(), "error", err)
+		t.logs.Debug("IPSCTranslator: cannot build data burst", "dtype", dataType.String(), "error", err)
 	}
 	pkt.DMRData = dmrData
 
@@ -1432,7 +1433,7 @@ func lateEntryLC(payload [12]byte, src, dst uint, groupCall bool) (pdu.LCBytes, 
 func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint, groupCall, slot bool, rss *reverseStreamState, burstType byte, data []byte) (mmdvm.Packet, bool) {
 	if burstType != ipscBurstMBCContinuation &&
 		!layer2.MMDVMHostAccepts(enums.DataType(burstType), [12]byte(data[38:50])) {
-		slog.Debug("IPSCTranslator: dropping data burst that fails its CRC",
+		t.logs.Debug("IPSCTranslator: dropping data burst that fails its CRC",
 			"burstType", fmt.Sprintf("0x%02X", burstType))
 		return mmdvm.Packet{}, false
 	}
@@ -1448,7 +1449,7 @@ func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint, groupCall, slot b
 	copy(block[2:], ipscData[38:54])
 	dmrData, err := layer2.BuildRate34DataBurst(block, t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
-		slog.Debug("IPSCTranslator: cannot build rate 3/4 burst", "error", err)
+		t.logs.Debug("IPSCTranslator: cannot build rate 3/4 burst", "error", err)
 	}
 	pkt := mmdvm.Packet{
 		Signature:   mmdvm.DMRDSignature,
@@ -1490,7 +1491,7 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 
 	burstIdx, ok := ipscVoiceBurstPosition(rss, ipscData)
 	if !ok {
-		slog.Debug("IPSCTranslator: cannot place voice burst in superframe", "length", len(ipscData))
+		t.logs.Debug("IPSCTranslator: cannot place voice burst in superframe", "length", len(ipscData))
 		return nil
 	}
 
@@ -1525,7 +1526,7 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	// vocoder frames to 3×72 = 216 bits.
 	dmrData, err := burst.Encode()
 	if err != nil {
-		slog.Debug("IPSCTranslator: cannot encode voice burst", "error", err)
+		t.logs.Debug("IPSCTranslator: cannot encode voice burst", "error", err)
 		return nil
 	}
 	if burstIdx != 0 {

@@ -15,6 +15,7 @@ import (
 	"github.com/USA-RedDragon/configulator/v2"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
@@ -42,6 +43,14 @@ func NewCommand(version, commit string) *cobra.Command {
 	return cmd
 }
 
+// logQueueSize is how many log records wait for a blocked log output
+// before more are dropped, and logFlushTimeout how long the queued ones get
+// to go out on shutdown.
+const (
+	logQueueSize    = 4096
+	logFlushTimeout = time.Second
+)
+
 func runRoot(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	fmt.Printf("ipsc2mmdvm - %s (%s)\n", cmd.Annotations["version"], cmd.Annotations["commit"])
@@ -56,16 +65,22 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// The log output goes through an AsyncWriter, so a blocked stdout or
+	// stderr can never hold up the packet paths, which log.
+	stdout := logging.NewAsyncWriter(os.Stdout, logQueueSize)
+	defer stdout.Close(logFlushTimeout)
+	stderr := logging.NewAsyncWriter(os.Stderr, logQueueSize)
+	defer stderr.Close(logFlushTimeout)
 	var logger *slog.Logger
 	switch cfg.LogLevel {
 	case config.LogLevelDebug:
-		logger = slog.New(tint.NewTextHandler(os.Stdout, &tint.Options{Level: slog.LevelDebug}))
+		logger = slog.New(tint.NewTextHandler(stdout, &tint.Options{Level: slog.LevelDebug}))
 	case config.LogLevelInfo:
-		logger = slog.New(tint.NewTextHandler(os.Stdout, &tint.Options{Level: slog.LevelInfo}))
+		logger = slog.New(tint.NewTextHandler(stdout, &tint.Options{Level: slog.LevelInfo}))
 	case config.LogLevelWarn:
-		logger = slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{Level: slog.LevelWarn}))
+		logger = slog.New(tint.NewTextHandler(stderr, &tint.Options{Level: slog.LevelWarn}))
 	case config.LogLevelError:
-		logger = slog.New(tint.NewTextHandler(os.Stderr, &tint.Options{Level: slog.LevelError}))
+		logger = slog.New(tint.NewTextHandler(stderr, &tint.Options{Level: slog.LevelError}))
 	}
 	slog.SetDefault(logger)
 
@@ -77,6 +92,8 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	var metricsSrv *http.Server
 	if cfg.Metrics.Enabled {
 		m = metrics.NewMetrics()
+		stdout.SetOnDrop(m.LogRecordsDropped.Inc)
+		stderr.SetOnDrop(m.LogRecordsDropped.Inc)
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", m.Handler())
 		metricsSrv, err = startMetricsServer(ctx, cfg.Metrics.Address, mux)

@@ -8,11 +8,11 @@
 package timeslot
 
 import (
-	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
@@ -141,6 +141,8 @@ type Manager struct {
 	// pace makes the sender replay a queued call at the spacing its
 	// packets arrived with (PaceReplays).
 	pace bool
+	// logs holds the records made while mu is held.
+	logs logging.Queue
 	// hold and isVoice are set by SetCallHang.
 	hold    time.Duration
 	isVoice func(packet any) bool
@@ -194,7 +196,7 @@ func slotLabel(slot bool) string {
 // slot if no call is waiting.
 func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, end bool, sink Sink) Verdict {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	if m.stopped {
 		return Dropped
 	}
@@ -213,7 +215,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 		if m.metrics != nil {
 			m.metrics.TimeslotActiveCalls.WithLabelValues(slotLabel(slot), m.direction, m.network).Set(1)
 		}
-		slog.Debug("timeslot acquired",
+		m.logs.Debug("timeslot acquired",
 			"slot", slot, "streamID", streamID, "network", network)
 		return Deliver
 	}
@@ -238,7 +240,7 @@ func (m *Manager) Submit(slot bool, streamID uint, network string, packet any, e
 			ss.byID = make(map[uint]*stream)
 		}
 		ss.byID[streamID] = ps
-		slog.Debug("timeslot busy or in call hang, buffering new stream",
+		m.logs.Debug("timeslot busy or in call hang, buffering new stream",
 			"slot", slot, "pendingStream", streamID, "network", network)
 	}
 	ps.lastSeen = now
@@ -257,7 +259,7 @@ func (m *Manager) expirePendingLocked(slot bool, ss *slotState, now time.Time) {
 			kept = append(kept, p)
 			continue
 		}
-		slog.Info("timeslot discarding idle pending stream",
+		m.logs.Info("timeslot discarding idle pending stream",
 			"slot", slot, "streamID", p.id, "network", p.network,
 			"bufferedPackets", len(p.queue))
 		delete(ss.byID, p.id)
@@ -280,7 +282,7 @@ func (m *Manager) reclaimStaleLocked(slot bool, ss *slotState, now time.Time) {
 	if ss.active == nil || ss.draining || now.Sub(ss.active.lastSeen) <= m.timeout {
 		return
 	}
-	slog.Info("timeslot call timed out, reclaiming slot",
+	m.logs.Info("timeslot call timed out, reclaiming slot",
 		"slot", slot,
 		"oldStream", ss.active.id, "oldNetwork", ss.active.network,
 		"pendingCount", len(ss.pending))
@@ -317,7 +319,7 @@ func (m *Manager) armLocked(slot bool, ss *slotState, now time.Time) {
 
 func (m *Manager) onTimer(slot bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	if m.stopped {
 		return
 	}
@@ -370,12 +372,12 @@ func (m *Manager) enqueueLocked(slot bool, s *stream, packet any, end bool) Verd
 // goroutine, so Release does not wait for the replay.
 func (m *Manager) Release(slot bool, streamID uint) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	ss := &m.slots[slotIndex(slot)]
 	if m.stopped || ss.active == nil || ss.active.id != streamID || ss.draining {
 		return
 	}
-	slog.Debug("timeslot released",
+	m.logs.Debug("timeslot released",
 		"slot", slot, "streamID", streamID, "network", ss.active.network,
 		"pendingCount", len(ss.pending))
 	m.advanceLocked(slot, ss)
@@ -395,7 +397,7 @@ func (m *Manager) Stop() {
 			t.Stop()
 		}
 	}
-	m.mu.Unlock()
+	m.logs.Unlock(&m.mu)
 	m.wg.Wait()
 }
 
@@ -427,7 +429,7 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 	delete(ss.byID, next.id)
 	next.lastSeen = now
 	ss.active = next
-	slog.Debug("timeslot activating pending stream",
+	m.logs.Debug("timeslot activating pending stream",
 		"slot", slot, "streamID", next.id, "network", next.network,
 		"bufferedPackets", len(next.queue))
 	ss.draining = len(next.queue) > 0
@@ -449,7 +451,7 @@ func (m *Manager) advanceLocked(slot bool, ss *slotState) {
 // after a voice call.
 func (m *Manager) SetCallHang(hold time.Duration, isVoice func(packet any) bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	m.hold, m.isVoice = hold, isVoice
 }
 
@@ -465,14 +467,14 @@ func (m *Manager) holdingLocked(ss *slotState, packet any, now time.Time) bool {
 // queued call goes out as fast as its sink takes it.
 func (m *Manager) PaceReplays() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	m.pace = true
 }
 
 // Paced reports whether PaceReplays was called.
 func (m *Manager) Paced() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.logs.Unlock(&m.mu)
 	return m.pace
 }
 
@@ -513,20 +515,20 @@ func (m *Manager) send(slot bool) {
 		if m.stopped || s == nil || !ss.draining || len(s.queue) == 0 {
 			ss.draining = false
 			ss.sending = false
-			m.mu.Unlock()
+			m.logs.Unlock(&m.mu)
 			return
 		}
 		e := s.queue[0]
 		s.queue[0] = entry{}
 		s.queue = s.queue[1:]
 		s.lastSeen = m.now()
-		m.mu.Unlock()
+		m.logs.Unlock(&m.mu)
 
 		if !m.waitReplay(s, e.at) {
 			m.mu.Lock()
 			ss.draining = false
 			ss.sending = false
-			m.mu.Unlock()
+			m.logs.Unlock(&m.mu)
 			return
 		}
 		if s.sink != nil {
@@ -538,7 +540,7 @@ func (m *Manager) send(slot bool) {
 			if ss.active == s {
 				m.advanceLocked(slot, ss)
 			}
-			m.mu.Unlock()
+			m.logs.Unlock(&m.mu)
 		}
 	}
 }

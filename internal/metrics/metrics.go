@@ -48,6 +48,9 @@ type Metrics struct {
 	// Translator
 	TranslatorActiveStreams *prometheus.GaugeVec
 	TranslatorPackets       *prometheus.CounterVec
+
+	// Logging
+	LogRecordsDropped prometheus.Counter
 }
 
 // NewMetrics creates and registers all application metrics with a
@@ -147,6 +150,10 @@ func NewMetrics() *Metrics {
 			Name: "translator_packets_total",
 			Help: "Total packets translated by direction.",
 		}, []string{labelDirection}),
+		LogRecordsDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "log_records_dropped_total",
+			Help: "Total log records dropped because the log output was blocked.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -169,6 +176,7 @@ func NewMetrics() *Metrics {
 		m.TimeslotTimeouts,
 		m.TranslatorActiveStreams,
 		m.TranslatorPackets,
+		m.LogRecordsDropped,
 	)
 
 	return m
