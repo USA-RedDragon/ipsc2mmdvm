@@ -335,8 +335,8 @@ func TestIPSCEmbeddedSignallingFromCapture(t *testing.T) {
 		pos := int(out[0].DTypeOrVSeq) //nolint:gosec // a voice sequence is 1-5
 		raw := layer2.RawBurst(out[0].DMRData)
 		emb := raw.EMB()
-		if got := emb.LCSS; got != defaultLCSS(pos) {
-			t.Errorf("packet %d burst %c: LCSS %d, want %d", i, 'A'+pos, got, defaultLCSS(pos))
+		if got := emb.LCSS; got != positionLCSS(pos) {
+			t.Errorf("packet %d burst %c: LCSS %d, want %d", i, 'A'+pos, got, positionLCSS(pos))
 		}
 		if got := raw.EmbeddedData(); string(got[:]) != string(data[52:56]) {
 			t.Errorf("packet %d burst %c: fragment % X, want % X", i, 'A'+pos, got, data[52:56])

@@ -1568,7 +1568,7 @@ func sendMMDVMVoice(t *testing.T, tr *IPSCTranslator, streamID uint, vseq uint) 
 	if vseq != 0 {
 		b := layer2.Burst{Kind: layer2.KindVoice}
 		b.SyncPattern = enums.SyncNone
-		b.EmbeddedSignalling = pdu.EmbeddedSignalling{ColorCode: 1, LCSS: defaultLCSS(int(vseq))} //nolint:gosec // vseq is in [1,5]
+		b.EmbeddedSignalling = pdu.EmbeddedSignalling{ColorCode: 1, LCSS: positionLCSS(int(vseq))} //nolint:gosec // vseq is in [1,5]
 		data, err := b.Encode()
 		if err != nil {
 			t.Fatal(err)

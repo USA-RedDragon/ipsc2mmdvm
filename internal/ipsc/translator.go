@@ -726,19 +726,10 @@ func mmdvmVoiceBurstPosition(pkt mmdvm.Packet) (int, bool) {
 	return int(pkt.DTypeOrVSeq), true
 }
 
-// defaultLCSS is the embedded LC start/stop value a voice superframe uses at
-// each burst position.
-func defaultLCSS(pos int) enums.LCSS {
-	switch pos {
-	case burstB:
-		return enums.LCSSFirstFragment
-	case burstC, burstD:
-		return enums.LCSSContinuationFragment
-	case burstE:
-		return enums.LCSSLastFragment
-	default:
-		return enums.LCSSSingleFragment
-	}
+// voiceBurst returns the voice burst type of superframe position pos (0-5
+// for A-F).
+func voiceBurst(pos int) enums.VoiceBurstType {
+	return enums.VoiceBurstA + enums.VoiceBurstType(pos) //nolint:gosec // pos is 0-5
 }
 
 // embByte encodes the IPSC EMB byte (color code, PI, and LCSS, FEC removed)
@@ -747,7 +738,8 @@ func defaultLCSS(pos int) enums.LCSS {
 // the burst position. PI, the pre-emption and power control indicator, is
 // always clear, as in ipsc2hbpc.
 func embByte(burst *layer2.Burst, pos int) byte {
-	emb := pdu.EmbeddedSignalling{LCSS: defaultLCSS(pos)}
+	lcss, _ := voiceBurst(pos).LCSS()
+	emb := pdu.EmbeddedSignalling{LCSS: lcss}
 	if burst.HasEmbeddedSignalling() && !burst.EmbeddedSignalling.FEC.Uncorrectable {
 		emb = burst.EmbeddedSignalling
 	}
@@ -970,7 +962,7 @@ func lcAddress(id uint) uint32 {
 func mmdvmVoiceDecodeOptions(pkt mmdvm.Packet) *layer2.DecodeOptions {
 	opts := &layer2.DecodeOptions{Kind: layer2.KindVoice}
 	if pos, ok := mmdvmVoiceBurstPosition(pkt); ok {
-		opts.VoiceBurst = enums.VoiceBurstA + enums.VoiceBurstType(pos) //nolint:gosec // pos is 0-5
+		opts.VoiceBurst = voiceBurst(pos)
 	}
 	return opts
 }
@@ -1580,10 +1572,8 @@ func superframeRestartsAfter(rss *reverseStreamState, seq uint16) {
 // superframe uses the same LCSS at each position, the color code is our
 // own, and PI is clear, as in ipsc2hbpc.
 func (t *IPSCTranslator) populateEmbeddedSignalling(raw *layer2.RawBurst, burstIdx int, ipscData []byte) {
-	emb := pdu.EmbeddedSignalling{
-		ColorCode: t.colorCode,
-		LCSS:      defaultLCSS(burstIdx),
-	}
+	lcss, _ := voiceBurst(burstIdx).LCSS()
+	emb := pdu.EmbeddedSignalling{ColorCode: t.colorCode, LCSS: lcss}
 	raw.SetEMB(emb)
 	if len(ipscData) != 57 && len(ipscData) != 66 {
 		return

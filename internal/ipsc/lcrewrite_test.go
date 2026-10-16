@@ -11,6 +11,13 @@ import (
 	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
+// positionLCSS returns the LCSS of the EMB of the voice burst at superframe
+// position pos (1-5 for B-F) in a superframe with an embedded LC.
+func positionLCSS(pos int) enums.LCSS {
+	lcss, _ := voiceBurst(pos).LCSS()
+	return lcss
+}
+
 // embeddedLCOf decodes the embedded LC of four fragments as MMDVMHost does
 // and fails the test when it does not decode.
 func embeddedLCOf(t *testing.T, fragments [4][4]byte) [9]byte {
@@ -244,7 +251,7 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 		bursts = append(bursts, out.DMRData)
 		raw := layer2.RawBurst(out.DMRData)
 		emb := raw.EMB()
-		if emb.FEC.Uncorrectable || emb.LCSS != defaultLCSS(int(vseq)) || emb.ColorCode != 1 || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
+		if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != 1 || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 			t.Fatalf("burst %c EMB %s", 'A'+vseq, emb.String())
 		}
 		if !sameBits(v.DMRData, out.DMRData, 0, 108) || !sameBits(v.DMRData, out.DMRData, 156, 264) {
@@ -271,7 +278,7 @@ func TestLCRewriterLateEntryUsesPacketFields(t *testing.T) {
 	r := NewLCRewriter()
 	var bursts [][33]byte
 	for vseq := uint(1); vseq <= 4; vseq++ {
-		v := voicePacket(vseq, defaultLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
+		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
 		out := v
 		out.Dst, out.GroupCall = 9, true
 		r.Rewrite(v, &out)
@@ -316,7 +323,7 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 
 	var fragments [4][4]byte
 	for vseq := uint(1); vseq <= 4; vseq++ {
-		v := voicePacket(vseq, defaultLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
+		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
 		o := v
 		o.Dst, o.GroupCall = 9, true
 		r.Rewrite(v, &o)
@@ -324,7 +331,7 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 			t.Fatalf("burst %c was not rewritten", 'A'+vseq)
 		}
 		var vb layer2.Burst
-		opts := layer2.DecodeOptions{Kind: layer2.KindVoice, VoiceBurst: enums.VoiceBurstA + enums.VoiceBurstType(vseq)} //nolint:gosec // vseq is in [1,4]
+		opts := layer2.DecodeOptions{Kind: layer2.KindVoice, VoiceBurst: voiceBurst(int(vseq))} //nolint:gosec // vseq is in [1,4]
 		if err := vb.DecodeFromBytesWith(o.DMRData, &opts); err != nil {
 			t.Fatal(err)
 		}
@@ -402,7 +409,7 @@ func TestTranslateToIPSCFullLCFollowsPacketFields(t *testing.T) {
 		t.Fatalf("header LC % X, want % X", out[0][38:50], want)
 	}
 	for vseq := uint(0); vseq <= 4; vseq++ {
-		v := voicePacket(vseq, defaultLCSS(int(vseq))) //nolint:gosec // vseq is in [0,4]
+		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [0,4]
 		v.Src, v.Dst, v.GroupCall = 1234, 9, true
 		out = tr.TranslateToIPSC(v)
 	}
@@ -513,7 +520,7 @@ func TestLCRewriterRewritesDataHeader(t *testing.T) {
 // bursts B-E carry fragments as their embedded LC.
 func voiceWithEmbeddedLC(vseq uint, fragments [4][4]byte) mmdvm.Packet {
 	pos := int(vseq) //nolint:gosec // vseq is in [1,5]
-	p := voicePacket(vseq, defaultLCSS(pos))
+	p := voicePacket(vseq, positionLCSS(pos))
 	if pos > burstE {
 		return p
 	}
@@ -674,7 +681,7 @@ func TestLCRewriterRebuildsEMB(t *testing.T) {
 			out.Dst = 9
 			r.Rewrite(v, &out)
 			emb := (*layer2.RawBurst)(&out.DMRData).EMB()
-			if emb.FEC.Uncorrectable || emb.LCSS != defaultLCSS(int(vseq)) || emb.ColorCode != tc.wantCC || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
+			if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != tc.wantCC || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 				t.Errorf("%s: burst %c EMB %s", tc.name, 'A'+vseq, emb.String())
 			}
 		}
@@ -730,8 +737,7 @@ func TestEmbeddedFragmentsChecks(t *testing.T) {
 		embOK        bool
 	}
 	ok := func(pos, lastPos int) burst {
-		lcss, _ := (enums.VoiceBurstA + enums.VoiceBurstType(pos)).LCSS() //nolint:gosec // pos is 1-4
-		return burst{pos, lastPos, lcss, true}
+		return burst{pos, lastPos, positionLCSS(pos), true}
 	}
 	badEMB := ok(burstC, burstB)
 	badEMB.embOK = false

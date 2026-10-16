@@ -69,7 +69,7 @@ func (f *embeddedFragments) add(frag [4]byte, emb pdu.EmbeddedSignalling, embOK 
 	if pos == burstB {
 		f.next = 0
 	}
-	lcss, _ := (enums.VoiceBurstA + enums.VoiceBurstType(pos)).LCSS() //nolint:gosec // pos is 1-4
+	lcss, _ := voiceBurst(pos).LCSS()
 	if !embOK || emb.LCSS != lcss || pos-burstB != f.next ||
 		(pos != burstB && pos != lastPos+1) {
 		f.next = 0
@@ -320,5 +320,6 @@ func rewrittenLC(pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
 func putEmbeddedFragment(data *[33]byte, embedded [4][4]byte, pos int, colorCode enums.ColorCode) {
 	raw := (*layer2.RawBurst)(data)
 	raw.SetEmbeddedData(embedded[pos-burstB])
-	raw.SetEMB(pdu.EmbeddedSignalling{ColorCode: colorCode, LCSS: defaultLCSS(pos)}) // writes nothing for a color code over 15
+	lcss, _ := voiceBurst(pos).LCSS()
+	raw.SetEMB(pdu.EmbeddedSignalling{ColorCode: colorCode, LCSS: lcss})
 }
