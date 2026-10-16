@@ -862,3 +862,85 @@ func TestRigCallSequence(t *testing.T) {
 		t.Errorf("two calls share byte 5")
 	}
 }
+
+// rigConfirmedRate12Packet returns the bursts and data types of a confirmed
+// rate 1/2 packet from 3191868 to 3140598 on TS1, as an MMDVM master sent
+// it on the rig, with the header CRC broken when badCRC is set.
+func rigConfirmedRate12Packet(badCRC bool) ([][33]byte, []enums.DataType) {
+	bursts := make([][33]byte, 0, 3)
+	for i, h := range []string{
+		"20f7370570bee26393b7cda7ddadff57d75df5de6accf9067160278e89420a3c95",
+		"06dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
+		"403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
+	} {
+		w, _ := hex.DecodeString(h)
+		raw := layer2.RawBurst(w)
+		if i == 0 && badCRC {
+			p, _ := raw.BPTCPayload()
+			p[11] ^= 0x01
+			raw.SetBPTCPayload(p)
+		}
+		bursts = append(bursts, raw)
+	}
+	return bursts, []enums.DataType{enums.DataTypeDataHeader, enums.DataTypeRate12, enums.DataTypeRate12}
+}
+
+// TestDroppedHeaderDropsItsBlocks sends rigConfirmedRate12Packet with and
+// without a bit of the header CRC flipped. A header that fails its CRC is
+// dropped, and dmrgo's packet assembler drops it too, as MMDVMHost does, so
+// its blocks have no data packet to belong to. MMDVMHost discards such
+// blocks, and so does the translator: no call is left open without an end.
+// The intact packet goes through and ends at its last block. A rate 3/4
+// block of rigRate34Calls with no header before it is dropped the same way.
+func TestDroppedHeaderDropsItsBlocks(t *testing.T) {
+	t.Parallel()
+	for _, badCRC := range []bool{true, false} {
+		tr := newTestTranslator(t)
+		bursts, types := rigConfirmedRate12Packet(badCRC)
+		for i, b := range bursts {
+			out := tr.TranslateToIPSC(mmdvm.Packet{
+				Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 3140598,
+				FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(types[i]), StreamID: 85, DMRData: b,
+			})
+			want := 1
+			if badCRC {
+				want = 0
+			}
+			if len(out) != want {
+				t.Fatalf("bad CRC %v burst %d: got %d packets, want %d", badCRC, i, len(out), want)
+			}
+			if want == 1 && (out[0][17]&ipscCallInfoEnd != 0) != (i == 2) {
+				t.Errorf("bad CRC %v burst %d: call info %02x", badCRC, i, out[0][17])
+			}
+		}
+		if len(tr.streams) != 0 {
+			t.Fatalf("bad CRC %v: call still open after its last block: %d streams", badCRC, len(tr.streams))
+		}
+	}
+	c := rigRate34Calls()[0]
+	block, _ := hex.DecodeString(c.bursts[1])
+	tr := newTestTranslator(t)
+	if out := tr.TranslateToIPSC(mmdvm.Packet{
+		Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: c.group, Slot: true,
+		FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[1]), StreamID: 86, DMRData: [33]byte(block),
+	}); len(out) != 0 || len(tr.streams) != 0 {
+		t.Errorf("rate 3/4 block with no header: got %d packets and %d streams, want none", len(out), len(tr.streams))
+	}
+}
+
+// TestDataCallInProgress follows rigConfirmedRate12Packet: the intact packet
+// is in progress from its header to its last block, and a header that fails
+// its CRC starts no packet, so no block is its last.
+func TestDataCallInProgress(t *testing.T) {
+	t.Parallel()
+	for _, badCRC := range []bool{false, true} {
+		var c DataCall
+		bursts, _ := rigConfirmedRate12Packet(badCRC)
+		for i, b := range bursts {
+			last := DataBurstEndsCall(&c, b)
+			if last != (i == 2 && !badCRC) || c.asm.InProgress() != (i < 2 && !badCRC) {
+				t.Errorf("bad CRC %v burst %d: last %v in progress %v", badCRC, i, last, c.asm.InProgress())
+			}
+		}
+	}
+}

@@ -217,24 +217,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	now := t.now()
 	t.pruneLocked(now)
 
-	// Get or create stream state
-	ss, existed := t.streams[uint32(streamID)]
-	if !existed {
-		t.nextCallControl++
-		if t.nextCallControl == 0 {
-			t.nextCallControl = 1
-		}
-		ss = &streamState{
-			callControl: t.nextCallControl,
-			ipscSeq:     t.nextCallSeq,
-			firstPacket: true,
-		}
-		t.nextCallSeq++
-		t.streams[uint32(streamID)] = ss
-		if t.metrics != nil {
-			t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Inc()
-		}
-	}
+	ss, existed := t.streamLocked(uint32(streamID))
 	ss.lastSeen = now
 	defer func(id uint32) {
 		if !existed && len(results) == 0 {
@@ -249,6 +232,11 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	case mmdvmFrameTypeDataSync:
 		if dtypeOrVSeq > 255 {
 			slog.Debug("IPSCTranslator: invalid dtype", "dtype", dtypeOrVSeq)
+			return nil
+		}
+		if ss.headerless(enums.DataType(dtypeOrVSeq)) {
+			slog.Debug("IPSCTranslator: dropping data block outside a data packet",
+				"dtype", enums.DataType(dtypeOrVSeq).String())
 			return nil
 		}
 		// Voice LC Header, Terminator, or Data
@@ -335,6 +323,30 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt mmdvm.Packet) (results [][]byte) {
 	}
 
 	return results
+}
+
+// streamLocked returns the MMDVM-to-IPSC state of stream streamID, and
+// whether it existed. A new stream is a new call, with the next call
+// control and call sequence number. The caller must hold t.mu.
+func (t *IPSCTranslator) streamLocked(streamID uint32) (*streamState, bool) {
+	if ss, ok := t.streams[streamID]; ok {
+		return ss, true
+	}
+	t.nextCallControl++
+	if t.nextCallControl == 0 {
+		t.nextCallControl = 1
+	}
+	ss := &streamState{
+		callControl: t.nextCallControl,
+		ipscSeq:     t.nextCallSeq,
+		firstPacket: true,
+	}
+	t.nextCallSeq++
+	t.streams[streamID] = ss
+	if t.metrics != nil {
+		t.metrics.TranslatorActiveStreams.WithLabelValues("mmdvm_to_ipsc").Inc()
+	}
+	return ss, false
 }
 
 // CleanupStream removes state for an MMDVM stream ID in both directions
@@ -461,6 +473,18 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt mmdvm.Packet, ss *streamState,
 	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc[:], slotTypeColorCode(pkt.DMRData))
 
 	return buf
+}
+
+// headerless reports whether dataType is a rate 1/2, 3/4 or 1 data block
+// and the call has no data packet in progress for it: its header failed
+// its CRC or never came, or its packet already ended. MMDVMHost discards
+// such a block from the network (CDMRSlot::writeNetwork).
+func (ss *streamState) headerless(dataType enums.DataType) bool {
+	switch dataType { //nolint:exhaustive // only data blocks belong to a packet
+	case enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
+		return !ss.data.asm.InProgress()
+	}
+	return false
 }
 
 // lastDataBlock adds a data burst to the data packet of the call and

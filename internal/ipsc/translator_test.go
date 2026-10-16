@@ -1242,6 +1242,27 @@ func TestTranslateRandomInputsDoNotPanic(t *testing.T) {
 	}
 }
 
+// startDataPacket sends tr the unconfirmed data header of a packet with two
+// blocks to follow on the stream of pkt, so that a rate 1/2 block of pkt
+// belongs to a data packet: the translator drops a data block outside one,
+// as MMDVMHost does.
+func startDataPacket(t *testing.T, tr *IPSCTranslator, pkt mmdvm.Packet) {
+	t.Helper()
+	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+		Group: pkt.GroupCall, SAP: enums.SAPIPBasedPacketData,
+		LLIDDestination: uint32(pkt.Dst), LLIDSource: uint32(pkt.Src), BlocksToFollow: 2, //nolint:gosec // test addresses are small
+	}}
+	burst, err := layer2.BuildBurst(&h, 0, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp := pkt
+	hp.DTypeOrVSeq, hp.DMRData = uint(enums.DataTypeDataHeader), burst
+	if out := tr.TranslateToIPSC(hp); len(out) != 1 {
+		t.Fatalf("data header: got %d IPSC packets, want 1", len(out))
+	}
+}
+
 func TestTranslateToIPSCDataBurstTypes(t *testing.T) {
 	t.Parallel()
 	want := map[enums.DataType]byte{
@@ -1255,7 +1276,11 @@ func TestTranslateToIPSCDataBurstTypes(t *testing.T) {
 	for dt, burstType := range want {
 		for _, slot := range []bool{false, true} {
 			tr := newTestTranslator(t)
-			out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(dt)))
+			pkt := makeTestMMDVMPacket(true, slot, mmdvmFrameTypeDataSync, uint(dt))
+			if dt == enums.DataTypeRate12 {
+				startDataPacket(t, tr, pkt)
+			}
+			out := tr.TranslateToIPSC(pkt)
 			if len(out) != 1 {
 				t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
 			}
@@ -1331,6 +1356,9 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 		tr := newTestTranslator(t)
 		pkt := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(dt))
 		pkt.DMRData = buildLCDataBurst(t, payload, dt, 1)
+		if dt == enums.DataTypeRate12 {
+			startDataPacket(t, tr, pkt)
+		}
 		out := tr.TranslateToIPSC(pkt)
 		if len(out) != 1 {
 			t.Fatalf("%s: expected 1 packet, got %d", dt.String(), len(out))
@@ -2012,6 +2040,9 @@ func TestTranslateToIPSCChecksBPTCByDMRDDataType(t *testing.T) {
 		tr := newTestTranslator(t)
 		p := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(tc.dmrd))
 		p.DMRData = buildLCDataBurst(t, badCSBK, tc.slotType, 1)
+		if tc.dmrd == enums.DataTypeRate12 {
+			startDataPacket(t, tr, p)
+		}
 		if got := len(tr.TranslateToIPSC(p)); got != tc.wantCount {
 			t.Errorf("%s: got %d IPSC packets, want %d", tc.name, got, tc.wantCount)
 		}
