@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,6 @@ type IPSCServer struct {
 
 	mu       sync.Mutex
 	master   *session.Master
-	authKey  *auth.Key
 	out      []session.Output
 	epoch    time.Time
 	lastSend map[uint32]time.Time
@@ -75,14 +75,12 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 	if len(cfg.MMDVM) > 0 {
 		mc.ID = cfg.MMDVM[0].ID
 	}
-	var authKey *auth.Key
 	if cfg.IPSC.Auth.Enabled {
 		k, err := auth.ParseKey(cfg.IPSC.Auth.Key)
 		if err != nil {
 			slog.Error("failed to parse the IPSC auth key", "error", err)
 		}
 		mc.Auth, mc.Key = true, k
-		authKey = auth.NewKey(k)
 	}
 	master, err := session.NewMaster(&mc)
 	if err != nil {
@@ -92,7 +90,6 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		cfg:      cfg,
 		metrics:  m,
 		master:   master,
-		authKey:  authKey,
 		epoch:    time.Now(),
 		lastSend: map[uint32]time.Time{},
 		wake:     make(chan struct{}, 1),
@@ -250,16 +247,9 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 	s.out = s.master.Packet(s.clock(), from, data, s.out[:0])
-	if len(s.out) == 0 && s.authKey != nil {
-		if _, ok := s.authKey.Verify(data); !ok {
-			if s.metrics != nil {
-				s.metrics.IPSCAuthFailures.Inc()
-			}
-			slog.Debug("dropped IPSC packet that failed authentication", "peer", addr)
-			return
-		}
+	if len(s.out) == 0 || s.out[0].Kind != session.OutputDropped || s.out[0].Reason != session.ReasonAuth {
+		s.countReceived(ipscpkt.Opcode(data[0]))
 	}
-	s.countReceived(ipscpkt.Opcode(data[0]))
 	s.actLocked(ipscpkt.Opcode(data[0]))
 }
 
@@ -283,11 +273,24 @@ func (s *IPSCServer) actLocked(op ipscpkt.Opcode) {
 			slog.Warn("IPSC peer de-registered", "peerID", o.ID, "peer", udpAddr(o.Addr), "reason", o.Reason)
 		case session.OutputData:
 			s.dataLocked(o)
+		case session.OutputDropped:
+			s.droppedLocked(o, op)
 		case session.OutputPeers:
 		}
 	}
 	if changed && s.metrics != nil {
 		s.metrics.IPSCPeersRegistered.Set(float64(s.master.Peers()))
+	}
+}
+
+func (s *IPSCServer) droppedLocked(o *session.Output, op ipscpkt.Opcode) {
+	slog.Debug("dropped IPSC packet", "peer", udpAddr(o.Addr), "peerID", o.ID, "opcode", op, "reason", o.Reason)
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.IPSCPacketsDropped.WithLabelValues(strings.ToLower(o.Reason.String())).Inc()
+	if o.Reason == session.ReasonAuth {
+		s.metrics.IPSCAuthFailures.Inc()
 	}
 }
 

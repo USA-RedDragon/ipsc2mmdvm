@@ -189,6 +189,11 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 	return families[0].GetMetric()[0].GetCounter().GetValue()
 }
 
+func dropped(t *testing.T, m *metrics.Metrics, reason string) float64 {
+	t.Helper()
+	return counterValue(t, m.IPSCPacketsDropped.WithLabelValues(reason))
+}
+
 func requireReturns(t *testing.T, what string, f func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -258,6 +263,9 @@ func TestAuthFailuresAreDroppedAndCounted(t *testing.T) {
 	}
 	if got := counterValue(t, m.IPSCAuthFailures); got != 2 {
 		t.Fatalf("auth failures %v, want 2", got)
+	}
+	if got := dropped(t, m, "auth"); got != 2 {
+		t.Fatalf("dropped for auth %v, want 2", got)
 	}
 	s.handlePacket(signPacket(t, control(t, ipscpkt.OpRegisterRequest, 12345), "0000000000000000000000000000000000001234"), addr)
 	if reply := readUDP(t, conn); reply[0] != byte(ipscpkt.OpRegisterReply) {
@@ -604,14 +612,23 @@ func TestPeersRegisteredGauge(t *testing.T) {
 
 func TestUnregisteredPeerCreatesNoPeerAndGetsNoTraffic(t *testing.T) {
 	t.Parallel()
+	m := metrics.NewMetrics()
 	s, _ := newTestServerWithUDP(t, false, "")
+	s.metrics = m
 	victim, victimAddr := listenPeer(t)
 	s.handlePacket(mustDecodeHex(t, "850000002a000000010002"), victimAddr)
 	s.handlePacket(makeVoicePacket(43, 0), victimAddr)
 	s.handlePacket(control(t, ipscpkt.OpAliveRequest, 44), victimAddr)
 	s.handlePacket(control(t, ipscpkt.OpPeerListRequest, 45), victimAddr)
+	s.handlePacket([]byte{0x90, 0, 0}, victimAddr)
 	if ids := peerIDs(s); len(ids) != 0 {
 		t.Fatalf("expected no peers from unregistered packets, got %v", ids)
+	}
+	if got := dropped(t, m, "unregistered"); got != 4 {
+		t.Fatalf("dropped as unregistered %v, want 4", got)
+	}
+	if got := dropped(t, m, "malformed"); got != 1 {
+		t.Fatalf("dropped as malformed %v, want 1", got)
 	}
 	s.SendUserPacket(t.Context(), []byte("voice"))
 	expectNoUDP(t, victim)
@@ -643,13 +660,18 @@ func TestUnregisteredPeerVoiceIsNotBridged(t *testing.T) {
 
 func TestRegistrationIsCappedAtMaxPeers(t *testing.T) {
 	t.Parallel()
+	m := metrics.NewMetrics()
 	s, _ := newTestServerWithUDP(t, false, "")
+	s.metrics = m
 	_, addr := listenPeer(t)
 	for id := uint32(1); id <= maxPeers+10; id++ {
 		s.handlePacket(control(t, ipscpkt.OpRegisterRequest, id), addr)
 	}
 	if n := len(peerIDs(s)); n != maxPeers {
 		t.Fatalf("expected peers capped at %d, got %d", maxPeers, n)
+	}
+	if got := dropped(t, m, "full"); got != 10 {
+		t.Fatalf("dropped as full %v, want 10", got)
 	}
 }
 
@@ -931,6 +953,9 @@ func TestDeRegisterRequestRemovesPeer(t *testing.T) {
 	s.handlePacket(req, &net.UDPAddr{IP: peerAddr.IP, Port: peerAddr.Port + 1})
 	if ids := peerIDs(s); !slices.Equal(ids, []uint32{7, 314926}) {
 		t.Fatalf("peers %v after a request from another address", ids)
+	}
+	if got := dropped(t, m, "address"); got != 1 {
+		t.Fatalf("dropped for address %v, want 1", got)
 	}
 	s.handlePacket(req, peerAddr)
 	if ids := peerIDs(s); !slices.Equal(ids, []uint32{7}) {

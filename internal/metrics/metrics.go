@@ -11,6 +11,7 @@ import (
 const (
 	labelDirection = "direction"
 	labelNetwork   = "network"
+	labelReason    = "reason"
 	labelSlot      = "slot"
 )
 
@@ -25,6 +26,7 @@ type Metrics struct {
 	IPSCPacketsSent     prometheus.Counter
 	IPSCPeersRegistered prometheus.Gauge
 	IPSCAuthFailures    prometheus.Counter
+	IPSCPacketsDropped  *prometheus.CounterVec
 	IPSCUDPErrors       *prometheus.CounterVec
 
 	// MMDVM Client
@@ -81,6 +83,10 @@ func NewMetrics() *Metrics {
 			Name: "ipsc_auth_failures_total",
 			Help: "Total IPSC authentication failures.",
 		}),
+		IPSCPacketsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "ipsc_packets_dropped_total",
+			Help: "Total IPSC packets the master dropped by reason.",
+		}, []string{labelReason}),
 		IPSCUDPErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ipsc_udp_errors_total",
 			Help: "Total IPSC UDP errors by direction.",
@@ -115,7 +121,7 @@ func NewMetrics() *Metrics {
 		MMDVMPacketsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mmdvm_packets_dropped_total",
 			Help: "Total MMDVM packets dropped by reason.",
-		}, []string{labelNetwork, "reason"}),
+		}, []string{labelNetwork, labelReason}),
 
 		// Rewrite
 		MMDVMRewriteMatches: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -161,6 +167,7 @@ func NewMetrics() *Metrics {
 		m.IPSCPacketsSent,
 		m.IPSCPeersRegistered,
 		m.IPSCAuthFailures,
+		m.IPSCPacketsDropped,
 		m.IPSCUDPErrors,
 		m.MMDVMConnectionState,
 		m.MMDVMReconnects,
