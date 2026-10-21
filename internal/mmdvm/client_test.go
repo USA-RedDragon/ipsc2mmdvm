@@ -1171,6 +1171,7 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	data[18] = 0x80
 	// Burst type = voice head
 	data[30] = 0x01
+	setDataHead(data)
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 	client.HandleIPSCBurst(0x80, data, addr)
@@ -1226,6 +1227,7 @@ func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 	data[16] = 0xDD
 	data[18] = 0x80
 	data[30] = 0x01
+	setDataHead(data)
 
 	// Fill tx_chan to make it block
 	for i := 0; i < cap(client.tx_chan); i++ {
@@ -1608,6 +1610,7 @@ func TestHandleIPSCBurstMultiple(t *testing.T) {
 		data[16] = byte(i + 1)
 		data[18] = 0x80
 		data[30] = 0x01
+		setDataHead(data)
 
 		client.HandleIPSCBurst(0x80, data, addr)
 	}

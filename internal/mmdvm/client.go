@@ -15,6 +15,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
+	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -1117,18 +1118,16 @@ func (h *MMDVMClient) SetOutboundTSManager(mgr *timeslot.Manager) {
 // routing-relevant fields (src, dst, groupCall, slot) directly from the
 // IPSC packet header. When passallOnly is true, only passall rules are checked.
 func (h *MMDVMClient) MatchesRules(packetType byte, data []byte, passallOnly bool) bool {
-	if len(data) < 18 {
+	u, err := ipscpkt.DecodeUser(data)
+	if err != nil {
 		return false
 	}
 	// Build a probe packet from IPSC header fields.
 	probe := dmrd.Data{
-		Source:      uint32(data[6])<<16 | uint32(data[7])<<8 | uint32(data[8]),
-		Destination: uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11]),
-		Private:     packetType != 0x80 && packetType != 0x83,
-		Slot:        enums.Slot1,
-	}
-	if data[17]&0x20 != 0 {
-		probe.Slot = enums.Slot2
+		Source:      u.Source,
+		Destination: u.Destination,
+		Private:     u.Opcode != ipscpkt.OpGroupVoice && u.Opcode != ipscpkt.OpGroupData,
+		Slot:        u.Info.Slot(),
 	}
 	if passallOnly {
 		return rewrite.Apply(h.passallRewrites, &probe)

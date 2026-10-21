@@ -314,8 +314,12 @@ func makeTestIPSCPacket(packetType byte, burstType byte, groupCall, slot bool) [
 	// RTP header stub (bytes 18-29)
 	buf[18] = 0x80
 
-	// Burst type (byte 30)
+	// Burst type (byte 30), then the data burst head as an XPR 8400
+	// sends it: 10 words follow, RSSI and slot type flags, 96 bits.
 	buf[30] = burstType
+	buf[33] = 0x0A
+	buf[34], buf[35] = 0x80, 0x0A
+	buf[37] = 0x60
 
 	// A zero payload with a valid CRC for the data types that have one
 	if crcChecked(enums.DataType(burstType)) {
@@ -995,112 +999,26 @@ func TestBuildMMDVMVoiceBurstPrivateCall(t *testing.T) {
 	}
 }
 
-func TestPopulateEmbeddedSignallingBurstB(t *testing.T) {
-	t.Parallel()
-	tr := newTestTranslator(t)
-
-	var raw layer2.RawBurst
-
-	// Burst B with 57-byte packet: fragment at [52:56], EMB at 56
-	ipscData := make([]byte, 57)
-	ipscData[52] = 0xAB
-	ipscData[53] = 0xCD
-	ipscData[54] = 0xEF
-	ipscData[55] = 0x12
-	ipscData[56] = 0x12 // CC 1, first fragment
-
-	tr.populateEmbeddedSignalling(&raw, 1, ipscData)
-
-	// Burst B (index 1) should have LCSS = FirstFragmentLC
-	if rawEMB(t, &raw).LCSS != enums.LCSSFirstFragment {
-		t.Fatalf("expected LCSS FirstFragmentLC, got %d", rawEMB(t, &raw).LCSS)
-	}
-
-	// Check that embedded data was unpacked
-	packed := raw.EmbeddedData()
-	//nolint:gosec // packed is [4]byte, index is always in range
-	if packed[0] != 0xAB || packed[1] != 0xCD || packed[2] != 0xEF || packed[3] != 0x12 {
-		t.Fatalf("expected embedded data [AB CD EF 12], got [%02X %02X %02X %02X]",
-			packed[0], packed[1], packed[2], packed[3])
-	}
-}
-
-func TestPopulateEmbeddedSignallingBurstE(t *testing.T) {
-	t.Parallel()
-	tr := newTestTranslator(t)
-
-	var raw layer2.RawBurst
-
-	// Burst E with 66-byte packet: fragment at [52:56], LC at [56:65], EMB at 65
-	ipscData := make([]byte, 66)
-	ipscData[52] = 0x11
-	ipscData[53] = 0x22
-	ipscData[54] = 0x33
-	ipscData[55] = 0x44
-	ipscData[56] = 0x55
-	ipscData[65] = 0x14 // CC 1, last fragment
-
-	tr.populateEmbeddedSignalling(&raw, 4, ipscData)
-
-	// Burst E (index 4) should have LCSS = LastFragmentLCorCSBK
-	if rawEMB(t, &raw).LCSS != enums.LCSSLastFragment {
-		t.Fatalf("expected LCSS LastFragmentLCorCSBK, got %d", rawEMB(t, &raw).LCSS)
-	}
-
-	packed := raw.EmbeddedData()
-	//nolint:gosec // packed is [4]byte, index is always in range
-	if packed[0] != 0x11 || packed[1] != 0x22 || packed[2] != 0x33 || packed[3] != 0x44 {
-		t.Fatalf("expected embedded data [11 22 33 44], got [%02X %02X %02X %02X]",
-			packed[0], packed[1], packed[2], packed[3])
-	}
-}
-
-func TestPopulateEmbeddedSignallingContinuation(t *testing.T) {
+// TestPopulateEmbeddedSignalling checks the EMB of each of bursts B to F:
+// the LCSS of the burst position and the color code of the bridge, whatever
+// the repeater sent.
+func TestPopulateEmbeddedSignalling(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
 	tr.SetColorCode(1)
-
-	var raw layer2.RawBurst
-
-	// Bursts C and D continue the embedded LC; F carries a single fragment.
-	// The repeater's EMB byte has color code 7, which is not used.
 	for idx, want := range map[int]enums.LCSS{
+		1: enums.LCSSFirstFragment,
 		2: enums.LCSSContinuationFragment,
 		3: enums.LCSSContinuationFragment,
+		4: enums.LCSSLastFragment,
 		5: enums.LCSSSingleFragment,
 	} {
-		ipscData := make([]byte, 57)
-		ipscData[56] = 0x70 | byte(want&0x03)<<1
-		tr.populateEmbeddedSignalling(&raw, idx, ipscData)
-		if rawEMB(t, &raw).LCSS != want {
-			t.Fatalf("burst index %d: expected LCSS %d, got %d", idx, want, rawEMB(t, &raw).LCSS)
+		emb, err := tr.populateEmbeddedSignalling(idx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if rawEMB(t, &raw).ColorCode != 1 {
-			t.Fatalf("burst index %d: expected color code 1, got %d", idx, rawEMB(t, &raw).ColorCode)
-		}
-	}
-}
-
-func TestPopulateEmbeddedSignallingNoEmbeddedData(t *testing.T) {
-	t.Parallel()
-	tr := newTestTranslator(t)
-
-	var raw layer2.RawBurst
-
-	// A 52-byte packet doesn't match 57 or 66, so no embedded data is extracted
-	ipscData := make([]byte, 52)
-	tr.populateEmbeddedSignalling(&raw, 1, ipscData)
-
-	// LCSS should still be set
-	if rawEMB(t, &raw).LCSS != enums.LCSSFirstFragment {
-		t.Fatalf("expected LCSS FirstFragmentLC, got %d", rawEMB(t, &raw).LCSS)
-	}
-
-	// Embedded data should remain empty (all zeros)
-	packed := raw.EmbeddedData()
-	for i, b := range packed {
-		if b != 0 {
-			t.Fatalf("expected zero embedded data byte %d, got 0x%02X", i, b)
+		if emb.LCSS() != want || emb.ColorCode() != 1 || emb.PI() {
+			t.Fatalf("burst index %d: EMB LCSS %d CC %d PI %v, want LCSS %d CC 1", idx, emb.LCSS(), emb.ColorCode(), emb.PI(), want)
 		}
 	}
 }

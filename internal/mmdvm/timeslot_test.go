@@ -445,7 +445,16 @@ func ipscVoiceHeader(callControl byte) []byte {
 	data[16] = callControl
 	data[18] = 0x80
 	data[30] = 0x01
+	setDataHead(data)
 	return data
+}
+
+// setDataHead writes the data burst head of the 54-octet IPSC packet p as an
+// XPR 8400 sends it: 10 words follow, RSSI and slot type flags, 96 bits.
+func setDataHead(p []byte) {
+	p[33] = 0x0A
+	p[34], p[35] = 0x80, 0x0A
+	p[37] = 0x60
 }
 
 func newInboundTestClient(t *testing.T) *MMDVMClient {

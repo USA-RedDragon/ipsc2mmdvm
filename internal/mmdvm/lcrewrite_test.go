@@ -43,6 +43,9 @@ func ipscCall(src, dst uint32, group bool, lcHeader, lcTerm []byte) [][]byte {
 		b[18] = 0x80
 		binary.BigEndian.PutUint16(b[20:22], rtpSeq)
 		b[30] = burstType
+		if size == 54 {
+			setDataHead(b)
+		}
 		return b
 	}
 	hdr := base(54, 0x01, 0)
@@ -198,6 +201,7 @@ func privateCSBK(t *testing.T) []byte {
 	b[16] = 0x55
 	b[18] = 0x80
 	b[30] = 0x03
+	setDataHead(b)
 	copy(b[38:50], mustHex(t, "BD0080010015B30004D2B4D5"))
 	return b
 }

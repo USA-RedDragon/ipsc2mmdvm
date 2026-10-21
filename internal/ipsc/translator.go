@@ -1,7 +1,6 @@
 package ipsc
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
@@ -15,6 +14,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
+	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
@@ -96,17 +96,13 @@ const (
 	ipscBurstSlot2           byte = 0x8A
 )
 
-// IPSC user packet layout limits.
-const (
-	ipscMinUserPacketLen = 31 // through the burst type byte at offset 30
-	ipscMinLCPacketLen   = 50 // through the 12-byte LC/data payload at 38-49
-	ipscMinRate34Len     = 56 // through the 18-byte rate 3/4 payload at 38-55
-	ipscMinVoicePktLen   = 52 // through the 19-byte AMBE payload at 33-51
-)
-
-// ipscVoiceCtrlSync is the flag in byte 32 of an IPSC voice burst that marks
-// a burst carrying voice sync, which is burst A.
+// ipscVoiceCtrlSync is the flag in the control octet of an IPSC voice burst
+// that marks a burst carrying voice sync, which is burst A.
 const ipscVoiceCtrlSync = 0x40
+
+// ipscFlagSlotType is the flag in the second flags octet of an IPSC data
+// burst that says a slot type follows the payload.
+const ipscFlagSlotType = 0x08
 
 // ipscVoiceCtrlBadFrame1 is the flag in byte 32 of an IPSC voice burst that
 // marks its first AMBE frame as uncorrectable on RF receive. An XPR 8400 set
@@ -116,17 +112,23 @@ const ipscVoiceCtrlSync = 0x40
 // as ipsc2hbpc does.
 const ipscVoiceCtrlBadFrame1 = 0x01
 
-// ipscCallInfoEnd is the call end flag in byte 17 of an IPSC user packet.
-const ipscCallInfoEnd = 0x40
+// The bits of the call info octet of an IPSC user packet: the end flag, the
+// timeslot, and the privacy flag that an XPR 8400 sets on every packet of
+// an encrypted voice call. ipscpkt.CallInfo reads them but has no setters.
+const (
+	ipscCallInfoEnd     = 0x40
+	ipscCallInfoSlot2   = 0x20
+	ipscCallInfoPrivacy = 0x80
+)
 
-// ipscCallInfoPrivacy is the flag in byte 17 of an IPSC user packet that an
-// XPR 8400 sets on every packet of an encrypted voice call.
-const ipscCallInfoPrivacy = 0x80
+// ipscStatusRSSI is the RSSI status bit of the status octet of an IPSC data
+// burst (see buildDataBurst).
+const ipscStatusRSSI = 0x40
 
 // ipscBurstSyncUndetect is the burst type of the 34-byte placeholder a
 // repeater sends for a burst it lost because it lost sync. Bit 7 is the
 // timeslot.
-const ipscBurstSyncUndetect byte = 0x13
+const ipscBurstSyncUndetect = byte(ipscpkt.BurstSyncLost)
 
 // RTP timestamp increment per burst (~60ms spacing in 16.16 format)
 const rtpTimestampIncrement = 480
@@ -264,26 +266,25 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			ss.privacy = ss.privacy || lcPrivacy(ss.lc)
 			// Send voice header (IPSC sends 3 copies)
 			for i := 0; i < 3; i++ {
-				data := t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket, lc)
-				results = append(results, data)
+				results = appendPacket(results, t.buildVoiceHeader(pkt, ss, i == 0 && ss.firstPacket, lc))
 			}
 			ss.headersSent = 3
 			ss.firstPacket = false
 		case enums.DataTypeTerminatorWithLC:
-			data := t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(&t.logs, pkt, enums.DataTypeTerminatorWithLC))
-			results = append(results, data)
+			results = appendPacket(results, t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(&t.logs, pkt, enums.DataTypeTerminatorWithLC)))
 			t.removeStreamLocked(uint32(streamID))
 		case enums.DataTypeRate34:
 			last := ss.lastDataBlock(pkt.Burst)
-			payload, res := layer2.RawBurst(pkt.Burst).Rate34Payload()
-			if res.Uncorrectable {
+			// SetRawBurst drops the FEC result of the block, so it is checked
+			// here first.
+			if _, res := pkt.Burst.Rate34Payload(); res.Uncorrectable {
 				t.logs.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
 				if last {
 					results = t.endDataCall(pkt, ss, uint32(streamID))
 				}
 				break
 			}
-			results = append(results, t.buildIPSCRate34Packet(pkt, ss, payload, last))
+			results = appendPacket(results, t.buildIPSCRate34Packet(pkt, ss, last))
 			ss.firstPacket = false
 			if last {
 				t.removeStreamLocked(uint32(streamID))
@@ -309,8 +310,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 				}
 				break
 			}
-			data := t.buildIPSCDataPacket(pkt, ss, burstType, payload, last)
-			results = append(results, data)
+			results = appendPacket(results, t.buildIPSCDataPacket(pkt, ss, burstType, payload, last))
 			ss.firstPacket = false
 			if last {
 				t.removeStreamLocked(uint32(streamID))
@@ -339,6 +339,15 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 	}
 
 	return results
+}
+
+// appendPacket appends p to results unless it is nil, as for a packet that
+// did not encode.
+func appendPacket(results [][]byte, p []byte) [][]byte {
+	if p == nil {
+		return results
+	}
+	return append(results, p)
 }
 
 // streamLocked returns the MMDVM-to-IPSC state of stream streamID, and
@@ -414,7 +423,7 @@ func (t *IPSCTranslator) EndStreams() [][]byte {
 			t.logs.Debug("IPSCTranslator: cannot build terminator", "error", err)
 		}
 		term.Burst = dmrData
-		results = append(results, t.buildVoiceTerminator(term, ss, fullLCFromBurst(&t.logs, term, enums.DataTypeTerminatorWithLC)))
+		results = appendPacket(results, t.buildVoiceTerminator(term, ss, fullLCFromBurst(&t.logs, term, enums.DataTypeTerminatorWithLC)))
 		t.removeStreamLocked(id)
 	}
 	if t.metrics != nil && len(results) > 0 {
@@ -449,116 +458,104 @@ func (t *IPSCTranslator) CleanupStream(streamID uint32) {
 	}
 }
 
-// buildIPSCHeader writes the common 18-byte IPSC header (bytes 0-17).
-func (t *IPSCTranslator) buildIPSCHeader(buf []byte, pkt dmrd.Data, ss *streamState, isEnd bool, isData bool) {
-	// Byte 0: Packet type
-	if isData {
-		if !pkt.Private {
-			buf[0] = byte(0x83) // GROUP_DATA
-		} else {
-			buf[0] = byte(0x84) // PVT_DATA
-		}
-	} else {
-		if !pkt.Private {
-			buf[0] = byte(0x80) // GROUP_VOICE
-		} else {
-			buf[0] = byte(0x81) // PVT_VOICE
-		}
+// newUser returns the IPSC packet of the call ss for pkt: a data packet
+// (0x83 or 0x84) when isData and a voice packet (0x80 or 0x81) otherwise,
+// with the end flag when isEnd and the RTP marker and payload type given.
+// It takes the next RTP sequence number and timestamp of the call.
+func (t *IPSCTranslator) newUser(pkt dmrd.Data, ss *streamState, isEnd, isData, marker bool, payloadType uint8) ipscpkt.User {
+	op := ipscpkt.OpGroupVoice
+	switch {
+	case isData && pkt.Private:
+		op = ipscpkt.OpPrivateData
+	case isData:
+		op = ipscpkt.OpGroupData
+	case pkt.Private:
+		op = ipscpkt.OpPrivateVoice
 	}
-
-	// Bytes 1-4: Peer ID
-	binary.BigEndian.PutUint32(buf[1:5], t.peerID)
-
-	// Byte 5: call sequence number, the same in every packet of a call and
-	// one more for each call, as an XPR 8400 sends it
-	buf[5] = ss.ipscSeq
-
-	// Bytes 6-8: Source subscriber (24-bit)
-	buf[6] = byte((pkt.Source >> 16) & 0xFF)
-	buf[7] = byte((pkt.Source >> 8) & 0xFF)
-	buf[8] = byte(pkt.Source & 0xFF)
-
-	// Bytes 9-11: Destination (24-bit)
-	buf[9] = byte((pkt.Destination >> 16) & 0xFF)
-	buf[10] = byte((pkt.Destination >> 8) & 0xFF)
-	buf[11] = byte(pkt.Destination & 0xFF)
-
-	// Byte 12: call priority. MOTOTRBO repeaters send 0x02 on group and
-	// private voice, and 0x01 on group and private data.
-	buf[12] = 0x02
+	// MOTOTRBO repeaters send call priority 0x02 on group and private voice,
+	// and 0x01 on group and private data.
+	priority := uint8(0x02)
 	if isData {
-		buf[12] = 0x01
+		priority = 0x01
 	}
-
-	// Bytes 13-16: Call control (random per-call)
-	binary.BigEndian.PutUint32(buf[13:17], ss.callControl)
-
-	// Byte 17: Call info (privacy, end flag, timeslot)
-	callInfo := byte(0x00)
+	var info uint8
 	if ss.privacy {
-		callInfo |= ipscCallInfoPrivacy
+		info |= ipscCallInfoPrivacy
 	}
 	if pkt.Slot == enums.Slot2 {
-		callInfo |= 0x20
+		info |= ipscCallInfoSlot2
 	}
 	if isEnd {
-		callInfo |= 0x40
+		info |= ipscCallInfoEnd
 	}
-	buf[17] = callInfo
-}
-
-// buildRTPHeader writes the 12-byte RTP header at buf[18:30].
-func (t *IPSCTranslator) buildRTPHeader(buf []byte, ss *streamState, marker bool, payloadType byte) {
-	// Byte 18: RTP version 2, no padding, no extension, 0 CSRCs
-	buf[18] = 0x80
-
-	// Byte 19: Marker + payload type
-	pt := payloadType
-	if marker {
-		pt |= 0x80
+	u := ipscpkt.User{
+		Opcode:      op,
+		ID:          t.peerID,
+		CallSeq:     ss.ipscSeq,
+		Source:      pkt.Source,
+		Destination: pkt.Destination,
+		Priority:    priority,
+		CallControl: ss.callControl,
+		Info:        ipscpkt.CallInfo(info),
+		RTP: ipscpkt.RTP{
+			Flags: 0x80, Marker: marker, PayloadType: payloadType,
+			Seq: ss.rtpSeq, Timestamp: ss.rtpTimestamp,
+		},
 	}
-	buf[19] = pt
-
-	// Bytes 20-21: RTP sequence number
-	binary.BigEndian.PutUint16(buf[20:22], ss.rtpSeq)
 	ss.rtpSeq++
-
-	// Bytes 22-25: RTP timestamp
-	binary.BigEndian.PutUint32(buf[22:26], ss.rtpTimestamp)
 	ss.rtpTimestamp += rtpTimestampIncrement
-
-	// Bytes 26-29: RTP SSRC (0)
-	binary.BigEndian.PutUint32(buf[26:30], 0)
+	return u
 }
 
-// buildVoiceHeader builds a 54-byte IPSC voice header packet.
-// Voice headers embed the Full LC (link control) data.
+// encodeUser returns the octets of u, or nil when it does not encode.
+func (t *IPSCTranslator) encodeUser(u *ipscpkt.User) []byte {
+	b, err := u.AppendBinary(make([]byte, 0, 66))
+	if err != nil {
+		t.logs.Debug("IPSCTranslator: cannot encode IPSC packet", "error", err)
+		return nil
+	}
+	return b
+}
+
+// buildDataBurst sets the burst of u to the data burst raw of type dt and
+// returns the octets of u. payload, when not nil, takes the place of the
+// BPTC payload of raw. The slot type of the packet gets the color code of
+// raw's slot type, or 0 when it does not decode. A voice LC header or
+// terminator leaves the RSSI status bit of the status octet clear, as an
+// XPR 8400 does on the voice headers it sends with no RSSI and as
+// node-dmr-lib's IPSCPeer does; other data packets set it with a zero
+// RSSI.
+func (t *IPSCTranslator) buildDataBurst(u *ipscpkt.User, raw layer2.RawBurst, dt enums.DataType, payload *[12]byte) []byte {
+	if err := u.SetRawBurst(raw, layer2.KindData, enums.VoiceBurstA, dt); err != nil {
+		t.logs.Debug("IPSCTranslator: cannot carry data burst", "dtype", dt.String(), "error", err)
+		return nil
+	}
+	if payload != nil {
+		copy(u.Data.Octets[:12], payload[:])
+	}
+	if dt == enums.DataTypeVoiceLCHeader || dt == enums.DataTypeTerminatorWithLC {
+		u.Data.Status &^= ipscStatusRSSI
+	}
+	var st pdu.SlotType
+	st.ColorCode, st.DataType = slotTypeColorCode(raw), dt
+	if info, err := st.Info(); err == nil {
+		u.Data.Trailer[1] = byte(info)
+	}
+	return t.encodeUser(u)
+}
+
+// buildVoiceHeader builds the IPSC voice header packet of pkt, which
+// carries the full LC lc.
 func (t *IPSCTranslator) buildVoiceHeader(pkt dmrd.Data, ss *streamState, isFirst bool, lc [12]byte) []byte {
-	buf := make([]byte, 54)
-
-	t.buildIPSCHeader(buf, pkt, ss, false, false)
-
-	// RTP header: marker on first header, payload type 0x5D
-	t.buildRTPHeader(buf, ss, isFirst, 0x5D)
-
-	// RTP Payload — voice header with the full LC
-	writeIPSCDataBurst(buf, ipscBurstVoiceHead, 0x00, lc[:], slotTypeColorCode(pkt.Burst))
-	return buf
+	u := t.newUser(pkt, ss, false, false, isFirst, 0x5D)
+	return t.buildDataBurst(&u, pkt.Burst, enums.DataTypeVoiceLCHeader, &lc)
 }
 
-// buildVoiceTerminator builds a 54-byte IPSC voice terminator packet.
+// buildVoiceTerminator builds the IPSC voice terminator packet of pkt,
+// which carries the full LC lc.
 func (t *IPSCTranslator) buildVoiceTerminator(pkt dmrd.Data, ss *streamState, lc [12]byte) []byte {
-	buf := make([]byte, 54)
-
-	t.buildIPSCHeader(buf, pkt, ss, true, false)
-
-	// RTP header: no marker, payload type 0x5E for terminator
-	t.buildRTPHeader(buf, ss, false, 0x5E)
-
-	// RTP Payload — voice terminator (same structure as header)
-	writeIPSCDataBurst(buf, ipscBurstVoiceTerm, 0x00, lc[:], slotTypeColorCode(pkt.Burst))
-
-	return buf
+	u := t.newUser(pkt, ss, true, false, false, 0x5E)
+	return t.buildDataBurst(&u, pkt.Burst, enums.DataTypeTerminatorWithLC, &lc)
 }
 
 // headerless reports whether dataType is a rate 1/2, 3/4 or 1 data block
@@ -653,21 +650,13 @@ func dataPayloadType(last bool) byte {
 	return 0x5D
 }
 
-// buildIPSCDataPacket builds a 54-byte IPSC packet for a burst with a
-// BPTC(196,96) payload, such as a CSBK or a data header. The structure is
-// identical to the voice header and terminator. Data bursts go in data
-// packets (0x83/0x84); a PI header belongs to a voice call, and an XPR 8400
-// sends it in a voice packet (0x80/0x81).
+// buildIPSCDataPacket builds the IPSC packet for a burst with a
+// BPTC(196,96) payload, such as a CSBK or a data header. Data bursts go in
+// data packets (0x83/0x84); a PI header belongs to a voice call, and an XPR
+// 8400 sends it in a voice packet (0x80/0x81).
 func (t *IPSCTranslator) buildIPSCDataPacket(pkt dmrd.Data, ss *streamState, burstType byte, payload [12]byte, last bool) []byte {
-	buf := make([]byte, 54)
-
-	t.buildIPSCHeader(buf, pkt, ss, last, burstType != ipscBurstPIHeader)
-	t.buildRTPHeader(buf, ss, ss.firstPacket, dataPayloadType(last))
-
-	// RTP Payload — data burst with the BPTC(196,96)-decoded payload
-	writeIPSCDataBurst(buf, burstType, 0x40, payload[:], slotTypeColorCode(pkt.Burst))
-
-	return buf
+	u := t.newUser(pkt, ss, last, burstType != ipscBurstPIHeader, ss.firstPacket, dataPayloadType(last))
+	return t.buildDataBurst(&u, pkt.Burst, enums.DataType(burstType), &payload)
 }
 
 // endDataCall ends the data call of stream streamID when no packet of it
@@ -679,7 +668,7 @@ func (t *IPSCTranslator) endDataCall(pkt dmrd.Data, ss *streamState, streamID ui
 	if ss.firstPacket {
 		return nil
 	}
-	return [][]byte{t.buildIPSCDataEndPacket(pkt, ss)}
+	return appendPacket(nil, t.buildIPSCDataEndPacket(pkt, ss))
 }
 
 // buildIPSCDataEndPacket builds the 34-byte packet that an XPR 8400 sends
@@ -687,71 +676,26 @@ func (t *IPSCTranslator) endDataCall(pkt dmrd.Data, ss *streamState, streamID ui
 // placeholder (burst type 0x13) with the end flag and RTP payload type
 // 0x5E, and the timeslot in bit 7 of byte 31.
 func (t *IPSCTranslator) buildIPSCDataEndPacket(pkt dmrd.Data, ss *streamState) []byte {
-	buf := make([]byte, 34)
-	t.buildIPSCHeader(buf, pkt, ss, true, true)
-	t.buildRTPHeader(buf, ss, false, 0x5E)
-	buf[30] = ipscBurstSyncUndetect
-	buf[31] = (buf[17] & 0x20) << 2
-	return buf
+	u := t.newUser(pkt, ss, true, true, false, 0x5E)
+	u.Burst = ipscpkt.BurstSyncLost
+	if pkt.Slot == enums.Slot2 {
+		u.Data.Status = 0x80
+	}
+	return t.encodeUser(&u)
 }
 
-// buildIPSCRate34Packet builds a 60-byte IPSC rate 3/4 data packet. An XPR
-// 8400 carries the 18 octets of a rate 3/4 block (ETSI TS 102 361-1 9.2.10)
-// rotated left by two: in a confirmed block the DBSN and CRC-9 octets go
-// after the 16 data octets, and an unconfirmed block is rotated the same way.
-func (t *IPSCTranslator) buildIPSCRate34Packet(pkt dmrd.Data, ss *streamState, payload [18]byte, last bool) []byte {
-	buf := make([]byte, 60)
-	t.buildIPSCHeader(buf, pkt, ss, last, true)
-	t.buildRTPHeader(buf, ss, ss.firstPacket, dataPayloadType(last))
-	var rotated [18]byte
-	copy(rotated[:], payload[2:])
-	copy(rotated[16:], payload[:2])
-	writeIPSCDataBurst(buf, ipscBurstRate34, 0x40, rotated[:], slotTypeColorCode(pkt.Burst))
-	return buf
-}
-
-// writeIPSCDataBurst writes the RTP payload (bytes 30 to the end of buf) of
-// an IPSC voice header, terminator, or data packet, after buildIPSCHeader
-// has set the timeslot in byte 17. buf holds payload and 4 more bytes. The
-// layout follows MOTOTRBO captures (DMRlink voice_burst_decoding.txt,
-// node-dmr-lib's DMRDataPayload, and an XPR 8400 on the test rig):
-//
-//	30     burst type (the DMR data type)
-//	31     bit 7: timeslot 2. Bit 6: RSSI status (node-dmr-lib's
-//	       rssiStatus). An XPR 8400 sets it only on packets that carry a
-//	       nonzero RSSI reading (0xC0/0x40 on its voice headers and
-//	       terminators), and clears it on the 50-byte voice headers it
-//	       sends with no RSSI. The bridge has no RSSI to report, so its
-//	       voice headers and terminators leave it clear, as node-dmr-lib's
-//	       IPSCPeer does. Its data packets set it with a zero RSSI, which
-//	       an XPR 8400 never sends. Bits 2-0: RS, CRC, and embedded LC
-//	       parity status.
-//	32-33  length to follow in 16-bit words (bytes 34 to the end)
-//	34     0x80: RSSI present
-//	35     0x0A: slot type present, data sync
-//	36-37  payload size in bits (96, or 144 for rate 3/4)
-//	38-    payload: the BPTC(196,96)-decoded octets, or a rate 3/4 block
-//	then   slot type: color code (high nibble of the second octet) and
-//	       DMR data type
-//	then   RSSI (left zero)
-func writeIPSCDataBurst(buf []byte, burstType, rssiParity byte, payload []byte, colorCode enums.ColorCode) {
-	buf[30] = burstType
-	buf[31] = rssiParity&0x7F | (buf[17]&0x20)<<2
-	binary.BigEndian.PutUint16(buf[32:34], uint16((len(buf)-34)/2)) //nolint:gosec // buf is at most 60 bytes
-	buf[34] = 0x80
-	buf[35] = 0x0A
-	binary.BigEndian.PutUint16(buf[36:38], uint16(len(payload)*8)) //nolint:gosec // payload is at most 18 bytes
-	end := 38 + copy(buf[38:], payload)
-	var slotType pdu.SlotTypeInfo
-	slotType.SetColorCode(colorCode)
-	slotType.SetDataType(enums.DataType(burstType))
-	buf[end+1] = byte(slotType)
+// buildIPSCRate34Packet builds the IPSC rate 3/4 data packet of pkt. An
+// XPR 8400 carries the 18 octets of a rate 3/4 block (ETSI TS 102 361-1
+// 9.2.10) rotated left by two, which SetRawBurst does.
+func (t *IPSCTranslator) buildIPSCRate34Packet(pkt dmrd.Data, ss *streamState, last bool) []byte {
+	u := t.newUser(pkt, ss, last, true, ss.firstPacket, dataPayloadType(last))
+	return t.buildDataBurst(&u, pkt.Burst, enums.DataTypeRate34, nil)
 }
 
 // slotTypeColorCode returns the color code from the slot type of a DMR data
 // burst, or 0 when the slot type cannot be decoded.
-func slotTypeColorCode(data [33]byte) enums.ColorCode {
-	st := layer2.RawBurst(data).SlotType()
+func slotTypeColorCode(data layer2.RawBurst) enums.ColorCode {
+	st := data.SlotType()
 	if st.FEC.Uncorrectable {
 		return 0
 	}
@@ -830,22 +774,13 @@ func ipscDataBurstType(dataType enums.DataType) (byte, bool) {
 	}
 }
 
-// buildVoiceBurst builds an IPSC voice burst packet.
-// Burst A = 52 bytes, Bursts B-D,F = 57 bytes, Burst E = 66 bytes.
+// buildVoiceBurst builds the IPSC voice burst packet of pkt: the AMBE
+// frames, and for bursts B to F the embedded signalling and the EMB of
+// embByte, with the full LC of the call in burst E.
 func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte {
-	// Decode the DMR burst to extract AMBE voice data. The DMRD frame type
-	// says the burst is voice, so its SYNC field does not classify it.
+	// Decode the DMR burst to read its EMB. The DMRD frame type says the
+	// burst is voice, so its SYNC field does not classify it.
 	_ = t.burst.DecodeFromBytesWith(pkt.Burst, mmdvmVoiceDecodeOptions(pkt))
-
-	// Extract the 19-byte FEC-decoded AMBE payload from the 3 vocoder frames
-	frames, _ := t.burst.AMBEFrames()
-	ambeData, _ := vocoder.PackAMBEVoice(frames)
-
-	// Determine slot type byte
-	slotBurst := ipscBurstSlot2
-	if pkt.Slot == enums.Slot1 {
-		slotBurst = ipscBurstSlot1
-	}
 
 	burstIdx, ok := mmdvmVoiceBurstPosition(pkt)
 	if !ok {
@@ -855,39 +790,11 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 	emb := embByte(&t.burst, burstIdx)
 	embeddedLC := ss.collectEmbedded(&t.burst, pkt.Burst, burstIdx)
 
-	var buf []byte
-	switch burstIdx {
-	case 0: // Burst A — sync burst, 52 bytes
-		buf = make([]byte, 52)
-		t.buildIPSCHeader(buf, pkt, ss, false, false)
-		t.buildRTPHeader(buf, ss, false, 0x5D)
-
-		buf[30] = slotBurst
-		buf[31] = 0x14 // Length: 20 bytes follow
-		buf[32] = 0x40 // Unknown field
-		copy(buf[33:52], ambeData[:])
-
-	case 4: // Burst E — extended with embedded LC, 66 bytes
-		buf = make([]byte, 66)
-		t.buildIPSCHeader(buf, pkt, ss, false, false)
-		t.buildRTPHeader(buf, ss, false, 0x5D)
-
-		buf[30] = slotBurst
-		buf[31] = 0x22 // Length: 34 bytes follow
-		buf[32] = 0x16 // Unknown field
-		copy(buf[33:52], ambeData[:])
-
-		// Bytes 52-58: Embedded LC data (7 bytes)
-		// Extract from embedded signalling if available
-		if t.burst.HasEmbeddedSignalling() {
-			raw := layer2.RawBurst(pkt.Burst)
-			embData := raw.EmbeddedData()
-			copy(buf[52:56], embData[:])
-		}
-
-		// Bytes 56-64: the call's full LC with the destination and source
-		// of the packet. A call that started without a voice header uses
-		// the LC of its embedded signalling.
+	u := t.newUser(pkt, ss, false, false, false, 0x5D)
+	if burstIdx == burstE {
+		// The call's full LC with the destination and source of the
+		// packet. A call that started without a voice header uses the LC
+		// of its embedded signalling.
 		if !ss.hasLC && embeddedLC {
 			ss.learnEmbeddedLC(!pkt.Private)
 		}
@@ -895,30 +802,20 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 		if !ss.hasLC {
 			lc = constructLC(pkt.Source, pkt.Destination, !pkt.Private)
 		}
-		lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source))
-		copy(buf[56:65], lc[:])
-		buf[65] = emb
-
-	default: // Bursts B, C, D, F — 57 bytes with embedded signalling
-		buf = make([]byte, 57)
-		t.buildIPSCHeader(buf, pkt, ss, false, false)
-		t.buildRTPHeader(buf, ss, false, 0x5D)
-
-		buf[30] = slotBurst
-		buf[31] = 0x19 // Length: 25 bytes follow
-		buf[32] = 0x06 // Unknown field
-		copy(buf[33:52], ambeData[:])
-
-		// Bytes 52-55: embedded signalling data, byte 56: EMB
-		if t.burst.HasEmbeddedSignalling() {
-			raw := layer2.RawBurst(pkt.Burst)
-			embData := raw.EmbeddedData()
-			copy(buf[52:56], embData[:])
-		}
-		buf[56] = emb
+		_ = lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) // lcAddress keeps 24 bits
+		u.Voice.LC = lc
 	}
-
-	return buf
+	if err := u.SetRawBurst(pkt.Burst, layer2.KindVoice, voiceBurst(burstIdx), 0); err != nil {
+		t.logs.Debug("IPSCTranslator: cannot carry voice burst", "error", err)
+		return nil
+	}
+	if burstIdx != burstA {
+		u.Voice.EMB = pdu.EMBInfo(emb)
+		if !t.burst.HasEmbeddedSignalling() {
+			u.Voice.Embedded = [4]byte{}
+		}
+	}
+	return t.encodeUser(&u)
 }
 
 // collectEmbedded keeps the embedded signalling fragment of voice burst
@@ -1075,59 +972,35 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	now := t.now()
 	t.pruneLocked(now)
 
-	if len(data) < ipscMinUserPacketLen {
-		t.logs.Debug("IPSCTranslator: IPSC packet too short", "length", len(data))
+	u, err := ipscpkt.DecodeUser(data)
+	if err != nil {
+		t.logs.Debug("IPSCTranslator: ignoring IPSC packet", "type", packetType, "length", len(data), "error", err)
 		return nil
 	}
-
-	// Handle voice (0x80/0x81) and data (0x83/0x84) packet types
-	switch packetType {
-	case 0x80, 0x81, 0x83, 0x84:
-		// OK — supported packet types
-	default:
-		t.logs.Debug("IPSCTranslator: ignoring unsupported IPSC packet", "type", packetType)
-		return nil
-	}
-
-	// Parse the IPSC header
-	src := uint32(data[6])<<16 | uint32(data[7])<<8 | uint32(data[8])
-	dst := uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
-	groupCall := packetType == 0x80 || packetType == 0x83
-	callInfo := data[17]
-	slot := enums.Slot1
-	if callInfo&0x20 != 0 {
-		slot = enums.Slot2
-	}
-	isEnd := (callInfo & ipscCallInfoEnd) != 0
+	src, dst := u.Source, u.Destination
+	groupCall := u.Opcode == ipscpkt.OpGroupVoice || u.Opcode == ipscpkt.OpGroupData
+	slot := u.Info.Slot()
+	isEnd := u.Info.End()
 
 	t.logs.Debug("IPSCTranslator: TranslateToMMDVM",
 		"packetType", fmt.Sprintf("0x%02X", packetType),
 		"src", src, "dst", dst, "groupCall", groupCall,
 		"slot", slot, "isEnd", isEnd)
 
-	// Determine what kind of IPSC burst this is from byte 30
-	burstType := data[30]
+	burstType := byte(u.Burst)
 
 	if burstType&0x7F == ipscBurstSyncUndetect {
-		t.syncLostLocked(packetType, data, isEnd, now)
+		t.syncLostLocked(&u, now)
 		return nil
 	}
-
-	minLen := ipscMinLCPacketLen
-	switch burstType {
-	case ipscBurstSlot1, ipscBurstSlot2:
-		minLen = ipscMinVoicePktLen
-	case ipscBurstRate34:
-		minLen = ipscMinRate34Len
-	}
-	if len(data) < minLen {
+	if !u.IsVoice() && u.Data.Bits < payloadBits(burstType) {
 		t.logs.Debug("IPSCTranslator: IPSC burst too short",
-			"burstType", fmt.Sprintf("0x%02X", burstType), "length", len(data))
+			"burstType", fmt.Sprintf("0x%02X", burstType), "bits", u.Data.Bits)
 		return nil
 	}
 
-	// Use call control bytes as stream identifier
-	callControl := binary.BigEndian.Uint32(data[13:17])
+	// The call control identifies the stream.
+	callControl := u.CallControl
 
 	rss, existed := t.reverseStreams[callControl]
 	if !existed {
@@ -1144,7 +1017,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	isVoice := burstType == ipscBurstVoiceHead || burstType == ipscBurstSlot1 || burstType == ipscBurstSlot2
 	if isVoice {
-		results = append(results, t.checkRTPContinuity(rss, binary.BigEndian.Uint32(data[22:26]))...)
+		results = append(results, t.checkRTPContinuity(rss, u.RTP.Timestamp)...)
 	}
 	sent := len(results)
 
@@ -1152,12 +1025,12 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	case ipscBurstVoiceHead:
 		// Voice follows the header with burst A, so the header holds the
 		// place of a burst F.
-		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, binary.BigEndian.Uint16(data[20:22]), true
+		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, u.RTP.Seq, true
 		rss.hasLast = false
 		// Voice LC Header — only process the first one (IPSC sends 3)
 		if !rss.started {
 			pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-				enums.DataTypeVoiceLCHeader, data)
+				enums.DataTypeVoiceLCHeader, [12]byte(u.Data.Octets[:12]))
 			results = append(results, pkt)
 			rss.started = true
 		}
@@ -1166,18 +1039,18 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	case ipscBurstVoiceTerm:
 		// Voice Terminator
 		pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-			enums.DataTypeTerminatorWithLC, data)
+			enums.DataTypeTerminatorWithLC, [12]byte(u.Data.Octets[:12]))
 		results = append(results, pkt)
 		t.removeReverseStreamLocked(callControl)
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
-		pkts := t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, data)
+		pkts := t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, &u)
 		results = append(results, pkts...)
 
 	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
 		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12, ipscBurstRate34:
-		if pkt, ok := t.reverseDataBurstLocked(src, dst, groupCall, slot, rss, burstType, data); ok {
+		if pkt, ok := t.reverseDataBurstLocked(src, dst, groupCall, slot, rss, &u); ok {
 			results = append(results, pkt)
 		}
 
@@ -1195,7 +1068,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	}
 
 	if isEnd && burstType != ipscBurstSlot1 && burstType != ipscBurstSlot2 {
-		t.endReverseCallLocked(packetType, callControl, now)
+		t.endReverseCallLocked(u.Opcode, callControl, now)
 	}
 
 	if t.metrics != nil && len(results) > 0 {
@@ -1205,22 +1078,29 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	return results
 }
 
-// syncLostLocked handles data, a "sync not detected" packet of packetType
-// with the end flag when isEnd is set, at now: the repeater lost a burst of
+// payloadBits returns the payload size in bits that a data packet of
+// burstType needs: 144 for a rate 3/4 block and 96 for the others.
+func payloadBits(burstType byte) uint16 {
+	if burstType == ipscBurstRate34 {
+		return 144
+	}
+	return 96
+}
+
+// syncLostLocked handles u, a "sync not detected" packet, at now: the repeater lost a burst of
 // the call, and the next one starts a new superframe at burst A. The end
 // flag ends a data call. A MOTOTRBO repeater also sets it on this packet in
 // a voice call when it loses sync in the middle of the call, so a voice
 // call goes on. The caller must hold t.mu.
-func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool, now time.Time) {
-	callControl := binary.BigEndian.Uint32(data[13:17])
-	rss, ok := t.reverseStreams[callControl]
+func (t *IPSCTranslator) syncLostLocked(u *ipscpkt.User, now time.Time) {
+	rss, ok := t.reverseStreams[u.CallControl]
 	if !ok {
 		return
 	}
 	rss.lastSeen = now
-	superframeRestartsAfter(rss, binary.BigEndian.Uint16(data[20:22]))
-	if isEnd && isDataPacket(packetType) {
-		t.endReverseDataCallLocked(callControl, now)
+	superframeRestartsAfter(rss, u.RTP.Seq)
+	if u.Info.End() && isDataPacket(u.Opcode) {
+		t.endReverseDataCallLocked(u.CallControl, now)
 	}
 }
 
@@ -1231,7 +1111,8 @@ func (t *IPSCTranslator) syncLostLocked(packetType byte, data []byte, isEnd bool
 // place of a Defined Short Data header, so the blocks of such a message
 // arrive with no header. MMDVMHost discards them. The caller must hold
 // t.mu.
-func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, burstType byte, data []byte) (dmrd.Data, bool) {
+func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, u *ipscpkt.User) (dmrd.Data, bool) {
+	burstType := byte(u.Burst)
 	if rss.data.headerless(enums.DataType(burstType)) {
 		t.logs.Debug("IPSCTranslator: dropping data block outside a data packet",
 			"burstType", fmt.Sprintf("0x%02X", burstType))
@@ -1239,10 +1120,10 @@ func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool,
 	}
 	var pkt dmrd.Data
 	if burstType == ipscBurstRate34 {
-		pkt = t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, data)
+		pkt = t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, u)
 	} else {
 		var ok bool
-		if pkt, ok = t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, data); !ok {
+		if pkt, ok = t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, [12]byte(u.Data.Octets[:12])); !ok {
 			return dmrd.Data{}, false
 		}
 	}
@@ -1250,10 +1131,9 @@ func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool,
 	return pkt, true
 }
 
-// isDataPacket reports whether packetType is a group or private data
-// packet.
-func isDataPacket(packetType byte) bool {
-	return packetType == 0x83 || packetType == 0x84
+// isDataPacket reports whether op is a group or private data packet.
+func isDataPacket(op ipscpkt.Opcode) bool {
+	return op == ipscpkt.OpGroupData || op == ipscpkt.OpPrivateData
 }
 
 // newReverseStreamLocked starts the IPSC-to-MMDVM stream of the call
@@ -1276,10 +1156,10 @@ func (t *IPSCTranslator) newReverseStreamLocked(callControl uint32, burstType by
 }
 
 // endReverseCallLocked ends the IPSC-to-MMDVM stream of the call
-// callControl, whose packet of packetType carried the end flag at now. The
+// callControl, whose packet with opcode op carried the end flag at now. The
 // caller must hold t.mu.
-func (t *IPSCTranslator) endReverseCallLocked(packetType byte, callControl uint32, now time.Time) {
-	if isDataPacket(packetType) {
+func (t *IPSCTranslator) endReverseCallLocked(op ipscpkt.Opcode, callControl uint32, now time.Time) {
+	if isDataPacket(op) {
 		t.endReverseDataCallLocked(callControl, now)
 		return
 	}
@@ -1296,12 +1176,13 @@ func isDataBlock(burstType byte) bool {
 // ReverseStreamID returns the MMDVM stream ID of the IPSC call that data,
 // an IPSC user packet, belongs to, if the call has one.
 func (t *IPSCTranslator) ReverseStreamID(data []byte) (uint32, bool) {
-	if len(data) < 17 {
+	u, err := ipscpkt.DecodeUser(data)
+	if err != nil {
 		return 0, false
 	}
 	t.mu.Lock()
 	defer t.logs.Unlock(&t.mu)
-	rss, ok := t.reverseStreams[binary.BigEndian.Uint32(data[13:17])]
+	rss, ok := t.reverseStreams[u.CallControl]
 	if !ok {
 		return 0, false
 	}
@@ -1313,7 +1194,8 @@ func (t *IPSCTranslator) ReverseStreamID(data []byte) (uint32, bool) {
 // end flag. An XPR 8400 sets it on the last block of a data packet, and on
 // a header with no blocks to follow such as an ACK.
 func EndsDataCall(packetType byte, data []byte) bool {
-	return isDataPacket(packetType) && len(data) > 17 && data[17]&ipscCallInfoEnd != 0
+	u, err := ipscpkt.DecodeUser(data)
+	return err == nil && isDataPacket(ipscpkt.Opcode(packetType)) && u.Info.End()
 }
 
 // newStreamIDLocked returns the next nonzero MMDVM stream ID. The caller
@@ -1385,7 +1267,7 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 	src, dst uint32, groupCall bool, slot enums.Slot,
 	rss *reverseStreamState,
 	dataType enums.DataType,
-	ipscData []byte,
+	lcBytes [12]byte,
 ) dmrd.Data {
 	pkt := dmrd.Data{
 		Seq:         rss.seq,
@@ -1399,10 +1281,6 @@ func (t *IPSCTranslator) buildMMDVMDataPacket(
 		Stream:      rss.streamID,
 	}
 	rss.seq++
-
-	// Extract payload bytes from IPSC packet (bytes 38-49 = 12 bytes)
-	var lcBytes [12]byte
-	copy(lcBytes[:], ipscData[38:50])
 
 	// Voice LC headers and terminators pass through when their parity is
 	// valid, so flags such as emergency, privacy, and the protect flag survive.
@@ -1459,24 +1337,24 @@ func lateEntryLC(payload [12]byte, src, dst uint32, groupCall bool) (pdu.LCBytes
 // rate 1 block it decoded as a 0x06 data header. MBC continuation blocks
 // are passed on, since MMDVMHost checks each one for a CRC that only the
 // last block of a standard MBC has.
-func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, burstType byte, data []byte) (dmrd.Data, bool) {
+func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, burstType byte, payload [12]byte) (dmrd.Data, bool) {
 	if burstType != ipscBurstMBCContinuation &&
-		!layer2.MMDVMHostAccepts(enums.DataType(burstType), [12]byte(data[38:50])) {
+		!layer2.MMDVMHostAccepts(enums.DataType(burstType), payload) {
 		t.logs.Debug("IPSCTranslator: dropping data burst that fails its CRC",
 			"burstType", fmt.Sprintf("0x%02X", burstType))
 		return dmrd.Data{}, false
 	}
-	return t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss, enums.DataType(burstType), data), true
+	return t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss, enums.DataType(burstType), payload), true
 }
 
-// buildMMDVMRate34Packet builds an MMDVM DMRD packet for an IPSC rate 3/4
-// data packet, whose 18-octet block is rotated left by two (see
-// buildIPSCRate34Packet).
-func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, ipscData []byte) dmrd.Data {
-	var block [18]byte
-	copy(block[:], ipscData[54:56])
-	copy(block[2:], ipscData[38:54])
-	dmrData, err := layer2.BuildRate34DataBurst(block, t.colorCode, layer2.SyncSourceBS)
+// buildMMDVMRate34Packet builds an MMDVM DMRD packet for the IPSC rate 3/4
+// data packet u, whose 18-octet block is rotated left by two (see
+// buildIPSCRate34Packet). The burst gets the color code of the bridge, not
+// the one in the slot type of the packet.
+func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, u *ipscpkt.User) dmrd.Data {
+	v := *u
+	v.Data.Flags[1] &^= ipscFlagSlotType
+	dmrData, err := v.RawBurst(t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
 		t.logs.Debug("IPSCTranslator: cannot build rate 3/4 burst", "error", err)
 	}
@@ -1496,79 +1374,52 @@ func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint32, groupCall bool,
 	return pkt
 }
 
-// buildMMDVMVoiceBurst builds MMDVM DMRD packets from an IPSC voice burst.
-// It extracts the 19-byte AMBE payload, FEC-encodes back to DMR format,
-// and reconstructs the full 33-byte DMR burst with proper sync/EMB.
+// buildMMDVMVoiceBurst builds the MMDVM DMRD packet of the IPSC voice burst
+// u: its AMBE frames with a flagged frame as silence, the BS-sourced voice
+// SYNC at burst A, and at bursts B to F the embedded signalling of the
+// packet with the EMB of populateEmbeddedSignalling.
 func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	src, dst uint32, groupCall bool, slot enums.Slot,
 	rss *reverseStreamState,
-	ipscData []byte,
+	u *ipscpkt.User,
 ) []dmrd.Data {
-	// Extract the 19-byte AMBE data from IPSC packet (bytes 33-51)
-	var ambeBytes [19]byte
-	copy(ambeBytes[:], ipscData[33:52])
-
-	// Unpack into 3 VocoderFrames (49 bits each)
-	frames, bad := vocoder.UnpackAMBEVoiceFlags(ambeBytes)
-	bad[0] = ipscData[32]&ipscVoiceCtrlBadFrame1 != 0
+	frames, bad := vocoder.UnpackAMBEVoiceFlags(u.Voice.AMBE)
+	bad[0] = u.Voice.Control&ipscVoiceCtrlBadFrame1 != 0
 	for i := range frames {
 		if bad[i] {
 			frames[i] = vocoder.AMBESilence()
 		}
 	}
 
-	burstIdx, ok := ipscVoiceBurstPosition(rss, ipscData)
+	burstIdx, ok := ipscVoiceBurstPosition(rss, u)
 	if !ok {
-		t.logs.Debug("IPSCTranslator: cannot place voice burst in superframe", "length", len(ipscData))
+		t.logs.Debug("IPSCTranslator: cannot place voice burst in superframe", "layout", u.Voice.Layout)
 		return nil
 	}
 
-	burst := layer2.Burst{Kind: layer2.KindVoice}
-	burst.SetAMBEFrames(frames)
-
-	if burstIdx == 0 {
-		// Burst A carries the BS-sourced voice SYNC, as the data bursts
-		// carry BS-sourced data SYNC: the repeater is a BS, and a duplex
-		// MMDVMHost sends BS-sourced SYNC to the network too.
-		burst.SyncPattern = enums.SyncBSSourcedVoice
-		burst.VoiceBurst = enums.VoiceBurstA
-	} else {
-		// Bursts B-F — embedded signalling
-		burst.SyncPattern = enums.SyncNone
-
-		switch burstIdx {
-		case 1:
-			burst.VoiceBurst = enums.VoiceBurstB
-		case 2:
-			burst.VoiceBurst = enums.VoiceBurstC
-		case 3:
-			burst.VoiceBurst = enums.VoiceBurstD
-		case 4:
-			burst.VoiceBurst = enums.VoiceBurstE
-		case 5:
-			burst.VoiceBurst = enums.VoiceBurstF
-		}
+	v := *u
+	var err error
+	if v.Voice.AMBE, err = vocoder.PackAMBEVoice(frames); err != nil {
+		t.logs.Debug("IPSCTranslator: cannot pack voice burst", "error", err)
+		return nil
 	}
-
-	// Encode the burst to 33 bytes. SetAMBEFrames FEC-encoded the 3×49 bit
-	// vocoder frames to 3×72 = 216 bits.
-	dmrData, err := burst.Encode()
+	// Burst A carries the BS-sourced voice SYNC, as the data bursts carry
+	// BS-sourced data SYNC: the repeater is a BS, and a duplex MMDVMHost
+	// sends BS-sourced SYNC to the network too.
+	if burstIdx == burstA {
+		v.Voice.Layout = ipscpkt.VoiceLayoutA
+	} else if v.Voice.EMB, err = t.populateEmbeddedSignalling(burstIdx); err != nil {
+		t.logs.Debug("IPSCTranslator: cannot build EMB", "error", err)
+		return nil
+	}
+	dmrData, err := v.RawBurst(t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
 		t.logs.Debug("IPSCTranslator: cannot encode voice burst", "error", err)
 		return nil
 	}
-	if burstIdx != 0 {
-		// Extract embedded signalling from the IPSC packet if available
-		t.populateEmbeddedSignalling(&dmrData, burstIdx, ipscData)
-	}
-
-	// Determine frame type
-	if burstIdx < 0 {
-		burstIdx = 0
-	}
 
 	frameType := dmrd.FrameVoice
-	if burstIdx == 0 {
+	if burstIdx == burstA {
 		frameType = dmrd.FrameVoiceSync
 	}
 
@@ -1580,7 +1431,7 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 		Slot:        slot,
 		Private:     !groupCall,
 		Frame:       frameType,
-		Value:       uint8(burstIdx), //nolint:gosec // Bounds checked
+		Value:       uint8(burstIdx), //nolint:gosec // 0 to 5
 		Stream:      rss.streamID,
 		Burst:       dmrData,
 	}
@@ -1600,17 +1451,17 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 // header, A, or E cannot be placed and is dropped, so a late entry starts
 // at the next A or E. A repeated burst is dropped. A burst that is not A is
 // never placed at A.
-func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
-	seq := binary.BigEndian.Uint16(data[20:22])
+func ipscVoiceBurstPosition(rss *reverseStreamState, u *ipscpkt.User) (int, bool) {
+	seq := u.RTP.Seq
 	if rss.hasLast && seq == rss.lastRTPSeq {
 		return 0, false
 	}
 	rss.lastRTPSeq, rss.hasLast = seq, true
 	anchor := -1
 	switch {
-	case len(data) == 52 || data[32]&ipscVoiceCtrlSync != 0:
+	case u.Voice.Layout == ipscpkt.VoiceLayoutA || u.Voice.Control&ipscVoiceCtrlSync != 0:
 		anchor = burstA
-	case len(data) == 66:
+	case u.Voice.Layout == ipscpkt.VoiceLayoutE:
 		anchor = burstE
 	}
 	pos, ok := anchor, anchor >= 0
@@ -1628,7 +1479,7 @@ func ipscVoiceBurstPosition(rss *reverseStreamState, data []byte) (int, bool) {
 			rss.anchorPos, rss.anchorRTPSeq = burstB, seq
 		}
 	}
-	if data[17]&ipscCallInfoEnd != 0 {
+	if u.Info.End() {
 		superframeRestartsAfter(rss, seq)
 	}
 	return pos, ok
@@ -1643,20 +1494,14 @@ func superframeRestartsAfter(rss *reverseStreamState, seq uint16) {
 	rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, seq, true
 }
 
-// populateEmbeddedSignalling fills in the embedded signalling of voice
-// bursts B-F from an IPSC voice burst. MOTOTRBO repeaters put the 32-bit
-// embedded fragment in bytes 52-55 and the EMB in the last byte: byte 56 of
-// the 57-byte bursts, byte 65 of the 66-byte burst E, whose bytes 56-64
-// repeat the decoded LC. The repeater's EMB byte is not used, as on a weak
-// signal it is wrong: the LCSS follows the burst position, as every voice
-// superframe uses the same LCSS at each position, the color code is our
-// own, and PI is clear, as in ipsc2hbpc.
-func (t *IPSCTranslator) populateEmbeddedSignalling(raw *layer2.RawBurst, burstIdx int, ipscData []byte) {
+// populateEmbeddedSignalling returns the EMB of voice burst burstIdx (B-F)
+// for an IPSC voice burst. MOTOTRBO repeaters put the 32-bit embedded
+// fragment and the EMB in the packet, but on a weak signal the EMB is
+// wrong: the LCSS follows the burst position, as every voice superframe
+// uses the same LCSS at each position, the color code is our own, and PI
+// is clear, as in ipsc2hbpc.
+func (t *IPSCTranslator) populateEmbeddedSignalling(burstIdx int) (pdu.EMBInfo, error) {
 	lcss, _ := voiceBurst(burstIdx).LCSS()
 	emb := pdu.EmbeddedSignalling{ColorCode: t.colorCode, LCSS: lcss}
-	raw.SetEMB(emb)
-	if len(ipscData) != 57 && len(ipscData) != 66 {
-		return
-	}
-	raw.SetEmbeddedData([4]byte(ipscData[52:56]))
+	return emb.Info()
 }
