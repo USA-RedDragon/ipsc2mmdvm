@@ -3,27 +3,41 @@ package mmdvm
 import (
 	"encoding/hex"
 	"testing"
+
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/session"
 )
 
-// TestGoldenLoginMessages checks the octets of every control message that
-// the client sends a master against what it sent before it moved onto the
+// TestGoldenLoginMessages logs the session of the client into a master
+// that sends the salt 0x1234abcd, and checks the octets of every control
+// message it sends against what the client sent before it moved onto the
 // dmrgo transport codecs.
 func TestGoldenLoginMessages(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendLogin()
-	client.sendRPTK(0x1234abcd)
-	client.sendRPTC()
-	client.sendPing()
-	got := []string{
-		hex.EncodeToString(<-client.connTX),
-		hex.EncodeToString(<-client.connTX),
-		hex.EncodeToString(<-client.connTX),
-		hex.EncodeToString(<-client.connTX),
-		hex.EncodeToString(client.rptclPacket()),
+	if err := client.newPeer(); err != nil {
+		t.Fatal(err)
 	}
+	p := client.peer
+	var got []string
+	keep := func(out []session.Output) {
+		for _, o := range out {
+			if o.Kind == session.OutputSend {
+				got = append(got, hex.EncodeToString(o.Packet))
+			}
+		}
+	}
+	ack := []byte("RPTACK\x00\x04\xc2\x34")
+	keep(p.Tick(0, nil))
+	keep(p.Packet(0, []byte("RPTACK\x12\x34\xab\xcd"), nil))
+	keep(p.Packet(0, ack, nil))
+	keep(p.Packet(0, ack, nil))
+	keep(p.Tick(session.RetryDefault, nil))
+	keep(p.Close(session.RetryDefault, nil))
 	want := []string{
 		goldenRPTL, goldenRPTK, goldenRPTC, goldenRPTPING, goldenRPTCL,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d messages, want %d", len(got), len(want))
 	}
 	for i := range want {
 		if got[i] != want[i] {

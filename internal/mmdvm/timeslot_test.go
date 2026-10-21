@@ -48,7 +48,7 @@ func newSlotTestClient(t *testing.T, name string, mgr *timeslot.Manager) *MMDVMC
 	t.Helper()
 	c := newTestClient(t)
 	c.cfg.Name = name
-	c.state.Store(uint32(STATE_READY))
+	c.up.Store(true)
 	c.netRewrites = []rewrite.Rule{&rewrite.TGRewrite{Name: name, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999}}
 	c.SetOutboundTSManager(mgr)
 	return c

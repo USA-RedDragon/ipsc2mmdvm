@@ -95,7 +95,7 @@ func TestMasterRejectionDoesNotLoopLogins(t *testing.T) {
 			time.Sleep(time.Second)
 			c.Stop()
 			if n := logins.Load(); n != 1 {
-				t.Fatalf("expected 1 RPTL in 1s at a 5s keepalive, got %d", n)
+				t.Fatalf("expected 1 RPTL in 1s at a 10s retry, got %d", n)
 			}
 		})
 	}
@@ -112,15 +112,15 @@ func TestReconnectAfterMSTCLWaitsForRetryInterval(t *testing.T) {
 	cfg := testMMDVMConfig()
 	cfg.MasterServer = addr
 	c := NewMMDVMClient(cfg, nil)
-	c.keepAlive = 50 * time.Millisecond
+	c.retry = 50 * time.Millisecond
 	c.timeout = time.Hour
 	if err := c.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	time.Sleep(time.Second)
 	c.Stop()
-	limit := 1 + int(time.Second/c.keepAlive)
+	limit := 1 + int(time.Second/c.retry)
 	if n := int(logins.Load()); n < 2 || n > limit {
-		t.Fatalf("expected 2 to %d RPTLs in 1s at a 50ms keepalive, got %d", limit, n)
+		t.Fatalf("expected 2 to %d RPTLs in 1s at a 50ms retry, got %d", limit, n)
 	}
 }

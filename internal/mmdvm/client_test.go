@@ -3,7 +3,6 @@ package mmdvm
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -77,31 +76,9 @@ func newTestClient(t *testing.T) *MMDVMClient {
 		translator: translator,
 		netLC:      ipsc.NewLCRewriter(),
 		rfLC:       ipsc.NewLCRewriter(),
+		dataRX:     make(chan []byte, 16),
 	}
-	client.state.Store(uint32(STATE_IDLE))
 	return client
-}
-
-func TestStateConstants(t *testing.T) {
-	t.Parallel()
-	if STATE_IDLE != 0 {
-		t.Fatalf("expected STATE_IDLE=0, got %d", STATE_IDLE)
-	}
-	if STATE_SENT_LOGIN != 1 {
-		t.Fatalf("expected STATE_SENT_LOGIN=1, got %d", STATE_SENT_LOGIN)
-	}
-	if STATE_SENT_AUTH != 2 {
-		t.Fatalf("expected STATE_SENT_AUTH=2, got %d", STATE_SENT_AUTH)
-	}
-	if STATE_SENT_RPTC != 3 {
-		t.Fatalf("expected STATE_SENT_RPTC=3, got %d", STATE_SENT_RPTC)
-	}
-	if STATE_READY != 4 {
-		t.Fatalf("expected STATE_READY=4, got %d", STATE_READY)
-	}
-	if STATE_TIMEOUT != 5 {
-		t.Fatalf("expected STATE_TIMEOUT=5, got %d", STATE_TIMEOUT)
-	}
 }
 
 func TestNewMMDVMClient(t *testing.T) {
@@ -117,63 +94,22 @@ func TestNewMMDVMClient(t *testing.T) {
 	if client.started.Load() {
 		t.Fatal("expected started=false")
 	}
-	if client.state.Load() != uint32(STATE_IDLE) {
-		t.Fatalf("expected STATE_IDLE, got %d", client.state.Load())
+	if client.up.Load() {
+		t.Fatal("expected a client that is not logged in")
 	}
-	if client.keepAlive.Seconds() != 5 {
-		t.Fatalf("expected 5s keepalive, got %v", client.keepAlive)
-	}
-	if client.timeout.Seconds() != 15 {
-		t.Fatalf("expected 15s timeout, got %v", client.timeout)
+	if client.retry != 0 || client.timeout != 0 {
+		t.Fatalf("expected the session timer defaults, got retry %v timeout %v", client.retry, client.timeout)
 	}
 	if client.translator == nil {
 		t.Fatal("expected non-nil translator")
 	}
 }
 
-func TestSendLoginPacket(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.sendLogin()
-
-	data := <-client.connTX
-	// Should start with "RPTL"
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL prefix, got %q", string(data[:4]))
-	}
-	// Should contain the binary ID (big-endian uint32)
-	gotID := binary.BigEndian.Uint32(data[4:8])
-	if gotID != client.cfg.ID {
-		t.Fatalf("expected ID %d, got %d", client.cfg.ID, gotID)
-	}
-	// Total length = 4 (RPTL) + 4 (binary ID)
-	if len(data) != 8 {
-		t.Fatalf("expected 8 bytes, got %d", len(data))
-	}
-}
-
-func TestSendRPTCLPacket(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	data := client.rptclPacket()
-	if string(data[:5]) != tagRPTCL {
-		t.Fatalf("expected RPTCL prefix, got %q", string(data[:5]))
-	}
-	gotID := binary.BigEndian.Uint32(data[5:9])
-	if gotID != client.cfg.ID {
-		t.Fatalf("expected ID %d, got %d", client.cfg.ID, gotID)
-	}
-	if len(data) != 9 {
-		t.Fatalf("expected 9 bytes, got %d", len(data))
-	}
-}
-
 func TestSendRPTCPacket(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// Should start with "RPTC"
 	if string(data[:4]) != tagRPTC {
 		t.Fatalf("expected RPTC prefix, got %q", string(data[:4]))
@@ -216,63 +152,10 @@ func TestSendRPTCPacket(t *testing.T) {
 	}
 }
 
-func TestSendRPTKPacket(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.sendRPTK(0x31323334)
-
-	data := <-client.connTX
-	// Should start with "RPTK"
-	if string(data[:4]) != tagRPTK {
-		t.Fatalf("expected RPTK prefix, got %q", string(data[:4]))
-	}
-
-	// Binary ID at offset 4
-	gotID := binary.BigEndian.Uint32(data[4:8])
-	if gotID != client.cfg.ID {
-		t.Fatalf("expected ID %d, got %d", client.cfg.ID, gotID)
-	}
-
-	// Raw SHA256 token at offset 8 (32 bytes)
-	token := data[8:40]
-
-	// Verify the token is the correct sha256(random + password)
-	s256 := sha256.New()
-	s256.Write([]byte("1234"))
-	s256.Write([]byte(client.cfg.Password))
-	expectedToken := s256.Sum(nil)
-	if !bytes.Equal(token, expectedToken) {
-		t.Fatalf("expected token %x, got %x", expectedToken, token)
-	}
-
-	// Total length = 4 (RPTK) + 4 (binary ID) + 32 (SHA256)
-	if len(data) != 40 {
-		t.Fatalf("expected 40 bytes, got %d", len(data))
-	}
-}
-
-func TestSendPingPacket(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.sendPing()
-
-	data := <-client.connTX
-	if string(data[:7]) != tagRPTPING {
-		t.Fatalf("expected RPTPING prefix, got %q", string(data[:7]))
-	}
-	gotID := binary.BigEndian.Uint32(data[7:11])
-	if gotID != client.cfg.ID {
-		t.Fatalf("expected ID %d, got %d", client.cfg.ID, gotID)
-	}
-	if len(data) != 11 {
-		t.Fatalf("expected 11 bytes, got %d", len(data))
-	}
-}
-
 func TestSendPacketEncodesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	pkt := dmrd.Data{
 		Seq:         1,
 		Source:      100,
@@ -315,41 +198,6 @@ func TestSetIPSCHandler(t *testing.T) {
 	}
 }
 
-func TestSendLoginBinaryIDFormat(t *testing.T) {
-	t.Parallel()
-	// Test with ID=1 to verify binary encoding
-	cfg := testMMDVMConfig()
-	cfg.ID = 1
-	client := &MMDVMClient{
-		cfg:    cfg,
-		connTX: make(chan []byte, 16),
-	}
-	client.sendLogin()
-
-	data := <-client.connTX
-	gotID := binary.BigEndian.Uint32(data[4:8])
-	if gotID != 1 {
-		t.Fatalf("expected ID 1, got %d", gotID)
-	}
-}
-
-func TestSendRPTKDifferentRandomProducesDifferentToken(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-
-	client.sendRPTK(0x61616161)
-	data1 := <-client.connTX
-	token1 := data1[8:40]
-
-	client.sendRPTK(0x62626262)
-	data2 := <-client.connTX
-	token2 := data2[8:40]
-
-	if bytes.Equal(token1, token2) {
-		t.Fatal("expected different tokens for different random data")
-	}
-}
-
 // --- Helper: create a loopback UDP "server" for integration tests ---
 
 // udpPair creates a connected pair: a "server" UDPConn that the client talks to,
@@ -370,7 +218,7 @@ func udpPair(t *testing.T) (*net.UDPConn, *MMDVMClient) {
 	cfg.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
 
 	client := NewMMDVMClient(cfg, nil)
-	if _, err := client.connect(); err != nil {
+	if _, err := client.dialMaster(); err != nil {
 		serverConn.Close()
 		t.Fatalf("connect: %v", err)
 	}
@@ -414,7 +262,7 @@ func TestConnectBadAddress(t *testing.T) {
 	cfg.MasterServer = "this-is-not-a-valid-address:::::999999"
 	client := NewMMDVMClient(cfg, nil)
 
-	_, err := client.connect()
+	_, err := client.dialMaster()
 	if err == nil {
 		t.Fatal("expected error connecting to invalid address")
 	}
@@ -528,305 +376,12 @@ func TestRxStopsOnConnClose(t *testing.T) {
 	client.wg.Wait()
 }
 
-// --- handler() state machine tests ---
-
-func TestHandlerIdleState(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_IDLE))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	// Send data while in IDLE — should just log, not crash
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("MSTACK__random12")}
-
-	// Give handler time to process
-	time.Sleep(50 * time.Millisecond)
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestHandlerSentLoginMSTACK(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_SENT_LOGIN))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	// Simulate an RPTACK response with its salt
-	resp := append([]byte("RPTACK"), []byte("1234")...)
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: resp}
-
-	// Should transition to SENT_AUTH and send RPTK
-	select {
-	case data := <-client.connTX:
-		if string(data[:4]) != tagRPTK {
-			t.Fatalf("expected RPTK, got %q", string(data[:4]))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for RPTK")
-	}
-
-	//nolint:gosec // G115: test-only, state values fit in uint8
-	if state(client.state.Load()) != STATE_SENT_AUTH {
-		t.Fatalf("expected STATE_SENT_AUTH, got %d", client.state.Load())
-	}
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestHandlerSentLoginRejected(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = time.Minute
-	client.timeout = time.Hour
-	client.setState(STATE_SENT_LOGIN)
-
-	client.handleState(client.connGen.Load(), []byte("RPTNAK__________"))
-	if len(client.connTX) != 0 {
-		t.Fatal("expected no immediate resend after rejection")
-	}
-
-	client.tick(time.Now().Add(2 * time.Minute))
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL retry, got %q", string(data[:4]))
-	}
-}
-
-func TestHandlerSentAuthMSTACK(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_SENT_AUTH))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	// RPTACK means auth accepted
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTACK__________")}
-
-	// Should send RPTC
-	select {
-	case data := <-client.connTX:
-		if string(data[:4]) != tagRPTC {
-			t.Fatalf("expected RPTC, got %q", string(data[:4]))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for RPTC")
-	}
-
-	//nolint:gosec // G115: test-only, state values fit in uint8
-	if state(client.state.Load()) != STATE_SENT_RPTC {
-		t.Fatalf("expected STATE_SENT_RPTC, got %d", client.state.Load())
-	}
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestHandlerSentAuthMSTNAK(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.metrics = metrics.NewMetrics()
-	client.keepAlive = time.Minute
-	client.timeout = time.Hour
-	client.setState(STATE_SENT_AUTH)
-
-	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
-	}
-	rec := httptest.NewRecorder()
-	client.metrics.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
-	if want := `mmdvm_auth_failures_total{network="TestNet"} 1`; !strings.Contains(rec.Body.String(), want) {
-		t.Fatalf("expected %q in metrics output", want)
-	}
-
-	client.tick(time.Now().Add(2 * time.Minute))
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL retry, got %q", string(data[:4]))
-	}
-}
-
-func TestHandlerSentRPTCAccepted(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_SENT_RPTC))
-	// Need a connection for ping to work (it sends via connTX)
-	// Use a real loopback
-	serverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer serverConn.Close()
-
-	cfg := testMMDVMConfig()
-	srvAddr, ok := serverConn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		t.Fatal("expected *net.UDPAddr from LocalAddr")
-	}
-	cfg.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
-	client.cfg = cfg
-
-	// Give it a real conn for ping
-	if _, err := client.connect(); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	// Override keepAlive/timeout for faster test
-	client.keepAlive = 100 * time.Millisecond
-	client.timeout = 5 * time.Second
-
-	client.wg.Add(1)
-	go client.handler()
-
-	// RPTACK means config accepted
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTACK__________")}
-
-	// Should transition to STATE_READY and start ping (which sends RPTPING)
-	select {
-	case data := <-client.connTX:
-		if string(data[:7]) != tagRPTPING {
-			t.Fatalf("expected RPTPING from ping(), got %q", string(data[:min(7, len(data))]))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for MSTPING")
-	}
-
-	//nolint:gosec // G115: test-only, state values fit in uint8
-	if state(client.state.Load()) != STATE_READY {
-		t.Fatalf("expected STATE_READY, got %d", client.state.Load())
-	}
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestHandlerSentRPTCRejected(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = time.Minute
-	client.timeout = time.Hour
-	client.setState(STATE_SENT_RPTC)
-
-	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("expected STATE_SENT_LOGIN after config rejection, got %d", st)
-	}
-
-	client.tick(time.Now().Add(2 * time.Minute))
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL after config rejection, got %q", string(data[:4]))
-	}
-}
-
-func TestHandlerReadyMSTNAKLogsInAgain(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = time.Second
-	client.timeout = time.Hour
-	client.setState(STATE_READY)
-
-	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("expected STATE_SENT_LOGIN, got %d", st)
-	}
-	if n := len(client.connTX); n != 0 {
-		t.Fatalf("expected no immediate RPTL, got %d queued packets", n)
-	}
-	client.tick(time.Now().Add(2 * client.keepAlive))
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL on the next resend, got %q", string(data[:4]))
-	}
-}
-
-func TestHandlerMSTCLReconnects(t *testing.T) {
-	t.Parallel()
-	for _, st := range []state{STATE_READY, STATE_SENT_AUTH} {
-		serverConn, client := udpPair(t)
-		client.setState(st)
-		oldConn := client.conn
-
-		client.keepAlive = time.Second
-		client.handleState(client.connGen.Load(), append([]byte("MSTCL"), 0, 4, 0xC2, 0x34))
-
-		if got := client.currentState(); got != STATE_TIMEOUT {
-			t.Fatalf("state %d: expected STATE_TIMEOUT, got %d", st, got)
-		}
-		if client.conn != nil || len(client.connTX) != 0 {
-			t.Fatalf("state %d: expected no redial before the retry interval", st)
-		}
-		client.tick(time.Now())
-		if client.conn != nil {
-			t.Fatalf("state %d: redialed before the retry interval", st)
-		}
-		client.tick(time.Now().Add(client.keepAlive))
-		if got := client.currentState(); got != STATE_SENT_LOGIN {
-			t.Fatalf("state %d: expected STATE_SENT_LOGIN, got %d", st, got)
-		}
-		if client.conn == nil || client.conn == oldConn {
-			t.Fatalf("state %d: expected a new connection", st)
-		}
-		data := <-client.connTX
-		if string(data[:4]) != tagRPTL {
-			t.Fatalf("state %d: expected RPTL, got %q", st, string(data[:4]))
-		}
-		client.Stop()
-		serverConn.Close()
-	}
-}
-
-func TestRxHandlesPongWithoutHandler(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	client.metrics = metrics.NewMetrics()
-	client.lastPingSent.Store(time.Now().UnixNano())
-	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop, client.connGen.Load())
-
-	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
-		t.Fatalf("probe write: %v", err)
-	}
-	_, clientAddr := readFromServer(t, serverConn, time.Second)
-	before := time.Now().UnixNano()
-	if _, err := serverConn.WriteToUDP([]byte("MSTPONG\x00\x04\xC2\x34"), clientAddr); err != nil {
-		t.Fatalf("server write: %v", err)
-	}
-
-	waitFor(t, time.Second, "lastHeard update", func() bool { return client.lastHeard.Load() >= before })
-	if len(client.connRX) != 0 {
-		t.Fatal("expected MSTPONG to be handled in rx, not queued for the handler")
-	}
-	client.Stop()
-}
-
-func TestHandlerReadyRPTSBKN(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	// Should just log, not crash
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("RPTSBKN_________")}
-
-	time.Sleep(50 * time.Millisecond)
-
-	close(client.done)
-	client.wg.Wait()
-}
+// --- handler() tests ---
 
 func TestHandlerReadyDMRDPacket(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 
 	// Add a passthrough net rewrite rule so inbound packets aren't dropped.
 	client.netRewrites = []rewrite.Rule{
@@ -857,7 +412,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 		Stream:      0x5555,
 	}
 	encoded := encodeDMRD(pkt)
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encoded}
+	client.dataRX <- encoded
 
 	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
 		mu.Lock()
@@ -881,7 +436,7 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 	// No IPSC handler set
 
 	// Add a passthrough net rewrite rule so the packet passes the filter.
@@ -902,7 +457,7 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 		Value:       1,
 		Stream:      0x6666,
 	}
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encodeDMRD(pkt)}
+	client.dataRX <- encodeDMRD(pkt)
 
 	// Should not panic
 	time.Sleep(50 * time.Millisecond)
@@ -914,13 +469,13 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 func TestHandlerReadyDMRDInvalidPacket(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 
 	client.wg.Add(1)
 	go client.handler()
 
 	// Send "DMRD" prefix but too short to decode
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("DMRD_short")}
+	client.dataRX <- []byte("DMRD_short")
 
 	// Should log error, not crash
 	time.Sleep(50 * time.Millisecond)
@@ -929,144 +484,12 @@ func TestHandlerReadyDMRDInvalidPacket(t *testing.T) {
 	client.wg.Wait()
 }
 
-func TestHandlerReadyUnknownPacket(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("UNKN_some_data__")}
-
-	// Should just log, not crash
-	time.Sleep(50 * time.Millisecond)
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestHandlerTimeoutState(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.state.Store(uint32(STATE_TIMEOUT))
-
-	client.wg.Add(1)
-	go client.handler()
-
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: []byte("MSTACK__________")}
-
-	// Should just log, not crash or transition
-	time.Sleep(50 * time.Millisecond)
-
-	//nolint:gosec // G115: test-only, state values fit in uint8
-	if state(client.state.Load()) != STATE_TIMEOUT {
-		t.Fatalf("expected state to remain TIMEOUT, got %d", client.state.Load())
-	}
-
-	close(client.done)
-	client.wg.Wait()
-}
-
-// --- supervise() tests ---
-
-func TestTickSendsPingWhenReady(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.timeout = 5 * time.Second
-	client.setState(STATE_READY)
-	client.lastHeard.Store(time.Now().UnixNano())
-
-	client.tick(time.Now())
-	data := <-client.connTX
-	if string(data[:7]) != tagRPTPING {
-		t.Fatalf("expected RPTPING, got %q", string(data[:min(7, len(data))]))
-	}
-}
-
-func TestTickResendsHandshakeSteps(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		st  state
-		tag string
-	}{
-		{STATE_SENT_LOGIN, tagRPTL},
-		{STATE_SENT_AUTH, tagRPTK},
-		{STATE_SENT_RPTC, tagRPTC},
-	} {
-		client := newTestClient(t)
-		client.timeout = 5 * time.Second
-		client.salt = 0x01020304
-		client.setState(tc.st)
-		client.tick(time.Now())
-		data := <-client.connTX
-		if string(data[:4]) != tc.tag {
-			t.Fatalf("state %d: expected %s, got %q", tc.st, tc.tag, string(data[:4]))
-		}
-	}
-}
-
-func TestSuperviseStopsOnDone(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = 10 * time.Millisecond
-	client.wg.Add(1)
-	go client.supervise()
-	close(client.done)
-	client.wg.Wait()
-}
-
-func TestTickReconnectsOnPingTimeout(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-	client.timeout = 10 * time.Millisecond
-	client.setState(STATE_READY)
-	client.lastHeard.Store(time.Now().Add(-time.Minute).UnixNano())
-	oldConn := client.conn
-
-	client.tick(time.Now())
-	if st := client.currentState(); st != STATE_TIMEOUT {
-		t.Fatalf("expected STATE_TIMEOUT after timeout, got %d", st)
-	}
-	client.tick(time.Now().Add(client.keepAlive))
-
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL after timeout, got %q", string(data[:min(4, len(data))]))
-	}
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("expected STATE_SENT_LOGIN after timeout, got %d", st)
-	}
-	if client.conn == oldConn {
-		t.Fatal("expected a new connection")
-	}
-	client.Stop()
-}
-
-func TestTickReconnectsOnHandshakeTimeout(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-	client.timeout = 10 * time.Millisecond
-	client.setState(STATE_SENT_AUTH)
-
-	client.tick(time.Now().Add(time.Second))
-	client.tick(time.Now().Add(time.Second + client.keepAlive))
-
-	data := <-client.connTX
-	if string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL after handshake timeout, got %q", string(data[:min(4, len(data))]))
-	}
-	client.Stop()
-}
-
 // --- forwardTX() tests ---
 
 func TestForwardTXSendsPackets(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 
 	client.wg.Add(1)
 	go client.forwardTX()
@@ -1132,7 +555,7 @@ func TestHandleIPSCBurstWhenNotStarted(t *testing.T) {
 func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -1193,7 +616,7 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -1281,22 +704,6 @@ func TestStopIdempotent(t *testing.T) {
 	client.Stop()
 }
 
-func TestStopSendsRPTCL(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-
-	client.started.Store(true)
-
-	client.Stop()
-
-	// Read what was sent to the server
-	got, _ := readFromServer(t, serverConn, time.Second)
-	if string(got[:5]) != tagRPTCL {
-		t.Fatalf("expected RPTCL disconnect, got %q", string(got[:min(5, len(got))]))
-	}
-}
-
 func TestStopWithNilConn(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
@@ -1319,142 +726,13 @@ func TestStopSetsStartedFalse(t *testing.T) {
 	}
 }
 
-// --- sendRPTCLDirect test ---
-
-func TestSendRPTCLDirect(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-
-	client.connMu.Lock()
-	client.sendRPTCLDirect()
-	client.connMu.Unlock()
-
-	got, _ := readFromServer(t, serverConn, time.Second)
-	if string(got[:5]) != tagRPTCL {
-		t.Fatalf("expected RPTCL, got %q", string(got[:min(5, len(got))]))
-	}
-	if len(got) != 9 {
-		t.Fatalf("expected 9 bytes, got %d", len(got))
-	}
-	if id := binary.BigEndian.Uint32(got[5:9]); id != client.cfg.ID {
-		t.Fatalf("expected binary peer ID %d, got %d", client.cfg.ID, id)
-	}
-}
-
-// --- Full integration: Start → login handshake → ready ---
-
-func TestStartAndFullHandshake(t *testing.T) {
-	t.Parallel()
-	serverConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatalf("server listen: %v", err)
-	}
-	defer serverConn.Close()
-	srvAddr, ok := serverConn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		t.Fatal("expected *net.UDPAddr from LocalAddr")
-	}
-
-	cfg := testMMDVMConfig()
-	cfg.MasterServer = fmt.Sprintf("127.0.0.1:%d", srvAddr.Port)
-
-	client := NewMMDVMClient(cfg, nil)
-	client.keepAlive = 200 * time.Millisecond
-	client.timeout = 5 * time.Second
-
-	if _, err := client.connect(); err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	client.started.Store(true)
-
-	client.wg.Add(4)
-	go client.handler()
-	go client.rx(client.conn, client.connStop, client.connGen.Load())
-	go client.tx()
-	go client.forwardTX()
-
-	// Step 1: Client sends RPTL
-	client.sendLogin()
-	client.state.Store(uint32(STATE_SENT_LOGIN))
-
-	// Read RPTL from server
-	loginData, clientAddr := readFromServer(t, serverConn, 2*time.Second)
-	if string(loginData[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL, got %q", string(loginData[:4]))
-	}
-
-	// Step 2: Server sends RPTACK with random
-	rptack := append([]byte("RPTACK"), []byte("EFGH")...)
-	if _, err := serverConn.WriteToUDP(rptack, clientAddr); err != nil {
-		t.Fatalf("server write RPTACK: %v", err)
-	}
-
-	// Step 3: Client sends RPTK
-	rptkData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(rptkData[:4]) != tagRPTK {
-		t.Fatalf("expected RPTK, got %q", string(rptkData[:4]))
-	}
-
-	// Step 4: Server sends RPTACK (auth accepted)
-	if _, err := serverConn.WriteToUDP([]byte("RPTACK__________"), clientAddr); err != nil {
-		t.Fatalf("server write RPTACK: %v", err)
-	}
-
-	// Step 5: Client sends RPTC
-	rptcData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(rptcData[:4]) != tagRPTC {
-		t.Fatalf("expected RPTC, got %q", string(rptcData[:4]))
-	}
-
-	// Step 6: Server sends RPTACK (config accepted)
-	if _, err := serverConn.WriteToUDP([]byte("RPTACK__________"), clientAddr); err != nil {
-		t.Fatalf("server write RPTACK: %v", err)
-	}
-
-	// Step 7: Client should now be in READY state and send RPTPING
-	pingData, _ := readFromServer(t, serverConn, 2*time.Second)
-	if string(pingData[:7]) != tagRPTPING {
-		t.Fatalf("expected RPTPING, got %q", string(pingData[:min(7, len(pingData))]))
-	}
-
-	// Wait for state to reach READY
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		//nolint:gosec // G115: test-only, state values fit in uint8
-		if state(client.state.Load()) == STATE_READY {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	//nolint:gosec // G115: test-only, state values fit in uint8
-	if state(client.state.Load()) != STATE_READY {
-		t.Fatalf("expected STATE_READY, got %d", client.state.Load())
-	}
-
-	// Step 8: Server sends MSTPONG
-	if _, err := serverConn.WriteToUDP([]byte("MSTPONG_________"), clientAddr); err != nil {
-		t.Fatalf("server write MSTPONG: %v", err)
-	}
-
-	// Give handler time to process
-	time.Sleep(100 * time.Millisecond)
-
-	if client.lastHeard.Load() == 0 {
-		t.Fatal("expected lastHeard to be set after MSTPONG")
-	}
-
-	client.Stop()
-}
-
 // --- RPTC field encoding tests ---
 
 func TestSendRPTCLatLong(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// Latitude (8 bytes) starts at offset 38
 	lat := string(data[38:46])
 	if lat != "+35.0000" {
@@ -1471,9 +749,8 @@ func TestSendRPTCLatLong(t *testing.T) {
 func TestSendRPTCHeight(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// Height (3 bytes) at offset 55
 	height := string(data[55:58])
 	if height != "030" {
@@ -1484,9 +761,8 @@ func TestSendRPTCHeight(t *testing.T) {
 func TestSendRPTCLocation(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// Location (20 bytes) at offset 58
 	location := strings.TrimRight(string(data[58:78]), " ")
 	if location != "Oklahoma" {
@@ -1497,9 +773,8 @@ func TestSendRPTCLocation(t *testing.T) {
 func TestSendRPTCDescription(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// Description (19 bytes) at offset 78
 	desc := strings.TrimRight(string(data[78:97]), " ")
 	if desc != "Test Repeater" {
@@ -1510,34 +785,12 @@ func TestSendRPTCDescription(t *testing.T) {
 func TestSendRPTCURL(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
 
-	data := <-client.connTX
+	data := client.rptcPacket()
 	// URL (124 bytes) at offset 98
 	url := strings.TrimRight(string(data[98:222]), " ")
 	if url != "https://example.com" {
 		t.Fatalf("expected URL 'https://example.com', got %q", url)
-	}
-}
-
-// --- Verify sendRPTK token correctness with specific random ---
-
-func TestSendRPTKTokenVerification(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	random := []byte("ABCD")
-	client.sendRPTK(binary.BigEndian.Uint32(random))
-
-	data := <-client.connTX
-	token := data[8:40]
-
-	s256 := sha256.New()
-	s256.Write(random)
-	s256.Write([]byte(client.cfg.Password))
-	expected := s256.Sum(nil)
-
-	if !bytes.Equal(token, expected) {
-		t.Fatalf("token mismatch:\n  got:  %x\n  want: %x", token, expected)
 	}
 }
 
@@ -1546,7 +799,7 @@ func TestSendRPTKTokenVerification(t *testing.T) {
 func TestSendPacketFieldsEncoded(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	pkt := dmrd.Data{
 		Seq:         42,
 		Source:      0x123456,
@@ -1577,7 +830,7 @@ func TestSendPacketFieldsEncoded(t *testing.T) {
 func TestHandleIPSCBurstMultiple(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	if client.translator != nil {
 		client.translator.SetPeerID(client.cfg.ID)
@@ -1640,17 +893,6 @@ loop:
 
 // --- State transitions in numeric order ---
 
-func TestStateTransitionOrder(t *testing.T) {
-	t.Parallel()
-	// Verify the numeric order of states
-	states := []state{STATE_IDLE, STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC, STATE_READY, STATE_TIMEOUT}
-	for i := 0; i < len(states)-1; i++ {
-		if states[i] >= states[i+1] {
-			t.Fatalf("state %d should be less than state %d", states[i], states[i+1])
-		}
-	}
-}
-
 // --- Verify atomic started flag ---
 
 func TestStartedFlag(t *testing.T) {
@@ -1688,8 +930,7 @@ func TestSendRPTCOversizedFieldsKeepFixedLayout(t *testing.T) {
 	client.cfg.Slots = 0
 	client.cfg.URL = strings.Repeat("u", 200)
 
-	client.sendRPTC()
-	data := <-client.connTX
+	data := client.rptcPacket()
 
 	if len(data) != 302 {
 		t.Fatalf("expected 302 bytes, got %d", len(data))
@@ -1727,8 +968,7 @@ func TestSendRPTCOversizedFieldsKeepFixedLayout(t *testing.T) {
 func TestSendRPTCDefaultLength(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.sendRPTC()
-	if data := <-client.connTX; len(data) != 302 {
+	if data := client.rptcPacket(); len(data) != 302 {
 		t.Fatalf("expected 302 bytes, got %d", len(data))
 	}
 }
@@ -1742,6 +982,8 @@ type fakeMaster struct {
 	pings        atomic.Int32
 	peer         atomic.Pointer[net.UDPAddr]
 	pongsEnabled atomic.Bool
+	nakAuth      atomic.Bool
+	rptcls       atomic.Int32
 	dmrd         chan dmrd.Data
 }
 
@@ -1779,6 +1021,9 @@ func newFakeMaster(t *testing.T) *fakeMaster {
 					}
 				}
 			case bytes.HasPrefix(data, []byte(tagRPTCL)):
+				m.rptcls.Add(1)
+			case bytes.HasPrefix(data, []byte(tagRPTK)) && m.nakAuth.Load():
+				reply = []byte(testMSTNAK)
 			case bytes.HasPrefix(data, []byte(tagRPTL)):
 				m.logins.Add(1)
 				if m.dropLogins.Load() > 0 {
@@ -1824,7 +1069,7 @@ func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 }
 
 func isReady(c *MMDVMClient) func() bool {
-	return func() bool { return c.currentState() == STATE_READY }
+	return c.up.Load
 }
 
 func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
@@ -1914,7 +1159,7 @@ func TestStartSetsTranslatorColorCode(t *testing.T) {
 func TestStopEndsOpenIPSCCalls(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 	client.netRewrites = []rewrite.Rule{
 		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 	}
@@ -1932,7 +1177,7 @@ func TestStopEndsOpenIPSCCalls(t *testing.T) {
 		Source: 100, Destination: 200, Repeater: 3001, Private: false,
 		Frame: 2, Value: 1, Stream: 0x5555,
 	}
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encodeDMRD(pkt)}
+	client.dataRX <- encodeDMRD(pkt)
 	waitFor(t, 2*time.Second, "voice headers", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -1970,7 +1215,7 @@ func TestInboundReplaysAreNotPaced(t *testing.T) {
 func TestSlowIPSCHandlerDoesNotHoldUpTheMaster(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 	client.netRewrites = []rewrite.Rule{
 		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 1, FromTG: 1, ToSlot: 1, ToTG: 1, Range: 999999},
 		&rewrite.TGRewrite{Name: testRuleName, FromSlot: 2, FromTG: 1, ToSlot: 2, ToTG: 1, Range: 999999},
@@ -2067,11 +1312,9 @@ func TestStopReturnsWhileSendBlockedOnFullQueue(t *testing.T) {
 	client.wg.Add(1)
 	go func() {
 		defer client.wg.Done()
-		client.sendLogin()
-		client.sendPing()
-		client.sendRPTC()
-		client.sendRPTK(0x01020304)
-		client.sendPacket(dmrd.Data{})
+		client.enqueue([]byte(tagRPTL))
+		client.up.Store(true)
+		client.sendPacket(dmrd.Data{Slot: enums.Slot1})
 	}()
 
 	stopped := make(chan struct{})
@@ -2108,7 +1351,7 @@ func startFastClient(t *testing.T, m *fakeMaster) *MMDVMClient {
 	cfg := testMMDVMConfig()
 	cfg.MasterServer = m.addr()
 	c := NewMMDVMClient(cfg, nil)
-	c.keepAlive = 25 * time.Millisecond
+	c.retry = 25 * time.Millisecond
 	c.timeout = 300 * time.Millisecond
 	if err := c.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -2124,7 +1367,7 @@ func TestRecoversAfterMasterStopsAnswering(t *testing.T) {
 	waitFor(t, 2*time.Second, "READY", isReady(c))
 
 	m.answer.Store(false)
-	waitFor(t, 2*time.Second, "ping timeout", func() bool { return c.currentState() != STATE_READY })
+	waitFor(t, 2*time.Second, "ping timeout", func() bool { return !c.up.Load() })
 	logins := m.logins.Load()
 	waitFor(t, 2*time.Second, "login retries while unanswered", func() bool { return m.logins.Load() >= logins+2 })
 
@@ -2149,7 +1392,7 @@ func TestRedialsAfterDialFailure(t *testing.T) {
 	var failures atomic.Int32
 	failures.Store(3)
 	var attempts atomic.Int32
-	c.sessMu.Lock()
+	c.peerMu.Lock()
 	realDial := c.dial
 	c.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
 		attempts.Add(1)
@@ -2158,35 +1401,14 @@ func TestRedialsAfterDialFailure(t *testing.T) {
 		}
 		return realDial(ctx, network, address)
 	}
-	c.sessMu.Unlock()
+	c.peerMu.Unlock()
 
 	m.pongsEnabled.Store(false)
-	waitFor(t, 2*time.Second, "ping timeout", func() bool { return c.currentState() != STATE_READY })
+	waitFor(t, 2*time.Second, "ping timeout", func() bool { return !c.up.Load() })
 	m.pongsEnabled.Store(true)
 	waitFor(t, 3*time.Second, "READY after redial", isReady(c))
 	if n := attempts.Load(); n < 4 {
 		t.Fatalf("expected at least 4 dial attempts, got %d", n)
-	}
-}
-
-func TestHandshakeRejectionDoesNotBlockHandler(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		st   state
-		data string
-	}{
-		{STATE_SENT_LOGIN, testMSTNAK},
-		{STATE_SENT_AUTH, "RPTNAK\x00\x04\xC2\x34"},
-		{STATE_SENT_AUTH, testMSTNAK},
-		{STATE_SENT_RPTC, testMSTNAK},
-	} {
-		client := newTestClient(t)
-		client.state.Store(uint32(tc.st))
-		start := time.Now()
-		client.handleState(client.connGen.Load(), []byte(tc.data))
-		if d := time.Since(start); d > 200*time.Millisecond {
-			t.Fatalf("state %d: handling %q blocked for %v", tc.st, tc.data[:6], d)
-		}
 	}
 }
 
@@ -2196,7 +1418,7 @@ func TestStartSucceedsWhileMasterUnresolvable(t *testing.T) {
 	cfg := testMMDVMConfig()
 	cfg.MasterServer = m.addr()
 	c := NewMMDVMClient(cfg, nil)
-	c.keepAlive = 25 * time.Millisecond
+	c.retry = 25 * time.Millisecond
 	c.timeout = 300 * time.Millisecond
 	var failures, attempts atomic.Int32
 	failures.Store(3)
@@ -2279,7 +1501,7 @@ func TestDialTimesOut(t *testing.T) {
 	cfg := testMMDVMConfig()
 	cfg.MasterServer = m.addr()
 	c := NewMMDVMClient(cfg, nil)
-	c.keepAlive = 25 * time.Millisecond
+	c.retry = 25 * time.Millisecond
 	c.timeout = 300 * time.Millisecond
 	c.dialTimeout = 50 * time.Millisecond
 	var hung atomic.Bool
@@ -2308,7 +1530,7 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			cfg.MasterServer = m.addr()
 			cfg.PassAllTG = []int{1, 2}
 			c := NewMMDVMClient(cfg, nil)
-			c.keepAlive = 20 * time.Millisecond
+			c.retry = 20 * time.Millisecond
 			c.timeout = 200 * time.Millisecond
 			release := make(chan struct{})
 			blocked := make(chan struct{})
@@ -2335,7 +1557,7 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			reconnected := func() bool {
 				c.connMu.Lock()
 				defer c.connMu.Unlock()
-				return c.conn != conn || c.currentState() != STATE_READY
+				return c.conn != conn || !c.up.Load()
 			}
 
 			for i := range packets {
@@ -2346,93 +1568,28 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			busyUntil := time.Now().Add(4 * c.timeout)
 			for time.Now().Before(busyUntil) {
 				if reconnected() {
-					t.Fatalf("reconnected while the handler was busy (state %d)", c.currentState())
+					t.Fatalf("reconnected while the handler was busy")
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
 			close(release)
-			waitFor(t, time.Second, "handler to drain", func() bool { return len(c.connRX) == 0 && !c.rxWaiting.Load() })
-			time.Sleep(2 * c.keepAlive)
+			waitFor(t, time.Second, "handler to drain", func() bool { return len(c.dataRX) == 0 })
+			time.Sleep(2 * c.retry)
 			if reconnected() {
-				t.Fatalf("reconnected after the handler drained (state %d)", c.currentState())
+				t.Fatalf("reconnected after the handler drained")
 			}
 		})
 	}
-}
-
-func TestReconnectDiscardsPacketsFromOldConnection(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	client.timeout = time.Hour
-	client.wg.Add(1)
-	go client.rx(client.conn, client.connStop, client.connGen.Load())
-
-	if _, err := client.conn.Write([]byte("PROBE")); err != nil {
-		t.Fatalf("probe write: %v", err)
-	}
-	_, clientAddr := readFromServer(t, serverConn, time.Second)
-	for range cap(client.connRX) + 1 {
-		if _, err := serverConn.WriteToUDP([]byte("RPTACK\x01\x02\x03\x04"), clientAddr); err != nil {
-			t.Fatalf("server write: %v", err)
-		}
-	}
-	waitFor(t, time.Second, "rx to block on a full queue", client.rxWaiting.Load)
-
-	client.sessMu.Lock()
-	client.setState(STATE_SENT_LOGIN)
-	client.reconnect()
-	client.sessMu.Unlock()
-
-	waitFor(t, time.Second, "old rx to give up", func() bool { return !client.rxWaiting.Load() })
-	if n := len(client.connRX); n != 0 {
-		t.Fatalf("expected no stale packets queued after reconnect, got %d", n)
-	}
-	client.Stop()
-}
-
-func TestPacketQueuedDuringReconnectDoesNotReachNewSession(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-	client.keepAlive = time.Second
-	client.timeout = time.Hour
-	client.wg.Add(1)
-	go client.handler()
-
-	oldGen := client.connGen.Load()
-	client.sessMu.Lock()
-	client.reconnect()
-	client.sessMu.Unlock()
-	client.tick(time.Now().Add(client.keepAlive))
-	if data := <-client.connTX; string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL on the new connection, got %q", data[:4])
-	}
-
-	// An rx for the old connection that passed its stop check before
-	// reconnect closed it, and sent after the drain.
-	client.connRX <- rxPacket{gen: oldGen, data: []byte("RPTACK\x01\x02\x03\x04")}
-	client.connRX <- rxPacket{gen: oldGen, data: []byte(testMSTCL)}
-	waitFor(t, time.Second, "handler to drain", func() bool { return len(client.connRX) == 0 })
-	time.Sleep(20 * time.Millisecond)
-
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("a packet from the old connection moved the new session to state %d", st)
-	}
-	if client.conn == nil {
-		t.Fatal("a packet from the old connection closed the new one")
-	}
-	client.Stop()
 }
 
 func TestSendPacketDroppedUntilReady(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	client.metrics = metrics.NewMetrics()
-	for _, st := range []state{STATE_IDLE, STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC, STATE_TIMEOUT} {
-		client.setState(st)
-		client.sendPacket(dmrd.Data{})
+	for i := range 5 {
+		client.sendPacket(dmrd.Data{Slot: enums.Slot1})
 		if n := len(client.connTX); n != 0 {
-			t.Fatalf("state %d: expected DMRD to be dropped, got %d queued", st, n)
+			t.Fatalf("packet %d: expected DMRD to be dropped, got %d queued", i, n)
 		}
 	}
 	rec := httptest.NewRecorder()
@@ -2446,78 +1603,6 @@ func TestSendPacketDroppedUntilReady(t *testing.T) {
 	}
 }
 
-func TestHandshakeResendEverySecondInterval(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = time.Second
-	client.timeout = time.Hour
-	client.setState(STATE_SENT_LOGIN)
-	start := time.Now()
-
-	client.tick(start.Add(time.Second))
-	if n := len(client.connTX); n != 0 {
-		t.Fatalf("expected no resend after one interval, got %d queued", n)
-	}
-	client.tick(start.Add(2 * time.Second))
-	if n := len(client.connTX); n != 1 {
-		t.Fatalf("expected one resend after two intervals, got %d queued", n)
-	}
-	client.tick(start.Add(3 * time.Second))
-	if n := len(client.connTX); n != 1 {
-		t.Fatalf("expected no resend one interval after the last, got %d queued", n)
-	}
-	client.tick(start.Add(4 * time.Second))
-	if n := len(client.connTX); n != 2 {
-		t.Fatalf("expected a second resend, got %d queued", n)
-	}
-}
-
-func TestReloginOnSecondTickAfterPingNak(t *testing.T) {
-	t.Parallel()
-	client := newTestClient(t)
-	client.keepAlive = time.Second
-	client.timeout = time.Hour
-	client.setState(STATE_READY)
-
-	now := time.Now()
-	client.handleState(client.connGen.Load(), []byte(testMSTNAK))
-	client.tick(now.Add(client.keepAlive))
-	if n := len(client.connTX); n != 0 {
-		t.Fatalf("expected no RPTL one interval after the MSTNAK, got %d queued", n)
-	}
-	client.tick(now.Add(2 * client.keepAlive))
-	if n := len(client.connTX); n != 1 {
-		t.Fatalf("expected RPTL two intervals after the MSTNAK, got %d queued", n)
-	}
-	if data := <-client.connTX; string(data[:4]) != tagRPTL {
-		t.Fatalf("expected RPTL, got %q", data[:4])
-	}
-}
-
-func TestRedialOnTickAfterTimeoutReconnect(t *testing.T) {
-	t.Parallel()
-	serverConn, client := udpPair(t)
-	defer serverConn.Close()
-	client.timeout = time.Minute
-	client.setState(STATE_READY)
-	client.lastHeard.Store(time.Now().Add(-2 * time.Minute).UnixNano())
-
-	now := time.Now()
-	client.tick(now)
-	if st := client.currentState(); st != STATE_TIMEOUT {
-		t.Fatalf("expected STATE_TIMEOUT, got %d", st)
-	}
-	client.tick(now.Add(client.keepAlive / 2))
-	if st := client.currentState(); st != STATE_TIMEOUT {
-		t.Fatalf("redialed half an interval after the timeout, state %d", st)
-	}
-	client.tick(now.Add(client.keepAlive))
-	if st := client.currentState(); st != STATE_SENT_LOGIN {
-		t.Fatalf("expected a redial on the next tick, got state %d", st)
-	}
-	client.Stop()
-}
-
 // TestHandleIPSCBurstDataCallEndReleasesSlot uses a confirmed data packet
 // from 3191868 to 3140598 and the SACK that answered it 180 ms later, both
 // on TS2, as an XPR 8400 relayed them. The data packet ends with the end
@@ -2526,7 +1611,7 @@ func TestRedialOnTickAfterTimeoutReconnect(t *testing.T) {
 func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	client.translator.SetColorCode(7)
 	client.passallRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: testRuleName, Slot: 2}}
@@ -2571,7 +1656,7 @@ func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
 func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	client.translator.SetColorCode(7)
 	client.passallRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: testRuleName, Slot: 1}}
@@ -2615,7 +1700,7 @@ func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
 func TestHandleIPSCBurstQueuedDroppedDataEnd(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	client.started.Store(true)
 	client.translator.SetColorCode(7)
 	client.passallRewrites = []rewrite.Rule{
@@ -2682,7 +1767,7 @@ func TestInboundSlotsAreBounded(t *testing.T) {
 func TestStopStopsInboundTimeslotManager(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.setState(STATE_READY)
+	client.up.Store(true)
 	mgr := timeslot.NewManager()
 	client.inboundTSMgr = mgr
 	pkt := func(stream uint32) dmrd.Data {
@@ -2718,7 +1803,7 @@ func TestStopStopsInboundTimeslotManager(t *testing.T) {
 func TestStopReturnsWhileIPSCHandlerBlocks(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	client.state.Store(uint32(STATE_READY))
+	client.up.Store(true)
 	client.netRewrites = []rewrite.Rule{&rewrite.PassAllTG{Name: testRuleName, Slot: 1}}
 	entered := make(chan struct{}, 1)
 	block := make(chan struct{})
@@ -2735,7 +1820,7 @@ func TestStopReturnsWhileIPSCHandlerBlocks(t *testing.T) {
 	})
 	client.wg.Add(1)
 	go client.handler()
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: dmrdPacket(1)}
+	client.dataRX <- dmrdPacket(1)
 	<-entered
 
 	stopped := make(chan struct{})

@@ -86,7 +86,7 @@ func embeddedFragment(data [33]byte) []byte {
 func TestSrcRewriteRewritesLinkControlToIPSC(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t)
-	c.state.Store(uint32(STATE_READY))
+	c.up.Store(true)
 	c.netRewrites = []rewrite.Rule{&rewrite.SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 1, ToTG: 9, Range: 1}}
 	var mu sync.Mutex
 	var got [][]byte
@@ -209,7 +209,7 @@ func privateCSBK(t *testing.T) []byte {
 func TestSrcRewriteRewritesCSBKToIPSC(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t)
-	c.state.Store(uint32(STATE_READY))
+	c.up.Store(true)
 	c.netRewrites = []rewrite.Rule{&rewrite.SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 1234, ToSlot: 1, ToTG: 9, Range: 1}}
 	got := make(chan []byte, 4)
 	c.SetIPSCHandler(func(_ context.Context, d []byte) { got <- d })

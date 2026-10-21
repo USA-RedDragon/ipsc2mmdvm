@@ -15,6 +15,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/session"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
@@ -24,27 +25,30 @@ import (
 )
 
 type MMDVMClient struct {
-	cfg          *config.MMDVM
-	metrics      *metrics.Metrics
-	started      atomic.Bool
-	done         chan struct{}
-	stopOnce     sync.Once
-	wg           sync.WaitGroup
-	tx_chan      chan dmrd.Data
-	conn         net.Conn
-	connMu       sync.Mutex    // protects conn and connStop
-	connStop     chan struct{} // closed when conn is replaced
-	state        atomic.Uint32
-	stateSince   atomic.Int64 // UnixNano of the last state change
-	connRX       chan rxPacket
-	connGen      atomic.Uint64 // bumped whenever conn is closed or replaced
-	connTX       chan []byte
-	keepAlive    time.Duration
-	timeout      time.Duration
-	lastHeard    atomic.Int64 // UnixNano — last packet read from the master
-	rxWaiting    atomic.Bool  // rx holds a packet the handler has not taken yet
-	lastPingSent atomic.Int64 // UnixNano — last RPTPING sent
-	ipscHandler  atomic.Pointer[func(ctx context.Context, data []byte)]
+	cfg      *config.MMDVM
+	metrics  *metrics.Metrics
+	started  atomic.Bool
+	done     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	tx_chan  chan dmrd.Data
+	conn     net.Conn
+	connMu   sync.Mutex    // protects conn and connStop
+	connStop chan struct{} // closed when conn is replaced
+	connRX   chan rxPacket
+	connGen  atomic.Uint64 // bumped whenever conn is closed or replaced
+	connTX   chan []byte
+	dataRX   chan []byte
+	// peerMu guards peer, epoch and pingSent. The session goroutine holds
+	// it for each call of the Peer and Stop holds it for Close.
+	peerMu      sync.Mutex
+	peer        *session.Peer
+	epoch       time.Time
+	pingSent    time.Time
+	up          atomic.Bool
+	retry       time.Duration
+	timeout     time.Duration
+	ipscHandler atomic.Pointer[func(ctx context.Context, data []byte)]
 	// ipscOut queues the IPSC packets for forwardIPSC, which closes
 	// ipscOutDone when it returns. ipscOnce starts it on first use.
 	ipscOnce    sync.Once
@@ -55,9 +59,6 @@ type MMDVMClient struct {
 	rfLC        *ipsc.LCRewriter // re-encodes LC after rfRewrites
 	dial        func(ctx context.Context, network, address string) (net.Conn, error)
 	dialTimeout time.Duration
-	sessMu      sync.Mutex // serializes handshake transitions with supervise
-	salt        uint32     // last RPTACK salt, guarded by sessMu
-	resentAt    time.Time  // last handshake resend, guarded by sessMu
 
 	// Rewrite rules built from config, applied to packets
 	// flowing through this network.
@@ -164,22 +165,16 @@ const ipscQueueSize = 256
 // that end the calls still open toward it.
 const endCallsTimeout = time.Second
 
+// dataQueueSize is how many DMRD packets of the master wait for the
+// handler. The session goroutine drops a packet that finds it full rather
+// than wait, so the pongs behind it keep the session up.
+const dataQueueSize = 256
+
 // rxPacket is a datagram read from the connection of generation gen.
 type rxPacket struct {
 	gen  uint64
 	data []byte
 }
-
-type state uint8
-
-const (
-	STATE_IDLE state = iota
-	STATE_SENT_LOGIN
-	STATE_SENT_AUTH
-	STATE_SENT_RPTC
-	STATE_READY
-	STATE_TIMEOUT
-)
 
 func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 	tx_chan := make(chan dmrd.Data, 256)
@@ -194,8 +189,7 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		tx_chan:      tx_chan,
 		connRX:       make(chan rxPacket, 16),
 		connTX:       make(chan []byte, 16),
-		keepAlive:    5 * time.Second,
-		timeout:      15 * time.Second,
+		dataRX:       make(chan []byte, dataQueueSize),
 		translator:   translator,
 		netLC:        ipsc.NewLCRewriter(),
 		rfLC:         ipsc.NewLCRewriter(),
@@ -203,7 +197,6 @@ func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
 		dial:         (&net.Dialer{}).DialContext,
 		dialTimeout:  defaultDialTimeout,
 	}
-	c.state.Store(uint32(STATE_IDLE))
 	c.buildRewriteRules()
 	if m != nil {
 		if translator != nil {
@@ -301,7 +294,8 @@ func (h *MMDVMClient) buildRewriteRules() {
 
 // Start launches the client and returns without waiting for the network.
 // The master is dialed and logged into in the background, and retried
-// until it answers. Start fails only if the master address is malformed.
+// until it answers. Start fails if the master address is malformed or the
+// session config is out of range.
 func (h *MMDVMClient) Start() error {
 	_, port, err := net.SplitHostPort(h.cfg.MasterServer)
 	if err != nil {
@@ -310,6 +304,9 @@ func (h *MMDVMClient) Start() error {
 	if p, err := strconv.ParseUint(port, 10, 16); err != nil || p == 0 {
 		return fmt.Errorf("invalid master server port in %q", h.cfg.MasterServer)
 	}
+	if err := h.newPeer(); err != nil {
+		return err
+	}
 
 	if h.translator != nil {
 		h.translator.SetPeerID(h.cfg.ID)
@@ -317,26 +314,218 @@ func (h *MMDVMClient) Start() error {
 	}
 
 	slog.Info("Connecting to MMDVM server", "network", h.cfg.Name)
-
-	if h.metrics != nil {
-		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
-	}
-
+	h.setConnState(1)
 	h.started.Store(true)
 
 	h.wg.Add(4)
 	go h.handler()
 	go h.tx()
 	go h.forwardTX()
-	go h.supervise()
+	go h.session()
 
 	return nil
 }
 
-// connect dials the master and installs the new connection. The dial is
-// bounded by dialTimeout and canceled by Stop. The caller starts rx for
-// the connection.
-func (h *MMDVMClient) connect() (net.Conn, error) {
+// newPeer makes the session of the MMDVM network protocol, which
+// DMRGateway speaks and BrandMeister, HBlink, FreeDMR and DMRHub masters
+// accept.
+func (h *MMDVMClient) newPeer() error {
+	p, err := session.NewPeer(&session.PeerConfig{
+		Dialect:  dmrd.DialectMMDVM,
+		ID:       h.cfg.ID,
+		Password: []byte(h.cfg.Password),
+		Config:   h.rptcPacket(),
+		Retry:    h.retry,
+		Timeout:  h.timeout,
+	})
+	if err != nil {
+		return fmt.Errorf("network %s: %w", h.cfg.Name, err)
+	}
+	h.peer = p
+	h.epoch = time.Now()
+	return nil
+}
+
+func (h *MMDVMClient) clock() time.Duration {
+	return time.Since(h.epoch)
+}
+
+func (h *MMDVMClient) setConnState(v float64) {
+	if h.metrics != nil {
+		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(v)
+	}
+}
+
+// session runs the Peer: it feeds it the packets of the master and its
+// timers until Stop. The packets that wait are taken before each Tick, so
+// a pong that came in time never loses to the timeout.
+func (h *MMDVMClient) session() {
+	defer h.wg.Done()
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	out := make([]session.Output, 0, session.MaxOutputs)
+	for {
+		h.peerMu.Lock()
+		at, ok := h.peer.Deadline()
+		h.peerMu.Unlock()
+		if ok {
+			timer.Reset(max(0, at-h.clock()))
+		}
+		select {
+		case <-h.done:
+			return
+		case pkt := <-h.connRX:
+			out = h.fromMaster(pkt, out)
+		case <-timer.C:
+			for drained := false; !drained; {
+				select {
+				case pkt := <-h.connRX:
+					out = h.fromMaster(pkt, out)
+				default:
+					drained = true
+				}
+			}
+			h.peerMu.Lock()
+			out = h.peer.Tick(h.clock(), out[:0])
+			h.outputs(out)
+			h.peerMu.Unlock()
+		}
+	}
+}
+
+// fromMaster passes a packet of the master to the Peer. A packet from a
+// connection that has since been closed is dropped, so it cannot act on
+// the session that replaced it.
+func (h *MMDVMClient) fromMaster(pkt rxPacket, out []session.Output) []session.Output {
+	if pkt.gen != h.connGen.Load() {
+		slog.Debug("Dropping packet from a closed connection", "network", h.cfg.Name)
+		return out
+	}
+	h.peerMu.Lock()
+	defer h.peerMu.Unlock()
+	if dmrd.Classify(pkt.data, dmrd.DialectMMDVM) == dmrd.CommandMSTPONG && h.metrics != nil && !h.pingSent.IsZero() {
+		h.metrics.MMDVMPingRTT.WithLabelValues(h.cfg.Name).Observe(time.Since(h.pingSent).Seconds())
+		h.pingSent = time.Time{}
+	}
+	out = h.peer.Packet(h.clock(), pkt.data, out[:0])
+	h.outputs(out)
+	return out
+}
+
+// outputs acts on the outputs of the Peer. Must be called with peerMu
+// held.
+func (h *MMDVMClient) outputs(out []session.Output) {
+	for _, o := range out {
+		switch o.Kind {
+		case session.OutputSend:
+			h.sendControl(o.Packet)
+		case session.OutputUp:
+			slog.Info("Logged in", "network", h.cfg.Name)
+			h.up.Store(true)
+			h.setConnState(2)
+		case session.OutputDown:
+			h.down(o)
+		case session.OutputData:
+			select {
+			case h.dataRX <- o.Packet:
+			default:
+				slog.Warn("DMRD queue full, dropping packet", "network", h.cfg.Name)
+				if h.metrics != nil {
+					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "handler_busy").Inc()
+				}
+			}
+		case session.OutputMessage:
+			if o.Command == dmrd.CommandRPTSBKN {
+				slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
+			}
+		case session.OutputLogin, session.OutputConfig, session.OutputOptions:
+		}
+	}
+}
+
+// sendControl queues a copy of a login step or ping of the Peer. It dials
+// the master first when there is no connection, so a failed dial is tried
+// again with the next send of the Peer.
+func (h *MMDVMClient) sendControl(p []byte) {
+	h.connMu.Lock()
+	connected := h.conn != nil
+	h.connMu.Unlock()
+	if !connected && !h.connect() {
+		return
+	}
+	if dmrd.Classify(p, dmrd.DialectMMDVM) == dmrd.CommandRPTPING {
+		h.pingSent = time.Now()
+	}
+	h.enqueue(append([]byte(nil), p...))
+}
+
+// down acts on the end of a session. After a timeout or an MSTCL the
+// master may have moved or restarted, so the next login dials it again;
+// after an MSTNAK the login goes again on the same connection.
+func (h *MMDVMClient) down(o session.Output) {
+	h.up.Store(false)
+	slog.Warn("Session with the master ended", "network", h.cfg.Name, "reason", o.Reason.String(), "state", o.State.String())
+	if o.Reason == session.ReasonRefused && o.State == session.StateAuth && h.metrics != nil {
+		h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
+	}
+	switch o.Reason { //nolint:exhaustive // the other reasons keep the connection
+	case session.ReasonTimeout, session.ReasonClosed:
+		h.reconnect()
+	default:
+		h.setConnState(1)
+	}
+}
+
+// reconnect closes the current connection, so the next send of the Peer
+// dials a new one. Must be called with peerMu held.
+func (h *MMDVMClient) reconnect() {
+	h.setConnState(0)
+	if h.metrics != nil {
+		h.metrics.MMDVMReconnects.WithLabelValues(h.cfg.Name).Inc()
+	}
+	h.connMu.Lock()
+	if h.conn != nil {
+		if err := h.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			slog.Error("Error closing connection", "network", h.cfg.Name, "error", err)
+		}
+		h.conn = nil
+		close(h.connStop)
+		h.connGen.Add(1)
+	}
+	h.connMu.Unlock()
+	for len(h.connRX) > 0 {
+		select {
+		case <-h.connRX:
+		default:
+		}
+	}
+}
+
+// connect dials the master, installs the new connection and starts rx for
+// it.
+func (h *MMDVMClient) connect() bool {
+	conn, err := h.dialMaster()
+	if err != nil {
+		select {
+		case <-h.done:
+		default:
+			slog.Error("Error connecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		}
+		return false
+	}
+	h.connMu.Lock()
+	stop := h.connStop
+	gen := h.connGen.Load()
+	h.connMu.Unlock()
+	h.wg.Add(1)
+	go h.rx(conn, stop, gen)
+	h.setConnState(1)
+	return true
+}
+
+// dialMaster dials the master and installs the new connection. The dial is
+// bounded by dialTimeout and canceled by Stop.
+func (h *MMDVMClient) dialMaster() (net.Conn, error) {
 	dial := h.dial
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
@@ -374,312 +563,44 @@ func (h *MMDVMClient) connect() (net.Conn, error) {
 
 const defaultDialTimeout = 10 * time.Second
 
+// handler passes the DMRD packets of the master to the bridge, off the
+// session goroutine.
 func (h *MMDVMClient) handler() {
 	defer h.wg.Done()
 	for {
 		select {
-		case pkt := <-h.connRX:
-			data := pkt.data
-			slog.Debug("received packet", "data", fmt.Sprintf("% X", data), "strdata", string(data), "network", h.cfg.Name)
-			if len(data) < 4 {
-				slog.Warn("Ignoring short packet from MMDVM server", "network", h.cfg.Name, "length", len(data))
-				continue
-			}
-			h.handleState(pkt.gen, data)
+		case data := <-h.dataRX:
+			h.handleReady(data)
 		case <-h.done:
 			return
 		}
-	}
-}
-
-func (h *MMDVMClient) currentState() state {
-	return state(h.state.Load()) //nolint:gosec // only state values are stored
-}
-
-// setState records a state change and when it happened. Handshake states
-// time out relative to that moment.
-func (h *MMDVMClient) setState(s state) {
-	h.stateSince.Store(time.Now().UnixNano())
-	h.state.Store(uint32(s))
-}
-
-// handleState handles a packet read from the connection of generation gen.
-// A packet from a connection that has since been closed is dropped, so it
-// cannot act on the session that replaced it.
-func (h *MMDVMClient) handleState(gen uint64, data []byte) {
-	h.sessMu.Lock()
-	if gen != h.connGen.Load() {
-		h.sessMu.Unlock()
-		slog.Debug("Dropping packet from a closed connection", "network", h.cfg.Name)
-		return
-	}
-	cmd := dmrd.Classify(data, dialect)
-	if cmd == dmrd.CommandMSTCL {
-		defer h.sessMu.Unlock()
-		slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
-		h.reconnect()
-		return
-	}
-	if h.currentState() == STATE_READY {
-		if cmd == dmrd.CommandMSTNAK {
-			defer h.sessMu.Unlock()
-			h.relogin()
-			return
-		}
-		h.sessMu.Unlock()
-		h.handleReady(data)
-		return
-	}
-	defer h.sessMu.Unlock()
-	switch h.currentState() {
-	case STATE_IDLE:
-		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
-	case STATE_SENT_LOGIN:
-		h.handleSentLogin(cmd, data)
-	case STATE_SENT_AUTH:
-		h.handleSentAuth(cmd)
-	case STATE_SENT_RPTC:
-		h.handleSentRPTC(cmd)
-	case STATE_READY:
-	case STATE_TIMEOUT:
-		slog.Info("Got data from MMDVM server while in timeout state", "network", h.cfg.Name)
-	}
-}
-
-// The handleSent* functions run with sessMu held. A rejected step is not
-// resent here; supervise retries it on its next tick.
-
-func (h *MMDVMClient) handleSentLogin(cmd dmrd.Command, data []byte) {
-	if cmd == dmrd.CommandRPTACK {
-		ack, err := dmrd.DecodeControl(data, dialect)
-		if err != nil {
-			slog.Warn("RPTACK response without a salt", "network", h.cfg.Name, "length", len(data), "error", err)
-			return
-		}
-		slog.Info("Connected. Authenticating", "network", h.cfg.Name)
-		h.salt = ack.ID
-		h.setState(STATE_SENT_AUTH)
-		h.sendRPTK(h.salt)
-	} else {
-		slog.Warn("Server rejected login request", "network", h.cfg.Name)
-	}
-}
-
-func (h *MMDVMClient) handleSentAuth(cmd dmrd.Command) {
-	switch cmd { //nolint:exhaustive // other messages leave the handshake as it is
-	case dmrd.CommandRPTACK:
-		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
-		h.setState(STATE_SENT_RPTC)
-		h.sendRPTC()
-	case dmrd.CommandMSTNAK:
-		slog.Warn("Password rejected", "network", h.cfg.Name)
-		if h.metrics != nil {
-			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
-		}
-		h.setState(STATE_SENT_LOGIN)
-	}
-}
-
-func (h *MMDVMClient) handleSentRPTC(cmd dmrd.Command) {
-	switch cmd { //nolint:exhaustive // other messages leave the handshake as it is
-	case dmrd.CommandRPTACK:
-		slog.Info("Config accepted, logged in", "network", h.cfg.Name)
-		h.lastHeard.Store(time.Now().UnixNano())
-		h.setState(STATE_READY)
-		if h.metrics != nil {
-			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
-		}
-		h.sendPing()
-	case dmrd.CommandMSTNAK:
-		slog.Warn("Configuration rejected, logging in again", "network", h.cfg.Name)
-		h.setState(STATE_SENT_LOGIN)
 	}
 }
 
 func (h *MMDVMClient) handleReady(data []byte) {
-	switch dmrd.Classify(data, dialect) { //nolint:exhaustive // the master sends nothing else once logged in
-	case dmrd.CommandRPTSBKN:
-		slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
-	case dmrd.CommandDMRD:
-		packet, err := dmrd.DecodeData(data)
-		if err != nil {
-			slog.Info("Error unpacking packet", "network", h.cfg.Name, "error", err)
-			return
-		}
-		if h.metrics != nil {
-			h.metrics.MMDVMPacketsReceived.WithLabelValues(h.cfg.Name).Inc()
-		}
-		slog.Debug("MMDVM DMRD received", "network", h.cfg.Name, "packet", packet)
-
-		orig := packet
-		if !rewrite.Apply(h.netRewrites, &packet) {
-			slog.Debug("MMDVM DMRD dropped (no rewrite rule matched)", "network", h.cfg.Name)
-			if h.metrics != nil {
-				h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "no_rewrite").Inc()
-			}
-			return
-		}
-
-		h.netLC.Rewrite(orig, &packet)
-		slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
-
-		h.submitOutbound(packet)
-	default:
-		slog.Info("Got unknown packet from MMDVM server", "network", h.cfg.Name, "data", data)
-	}
-}
-
-// supervise owns the connection for the whole run. Every keepalive
-// interval it pings when READY, resends a stalled handshake step every
-// second interval (a faster resend can reset a session on hblink), and
-// reconnects when the master has stopped answering, the
-// handshake has not progressed within the timeout, or there is no
-// connection at all. A dropped connection is dialed again only after a
-// full keepalive interval, like the DMRGateway retry timer, so a master
-// that keeps closing or rejecting the session is not flooded with logins.
-func (h *MMDVMClient) supervise() {
-	defer h.wg.Done()
-	h.sessMu.Lock()
-	h.connectAndLogin()
-	h.sessMu.Unlock()
-	ticker := time.NewTicker(h.keepAlive)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			h.tick(time.Now())
-		case <-h.done:
-			return
-		}
-	}
-}
-
-func (h *MMDVMClient) tick(now time.Time) {
-	h.sessMu.Lock()
-	defer h.sessMu.Unlock()
-	switch st := h.currentState(); st {
-	case STATE_READY:
-		if !h.rxWaiting.Load() && now.Sub(time.Unix(0, h.lastHeard.Load())) > h.timeout {
-			slog.Info("Connection timed out", "network", h.cfg.Name)
-			h.reconnect()
-			return
-		}
-		h.sendPing()
-	case STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC:
-		if now.Sub(time.Unix(0, h.stateSince.Load())) > h.timeout {
-			slog.Warn("Handshake timed out, reconnecting", "network", h.cfg.Name, "state", st)
-			h.reconnect()
-			return
-		}
-		last := time.Unix(0, h.stateSince.Load())
-		if h.resentAt.After(last) {
-			last = h.resentAt
-		}
-		if h.intervalsPassed(now, last, 2) {
-			h.resentAt = now
-			h.resend(st)
-		}
-	case STATE_TIMEOUT:
-		if h.intervalsPassed(now, time.Unix(0, h.stateSince.Load()), 1) {
-			h.connectAndLogin()
-		}
-	case STATE_IDLE:
-		h.connectAndLogin()
-	}
-}
-
-// intervalsPassed reports whether n keepalive intervals have passed from
-// since to the tick at now. A state change made just after a tick, such as
-// a relogin on the MSTNAK that answers its ping, would otherwise miss the
-// tick n intervals later by a few microseconds and wait a whole extra
-// interval, so it allows a tenth of an interval of slack.
-func (h *MMDVMClient) intervalsPassed(now, since time.Time, n int) bool {
-	return now.Sub(since) >= time.Duration(n)*h.keepAlive-h.keepAlive/10
-}
-
-// resend repeats the handshake step for st. Must be called with sessMu held.
-func (h *MMDVMClient) resend(st state) {
-	switch st {
-	case STATE_SENT_LOGIN:
-		h.sendLogin()
-	case STATE_SENT_AUTH:
-		h.sendRPTK(h.salt)
-	case STATE_SENT_RPTC:
-		h.sendRPTC()
-	case STATE_IDLE, STATE_READY, STATE_TIMEOUT:
-	}
-}
-
-// relogin restarts the handshake on the current connection after the
-// master rejected an established session. The RPTL goes out with the
-// next handshake resend, not at once, so a master that rejects every
-// session is not flooded with logins. Must be called with sessMu held.
-func (h *MMDVMClient) relogin() {
-	slog.Warn("Master rejected the session, logging in again", "network", h.cfg.Name)
-	if h.metrics != nil {
-		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
-	}
-	h.setState(STATE_SENT_LOGIN)
-}
-
-// startLogin begins a new handshake on the current connection. Must be
-// called with sessMu held.
-func (h *MMDVMClient) startLogin() {
-	h.setState(STATE_SENT_LOGIN)
-	h.sendLogin()
-}
-
-// reconnect closes the current connection. supervise dials a new one and
-// starts a fresh login once the retry interval has passed. Must be called
-// with sessMu held.
-func (h *MMDVMClient) reconnect() {
-	h.setState(STATE_TIMEOUT)
-	if h.metrics != nil {
-		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(0)
-		h.metrics.MMDVMReconnects.WithLabelValues(h.cfg.Name).Inc()
-	}
-	h.connMu.Lock()
-	if h.conn != nil {
-		if err := h.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			slog.Error("Error closing connection", "network", h.cfg.Name, "error", err)
-		}
-		h.conn = nil
-		close(h.connStop)
-		h.connGen.Add(1)
-	}
-	h.connMu.Unlock()
-	for len(h.connRX) > 0 {
-		select {
-		case <-h.connRX:
-		default:
-		}
-	}
-}
-
-// connectAndLogin dials the master and starts a login. If the dial fails
-// the client stays in STATE_TIMEOUT and the next tick tries again. Must be
-// called with sessMu held.
-func (h *MMDVMClient) connectAndLogin() {
-	h.setState(STATE_TIMEOUT)
-	conn, err := h.connect()
+	packet, err := dmrd.DecodeData(data)
 	if err != nil {
-		select {
-		case <-h.done:
-		default:
-			slog.Error("Error connecting to MMDVM server", "network", h.cfg.Name, "error", err)
+		slog.Info("Error unpacking packet", "network", h.cfg.Name, "error", err)
+		return
+	}
+	if h.metrics != nil {
+		h.metrics.MMDVMPacketsReceived.WithLabelValues(h.cfg.Name).Inc()
+	}
+	slog.Debug("MMDVM DMRD received", "network", h.cfg.Name, "packet", packet)
+
+	orig := packet
+	if !rewrite.Apply(h.netRewrites, &packet) {
+		slog.Debug("MMDVM DMRD dropped (no rewrite rule matched)", "network", h.cfg.Name)
+		if h.metrics != nil {
+			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "no_rewrite").Inc()
 		}
 		return
 	}
-	h.connMu.Lock()
-	stop := h.connStop
-	gen := h.connGen.Load()
-	h.connMu.Unlock()
-	h.wg.Add(1)
-	go h.rx(conn, stop, gen)
-	if h.metrics != nil {
-		h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(1)
-	}
-	h.startLogin()
+
+	h.netLC.Rewrite(orig, &packet)
+	slog.Debug("MMDVM DMRD after rewrite", "network", h.cfg.Name, "packet", packet)
+
+	h.submitOutbound(packet)
 }
 
 func (h *MMDVMClient) tx() {
@@ -708,13 +629,12 @@ func (h *MMDVMClient) tx() {
 	}
 }
 
-// rx reads from one connection until it is closed. It records when the
-// master was last heard from and handles MSTPONG itself, so keepalive does
-// not depend on the handler goroutine.
+// rx reads from one connection until it is closed and hands each packet to
+// the session goroutine.
 func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}, gen uint64) {
 	defer h.wg.Done()
 	for {
-		data := make([]byte, 512)
+		data := make([]byte, session.MaxPacket+1)
 		n, err := conn.Read(data)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
@@ -728,55 +648,13 @@ func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}, gen uint64) {
 			slog.Error("Error reading from MMDVM server", "network", h.cfg.Name, "error", err)
 			continue
 		}
-		h.lastHeard.Store(time.Now().UnixNano())
-		if dmrd.Classify(data[:n], dialect) == dmrd.CommandMSTPONG {
-			h.handlePong()
-			continue
-		}
-		if !h.deliver(rxPacket{gen: gen, data: data[:n]}, stop) {
+		select {
+		case h.connRX <- rxPacket{gen: gen, data: data[:n]}:
+		case <-stop:
+			return
+		case <-h.done:
 			return
 		}
-	}
-}
-
-// deliver hands a packet to the handler. While it waits, rxWaiting tells
-// supervise that the master is still talking to us: the handler is busy
-// (for example replaying a buffered call), and MSTPONGs queued behind this
-// packet are not lost. Returns false when the client stops or the
-// connection is replaced. A packet can still slip into the queue while
-// the connection is replaced; handleState drops it by its generation.
-func (h *MMDVMClient) deliver(pkt rxPacket, stop <-chan struct{}) bool {
-	select {
-	case <-stop:
-		return false
-	default:
-	}
-	select {
-	case h.connRX <- pkt:
-		return true
-	default:
-	}
-	h.rxWaiting.Store(true)
-	defer func() {
-		h.lastHeard.Store(time.Now().UnixNano())
-		h.rxWaiting.Store(false)
-	}()
-	select {
-	case h.connRX <- pkt:
-		return true
-	case <-stop:
-		return false
-	case <-h.done:
-		return false
-	}
-}
-
-func (h *MMDVMClient) handlePong() {
-	if h.metrics == nil {
-		return
-	}
-	if sent := h.lastPingSent.Load(); sent != 0 {
-		h.metrics.MMDVMPingRTT.WithLabelValues(h.cfg.Name).Observe(time.Since(time.Unix(0, sent)).Seconds())
 	}
 }
 
@@ -784,7 +662,6 @@ func (h *MMDVMClient) Stop() {
 	h.stopOnce.Do(func() {
 		slog.Info("Stopping MMDVM client", "network", h.cfg.Name)
 
-		// Signal all goroutines to stop.
 		close(h.done)
 
 		h.preambleMu.Lock()
@@ -799,22 +676,40 @@ func (h *MMDVMClient) Stop() {
 			h.inboundTSMgr.Stop()
 		}
 
-		// Send the disconnect message directly on the wire (best-effort).
-		h.connMu.Lock()
-		if h.conn != nil {
-			h.sendRPTCLDirect()
-			h.conn.Close()
-		}
-		h.connMu.Unlock()
-
+		h.closeSession()
 		h.started.Store(false)
 	})
 
-	// Wait for all goroutines to finish.
 	h.wg.Wait()
 	h.ipscQueue()
 	<-h.ipscOutDone
 	h.endOutboundCalls()
+}
+
+// closeSession ends the session with the RPTCL of Peer.Close, written
+// straight on the connection, and closes the connection.
+func (h *MMDVMClient) closeSession() {
+	h.peerMu.Lock()
+	defer h.peerMu.Unlock()
+	var out []session.Output
+	if h.peer != nil {
+		out = h.peer.Close(h.clock(), make([]session.Output, 0, session.MaxOutputs))
+	}
+	h.up.Store(false)
+	h.connMu.Lock()
+	defer h.connMu.Unlock()
+	if h.conn == nil {
+		return
+	}
+	for _, o := range out {
+		if o.Kind != session.OutputSend {
+			continue
+		}
+		if _, err := h.conn.Write(o.Packet); err != nil {
+			slog.Error("Error sending RPTCL disconnect", "network", h.cfg.Name, "error", err)
+		}
+	}
+	_ = h.conn.Close()
 }
 
 // endOutboundCalls sends IPSC the packets that end the calls this client
@@ -834,14 +729,6 @@ func (h *MMDVMClient) endOutboundCalls() {
 			return
 		}
 		(*handler)(ctx, data)
-	}
-}
-
-// sendRPTCLDirect writes the disconnect message directly on the connection.
-// Must be called with connMu held.
-func (h *MMDVMClient) sendRPTCLDirect() {
-	if _, err := h.conn.Write(h.rptclPacket()); err != nil {
-		slog.Error("Error sending RPTCL disconnect", "network", h.cfg.Name, "error", err)
 	}
 }
 

@@ -4,16 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
-	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/auth"
 )
-
-// dialect is the form of the control messages the client speaks: the MMDVM
-// network protocol of DMRGateway, which BrandMeister, HBlink, FreeDMR and
-// DMRHub masters accept.
-const dialect = dmrd.DialectMMDVM
 
 // enqueue hands data to tx. It gives up when the client stops, so a full
 // connTX can never block Stop.
@@ -22,28 +15,6 @@ func (h *MMDVMClient) enqueue(data []byte) {
 	case h.connTX <- data:
 	case <-h.done:
 	}
-}
-
-// control returns the control message cmd with the repeater ID.
-func (h *MMDVMClient) control(cmd dmrd.Command) []byte {
-	data, err := dmrd.Control{Command: cmd, ID: h.cfg.ID}.AppendBinary(nil, dialect)
-	if err != nil {
-		slog.Error("cannot build control message", "network", h.cfg.Name, "command", cmd, "error", err)
-	}
-	return data
-}
-
-func (h *MMDVMClient) sendLogin() {
-	h.enqueue(h.control(dmrd.CommandRPTL))
-}
-
-// rptclPacket builds the RPTCL disconnect message.
-func (h *MMDVMClient) rptclPacket() []byte {
-	return h.control(dmrd.CommandRPTCL)
-}
-
-func (h *MMDVMClient) sendRPTC() {
-	h.enqueue(h.rptcPacket())
 }
 
 // rptcPacket builds the RPTC configuration message. Every field has a fixed
@@ -96,29 +67,10 @@ func clampCoord(v, limit float64) float64 {
 	return math.Max(-limit, math.Min(limit, v))
 }
 
-// sendRPTK sends the login token for the salt of the master's RPTACK.
-func (h *MMDVMClient) sendRPTK(salt uint32) {
-	m := dmrd.Control{Command: dmrd.CommandRPTK, ID: h.cfg.ID}
-	var err error
-	if m.Token, err = auth.Token(dialect, salt, []byte(h.cfg.Password)); err != nil {
-		slog.Error("cannot compute login token", "network", h.cfg.Name, "error", err)
-	}
-	data, err := m.AppendBinary(nil, dialect)
-	if err != nil {
-		slog.Error("cannot build RPTK", "network", h.cfg.Name, "error", err)
-	}
-	h.enqueue(data)
-}
-
-func (h *MMDVMClient) sendPing() {
-	h.lastPingSent.Store(time.Now().UnixNano())
-	h.enqueue(h.control(dmrd.CommandRPTPING))
-}
-
 // sendPacket queues a DMRD packet for the master. Like DMRGateway, it only
 // sends traffic while logged in.
 func (h *MMDVMClient) sendPacket(packet dmrd.Data) {
-	if h.currentState() != STATE_READY {
+	if !h.up.Load() {
 		slog.Debug("Dropping DMRD, not logged in", "network", h.cfg.Name)
 		if h.metrics != nil {
 			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "not_ready").Inc()
