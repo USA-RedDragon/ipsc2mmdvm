@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USA-RedDragon/dmrgo/v2/bit"
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
@@ -765,7 +764,10 @@ func TestBuildVoiceBurstTrustsFrameType(t *testing.T) {
 	if res.Uncorrectable {
 		t.Fatalf("expected the voice frames to decode, got %+v", res)
 	}
-	want := vocoder.PackAMBEVoice(frames)
+	want, err := vocoder.PackAMBEVoice(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if want == ([19]byte{}) {
 		t.Fatal("expected nonzero voice")
 	}
@@ -2180,7 +2182,7 @@ func proprietaryPacketBursts(t *testing.T, confirmed, withPHead bool) ([][33]byt
 			Group: true, SAP: enums.SAPProprietaryPacketData, LLIDDestination: 200, LLIDSource: 100,
 		}}
 	}
-	p, err := packet.Segment(h, make([]byte, 30), enums.DataTypeRate12)
+	p, err := packet.NewPacket(h, make([]byte, 30), enums.DataTypeRate12)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2204,7 +2206,7 @@ func proprietaryPacketBursts(t *testing.T, confirmed, withPHead bool) ([][33]byt
 	if err != nil {
 		t.Fatal(err)
 	}
-	pHead, err := layer2.BuildDataBurst(bit.Pack96(bits), enums.DataTypeDataHeader, 0, layer2.SyncSourceBS)
+	pHead, err := layer2.BuildDataBurst(bits, enums.DataTypeDataHeader, 0, layer2.SyncSourceBS)
 	if err != nil {
 		t.Fatal(err)
 	}

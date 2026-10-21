@@ -264,7 +264,7 @@ func rewriteDataBlock(pkt *mmdvm.Packet, dataType enums.DataType, edit func(b [1
 // manufacturer CSBK, where DMRGateway writes octets 4-9 anyway.
 func rewriteCSBK(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 	csbk := pdu.CSBKBytes(b)
-	if !csbk.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) {
+	if csbk.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) != nil {
 		return b, false
 	}
 	csbk.SetGroup(pkt.GroupCall)
@@ -279,7 +279,7 @@ func rewriteCSBK(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 // not changed.
 func rewriteDataHeader(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 	h := pdu.DataHeaderBytes(b)
-	if !h.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) {
+	if h.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) != nil {
 		return b, false
 	}
 	h.SetGroup(pkt.GroupCall)

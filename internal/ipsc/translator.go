@@ -584,7 +584,7 @@ func (ss *streamState) lastDataBlock(data [33]byte) bool {
 
 // DataCall follows the data packet of one call to find its last block.
 type DataCall struct {
-	asm packet.Assembler
+	asm *packet.Assembler
 	// pHead is set after a first header with the proprietary SAP, which a
 	// P_HEAD should follow.
 	pHead bool
@@ -595,7 +595,7 @@ type DataCall struct {
 func (c *DataCall) headerless(dataType enums.DataType) bool {
 	switch dataType { //nolint:exhaustive // only data blocks belong to a packet
 	case enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
-		return !c.asm.InProgress()
+		return c.asm == nil || !c.asm.InProgress()
 	}
 	return false
 }
@@ -615,6 +615,9 @@ func DataBurstEndsCall(c *DataCall, data [33]byte) bool {
 	b, err := layer2.NewBurstFromBytes(data)
 	if err != nil {
 		return false
+	}
+	if c.asm == nil {
+		c.asm = packet.NewAssembler(127)
 	}
 	pHead := c.pHead
 	c.pHead = false
@@ -802,7 +805,7 @@ func embByte(burst *layer2.Burst, pos int) byte {
 	if burst.HasEmbeddedSignalling() && !burst.EmbeddedSignalling.FEC.Uncorrectable {
 		emb = burst.EmbeddedSignalling
 	}
-	info := emb.Info()
+	info, _ := emb.Info()
 	info.SetPI(false)
 	return byte(info)
 }
@@ -843,7 +846,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt mmdvm.Packet, ss *streamState) []by
 
 	// Extract the 19-byte FEC-decoded AMBE payload from the 3 vocoder frames
 	frames, _ := t.burst.AMBEFrames()
-	ambeData := vocoder.PackAMBEVoice(frames)
+	ambeData, _ := vocoder.PackAMBEVoice(frames)
 
 	// Determine slot type byte
 	slotBurst := ipscBurstSlot2

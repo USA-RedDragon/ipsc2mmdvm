@@ -2,6 +2,7 @@ package ipsc
 
 import (
 	"encoding/hex"
+	"slices"
 	"testing"
 	"time"
 
@@ -570,7 +571,10 @@ func TestRigBadFramesAreSilence(t *testing.T) {
 	for pos, bad := range flagged {
 		p, _ := hex.DecodeString(ipsc[pos+2])
 		frames := vocoder.UnpackAMBEVoice([19]byte(p[33:52]))
-		ambe := vocoder.PackAMBEVoiceFlags(frames, bad)
+		ambe, err := vocoder.PackAMBEVoiceFlags(frames, bad)
+		if err != nil {
+			t.Fatal(err)
+		}
 		copy(p[33:52], ambe[:])
 		ipsc[pos+2] = hex.EncodeToString(p)
 	}
@@ -601,14 +605,15 @@ func TestRigBadFramesAreSilence(t *testing.T) {
 
 // TestRigSACKResponseToMMDVM uses a selective retry response from 3140598
 // to 3191868 on TS2 that the XPR 8400 relayed: a response header and one
-// C_RDATA block asking again for blocks 1, 4 and 6 of an 8-block packet.
-// The bursts sent to MMDVM must decode to the same response with dmrgo.
+// C_RDATA block asking again for three blocks of an 8-block packet. The
+// bursts sent to MMDVM must decode to the same response with dmrgo.
 func TestRigSACKResponseToMMDVM(t *testing.T) {
 	t.Parallel()
-	got := translateRig(t, []string{
+	sack := []string{
 		"840004ce2e742febf630b43c0100006bc22080ddd7133445d8f20000000006c0000a800a006001a030b43c2febf681800a520076496f",
 		"840004ce2e742febf630b43c0100006bc260805ed7143445dad20000000007c0000a800a0060b5ffffffffffffff0f341fd70077497f",
-	})
+	}
+	got := translateRig(t, sack)
 	if len(got) != 2 {
 		t.Fatalf("got %d packets, want 2", len(got))
 	}
@@ -636,8 +641,16 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if retry := rd.RetryBlocks(); len(retry) != 3 || retry[0] != 1 || retry[1] != 4 || retry[2] != 6 {
-		t.Errorf("retry blocks %v, want [1 4 6]", retry)
+	in, err := hex.DecodeString(sack[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := packet.DecodeResponseData(&pdu.Rate12Data{Data: [12]byte(in[38:50])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry := rd.RetryBlocks(); len(retry) != 3 || !slices.Equal(retry, want.RetryBlocks()) {
+		t.Errorf("retry blocks %v, want %v", retry, want.RetryBlocks())
 	}
 	for i, p := range got {
 		if p.Src != 3140598 || p.Dst != 3191868 || p.GroupCall || !p.Slot || p.FrameType != mmdvmFrameTypeDataSync {
