@@ -62,7 +62,7 @@ func TestGoldenXPR8400Control(t *testing.T) {
 			bodies = append(bodies, b)
 		}
 	}
-	var got []string
+	got := make([]string, 0, len(bodies)+1)
 	for _, b := range bodies {
 		data := signPacket(t, mustDecodeHex(t, b), goldenControlKey)
 		if _, err := s.handlePacket(data, addr); err != nil && !errors.Is(err, ErrPacketIgnored) {

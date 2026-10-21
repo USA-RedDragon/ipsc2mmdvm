@@ -693,7 +693,7 @@ func TestMBCContinuationPassesWithoutCRC(t *testing.T) {
 	if len(got) != 1 || got[0].Value != uint8(enums.DataTypeMBCContinuation) {
 		t.Fatalf("got %+v, want the MBC continuation", got)
 	}
-	if p, _ := layer2.RawBurst(got[0].Burst).BPTCPayload(); p != [12]byte(d[38:50]) {
+	if p, _ := got[0].Burst.BPTCPayload(); p != [12]byte(d[38:50]) {
 		t.Errorf("payload %x, want %x", p, d[38:50])
 	}
 }
@@ -818,7 +818,7 @@ func TestLateEntryNeverMixesSuperframes(t *testing.T) {
 		"9d3b07147149793a31b2bcd2f0c751d18001eae3805c3f7964072cffc3606f58eb",
 	}
 	var e []byte
-	for _, pos := range []int{burstA, burstB, burstC, burstD, burstF, burstE} {
+	for i, pos := range []int{burstA, burstB, burstC, burstD, burstF, burstE} {
 		b := pos
 		if pos == burstF {
 			b = burstB
@@ -830,7 +830,7 @@ func TestLateEntryNeverMixesSuperframes(t *testing.T) {
 		}
 		out := tr.TranslateToIPSC(dmrd.Data{
 			Source: 3191868, Destination: 91, Private: false, Slot: enums.Slot2,
-			Frame: ft, Value: uint8(pos), Stream: 81, Burst: [33]byte(w),
+			Frame: ft, Value: uint8(pos), Stream: 81, Seq: uint8(i), Burst: [33]byte(w), //nolint:gosec // small
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %c: got %d packets", 'A'+pos, len(out))

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"sync"
 	"time"
@@ -231,31 +230,24 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 	defer t.logs.Unlock(&t.mu)
 
 	streamID := pkt.Stream
-	if streamID > math.MaxUint32 {
-		return nil
-	}
 
 	now := t.now()
 	t.pruneLocked(now)
 
-	ss, existed := t.streamLocked(uint32(streamID))
+	ss, existed := t.streamLocked(streamID)
 	ss.lastSeen = now
 	ss.last = pkt
 	defer func(id uint32) {
 		if !existed && len(results) == 0 {
 			t.removeStreamLocked(id)
 		}
-	}(uint32(streamID))
+	}(streamID)
 
 	frameType := pkt.Frame
 	dtypeOrVSeq := pkt.Value
 
 	switch frameType {
 	case dmrd.FrameDataSync:
-		if dtypeOrVSeq > 255 {
-			t.logs.Debug("IPSCTranslator: invalid dtype", "dtype", dtypeOrVSeq)
-			return nil
-		}
 		if ss.headerless(enums.DataType(dtypeOrVSeq)) {
 			t.logs.Debug("IPSCTranslator: dropping data block outside a data packet",
 				"dtype", enums.DataType(dtypeOrVSeq).String())
@@ -276,7 +268,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			ss.firstPacket = false
 		case enums.DataTypeTerminatorWithLC:
 			results = appendPacket(results, t.buildVoiceTerminator(pkt, ss, fullLCFromBurst(&t.logs, pkt, enums.DataTypeTerminatorWithLC)))
-			t.removeStreamLocked(uint32(streamID))
+			t.removeStreamLocked(streamID)
 		case enums.DataTypeRate34:
 			last := ss.lastDataBlock(pkt.Burst)
 			// SetRawBurst drops the FEC result of the block, so it is checked
@@ -284,14 +276,14 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			if _, res := pkt.Burst.Rate34Payload(); res.Uncorrectable {
 				t.logs.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
 				if last {
-					results = t.endDataCall(pkt, ss, uint32(streamID))
+					results = t.endDataCall(pkt, ss, streamID)
 				}
 				break
 			}
 			results = appendPacket(results, t.buildIPSCRate34Packet(pkt, ss, last))
 			ss.firstPacket = false
 			if last {
-				t.removeStreamLocked(uint32(streamID))
+				t.removeStreamLocked(streamID)
 			}
 		case enums.DataTypeCSBK, enums.DataTypePIHeader,
 			enums.DataTypeDataHeader, enums.DataTypeRate12,
@@ -310,14 +302,14 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 				t.logs.Debug("IPSCTranslator: dropping data burst with no IPSC encoding or uncorrectable BPTC errors",
 					"dtype", enums.DataType(dtypeOrVSeq).String())
 				if last {
-					results = t.endDataCall(pkt, ss, uint32(streamID))
+					results = t.endDataCall(pkt, ss, streamID)
 				}
 				break
 			}
 			results = appendPacket(results, t.buildIPSCDataPacket(pkt, ss, burstType, payload, last))
 			ss.firstPacket = false
 			if last {
-				t.removeStreamLocked(uint32(streamID))
+				t.removeStreamLocked(streamID)
 			}
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
 			return nil
@@ -333,7 +325,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			results = append(results, data)
 		}
 
-	default:
+	case dmrd.FrameReserved:
 		t.logs.Debug("IPSCTranslator: unknown frame type", "frameType", frameType)
 		return nil
 	}
@@ -386,14 +378,11 @@ func (t *IPSCTranslator) streamLocked(streamID uint32) (*streamState, bool) {
 func (t *IPSCTranslator) EndDataCall(pkt dmrd.Data) [][]byte {
 	t.mu.Lock()
 	defer t.logs.Unlock(&t.mu)
-	if pkt.Stream > math.MaxUint32 {
-		return nil
-	}
-	ss, ok := t.streams[uint32(pkt.Stream)]
+	ss, ok := t.streams[pkt.Stream]
 	if !ok {
 		return nil
 	}
-	results := t.endDataCall(pkt, ss, uint32(pkt.Stream))
+	results := t.endDataCall(pkt, ss, pkt.Stream)
 	if t.metrics != nil && len(results) > 0 {
 		t.metrics.TranslatorPackets.WithLabelValues("mmdvm_to_ipsc").Add(float64(len(results)))
 	}
@@ -444,6 +433,7 @@ func isVoiceCallPacket(pkt dmrd.Data) bool {
 		return true
 	case dmrd.FrameDataSync:
 		return pkt.Value == uint8(enums.DataTypeVoiceLCHeader) || pkt.Value == uint8(enums.DataTypePIHeader)
+	case dmrd.FrameReserved:
 	}
 	return false
 }
@@ -880,8 +870,8 @@ func constructLC(src, dst uint32, groupCall bool) pdu.LCBytes {
 	var lc pdu.LCBytes
 	lc.SetGroup(groupCall)
 	lc.SetFID(enums.FIDStandardized)
-	lc.SetServiceOptions(0x20) // the default reserved bit
-	lc.SetAddresses(lcAddress(dst), lcAddress(src))
+	lc.SetServiceOptions(0x20)                          // the default reserved bit
+	_ = lc.SetAddresses(lcAddress(dst), lcAddress(src)) // lcAddress keeps 24 bits
 	return lc
 }
 

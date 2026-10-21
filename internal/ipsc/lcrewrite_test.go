@@ -249,7 +249,7 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 			continue
 		}
 		bursts = append(bursts, out.Burst)
-		raw := layer2.RawBurst(out.Burst)
+		raw := out.Burst
 		emb := raw.EMB()
 		if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != 1 || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 			t.Fatalf("burst %c EMB %s", 'A'+vseq, emb.String())
@@ -338,8 +338,7 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 		if again, err := vb.Encode(); err != nil || again != o.Burst {
 			t.Fatalf("burst %c does not encode back to the rewritten bytes: %v", 'A'+vseq, err)
 		}
-		raw := layer2.RawBurst(o.Burst)
-		fragments[vseq-1] = raw.EmbeddedData()
+		fragments[vseq-1] = o.Burst.EmbeddedData()
 	}
 	lc := layer2.DecodeEmbeddedFullLinkControl(fragments, true)
 	if target, source, ok := lc.Addresses(); lc.FEC.Uncorrectable || !ok || target != 9 || source != 1234 {
@@ -524,7 +523,7 @@ func voiceWithEmbeddedLC(vseq uint, fragments [4][4]byte) dmrd.Data {
 	if pos > burstE {
 		return p
 	}
-	raw := layer2.RawBurst(p.Burst)
+	raw := p.Burst
 	raw.SetEmbeddedData(fragments[pos-burstB])
 	p.Burst = raw
 	return p
@@ -639,7 +638,7 @@ func withUncorrectableEMB(t *testing.T, v dmrd.Data) dmrd.Data {
 			}
 			d[bit/8] ^= 1 << (7 - bit%8)
 		}
-		if res := (*layer2.RawBurst)(&d).EMB().FEC; res.Uncorrectable {
+		if res := d.EMB().FEC; res.Uncorrectable {
 			v.Burst = d
 			return v
 		}
@@ -680,7 +679,7 @@ func TestLCRewriterRebuildsEMB(t *testing.T) {
 			out := v
 			out.Destination = 9
 			r.Rewrite(v, &out)
-			emb := (*layer2.RawBurst)(&out.Burst).EMB()
+			emb := out.Burst.EMB()
 			if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != tc.wantCC || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 				t.Errorf("%s: burst %c EMB %s", tc.name, 'A'+vseq, emb.String())
 			}

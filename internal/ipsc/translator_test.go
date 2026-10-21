@@ -20,15 +20,6 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
-func rawEMB(t *testing.T, raw *layer2.RawBurst) pdu.EmbeddedSignalling {
-	t.Helper()
-	emb := raw.EMB()
-	if emb.FEC.Uncorrectable {
-		t.Fatal("expected a valid EMB")
-	}
-	return emb
-}
-
 func testFullLC(t *testing.T, lc [9]byte, dt enums.DataType) [12]byte {
 	t.Helper()
 	full, err := pdu.LCBytes(lc).Codeword(dt)
@@ -84,7 +75,7 @@ func TestCleanupStream(t *testing.T) {
 	pkt := makeTestMMDVMPacket(true, true, dmrd.FrameDataSync, 1) // VoiceLCHeader=1
 	tr.TranslateToIPSC(pkt)
 
-	streamID := uint32(pkt.Stream) //nolint:gosec // test value is within uint32 range
+	streamID := pkt.Stream
 
 	tr.mu.Lock()
 	_, exists := tr.streams[streamID]
@@ -1071,7 +1062,9 @@ func reservedSlotTypeBurst(tb testing.TB, dt enums.DataType) [33]byte {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	burst.SetSlotType(pdu.SlotType{DataType: dt})
+	if err := burst.SetSlotType(pdu.SlotType{DataType: dt}); err != nil {
+		tb.Fatal(err)
+	}
 	return burst
 }
 
@@ -1163,7 +1156,7 @@ func startDataPacket(t *testing.T, tr *IPSCTranslator, pkt dmrd.Data) {
 	t.Helper()
 	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
 		Group: !pkt.Private, SAP: enums.SAPIPBasedPacketData,
-		LLIDDestination: uint32(pkt.Destination), LLIDSource: uint32(pkt.Source), BlocksToFollow: 2, //nolint:gosec // test addresses are small
+		LLIDDestination: pkt.Destination, LLIDSource: pkt.Source, BlocksToFollow: 2, //nolint:gosec // test addresses are small
 	}}
 	burst, err := layer2.BuildBurst(&h, 0, layer2.SyncSourceBS)
 	if err != nil {
@@ -1241,7 +1234,7 @@ func TestTranslateToMMDVMDataBurstTypes(t *testing.T) {
 		if len(out) != 1 {
 			t.Fatalf("burst 0x%02X: expected 1 packet, got %d", burstType, len(out))
 		}
-		if out[0].Frame != dmrd.FrameDataSync || out[0].Value != uint8(burstType) {
+		if out[0].Frame != dmrd.FrameDataSync || out[0].Value != burstType {
 			t.Fatalf("burst 0x%02X: got frameType %d dtype %d", burstType, out[0].Frame, out[0].Value)
 		}
 	}
@@ -1762,7 +1755,7 @@ func TestCleanupStreamHandlesBothDirections(t *testing.T) {
 		t.Fatal("expected a header")
 	}
 	tr.CleanupStream(0x1234)
-	tr.CleanupStream(uint32(out[0].Stream)) //nolint:gosec // generated IDs fit in uint32
+	tr.CleanupStream(out[0].Stream) //nolint:gosec // generated IDs fit in uint32
 	tr.CleanupStream(0xDEAD)
 	if len(tr.streams) != 0 || len(tr.reverseStreams) != 0 {
 		t.Fatalf("expected no streams, got %d/%d", len(tr.streams), len(tr.reverseStreams))
@@ -2050,7 +2043,7 @@ func TestTranslateToMMDVMUsesOwnColorCodeAndClearPI(t *testing.T) {
 		if len(out) != 1 {
 			t.Fatalf("seq %d: expected 1 packet, got %d", seq, len(out))
 		}
-		raw := layer2.RawBurst(out[0].Burst)
+		raw := out[0].Burst
 		emb := raw.EMB()
 		if emb.FEC.Uncorrectable || emb.ColorCode != 5 || emb.PreemptionAndPowerControlIndicator {
 			t.Fatalf("seq %d: EMB %s, want color code 5 and PI clear", seq, emb.String())

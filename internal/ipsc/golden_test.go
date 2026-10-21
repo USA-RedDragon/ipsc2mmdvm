@@ -121,7 +121,7 @@ func TestGoldenXPR8400(t *testing.T) {
 		got := hex.EncodeToString(sum[:])
 		fmt.Fprintf(&update, "%s %s\n", g.name, got)
 		if dump != "" {
-			if err := os.WriteFile(dump+"/"+g.name+".txt", out, 0o600); err != nil {
+			if err := os.WriteFile(dump+"/"+g.name+".txt", out, 0o600); err != nil { //nolint:gosec // a test dump directory the developer names
 				t.Fatal(err)
 			}
 		}

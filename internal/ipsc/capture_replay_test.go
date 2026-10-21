@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
-	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
@@ -333,7 +332,7 @@ func TestIPSCEmbeddedSignallingFromCapture(t *testing.T) {
 			continue
 		}
 		pos := int(out[0].Value) //nolint:gosec // a voice sequence is 1-5
-		raw := layer2.RawBurst(out[0].Burst)
+		raw := out[0].Burst
 		emb := raw.EMB()
 		if got := emb.LCSS; got != positionLCSS(pos) {
 			t.Errorf("packet %d burst %c: LCSS %d, want %d", i, 'A'+pos, got, positionLCSS(pos))

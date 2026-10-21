@@ -466,11 +466,12 @@ func (h *MMDVMClient) handleSentLogin(cmd dmrd.Command, data []byte) {
 }
 
 func (h *MMDVMClient) handleSentAuth(cmd dmrd.Command) {
-	if cmd == dmrd.CommandRPTACK {
+	switch cmd { //nolint:exhaustive // other messages leave the handshake as it is
+	case dmrd.CommandRPTACK:
 		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
 		h.setState(STATE_SENT_RPTC)
 		h.sendRPTC()
-	} else if cmd == dmrd.CommandMSTNAK {
+	case dmrd.CommandMSTNAK:
 		slog.Warn("Password rejected", "network", h.cfg.Name)
 		if h.metrics != nil {
 			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
@@ -480,7 +481,8 @@ func (h *MMDVMClient) handleSentAuth(cmd dmrd.Command) {
 }
 
 func (h *MMDVMClient) handleSentRPTC(cmd dmrd.Command) {
-	if cmd == dmrd.CommandRPTACK {
+	switch cmd { //nolint:exhaustive // other messages leave the handshake as it is
+	case dmrd.CommandRPTACK:
 		slog.Info("Config accepted, logged in", "network", h.cfg.Name)
 		h.lastHeard.Store(time.Now().UnixNano())
 		h.setState(STATE_READY)
@@ -488,7 +490,7 @@ func (h *MMDVMClient) handleSentRPTC(cmd dmrd.Command) {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
 		}
 		h.sendPing()
-	} else if cmd == dmrd.CommandMSTNAK {
+	case dmrd.CommandMSTNAK:
 		slog.Warn("Configuration rejected, logging in again", "network", h.cfg.Name)
 		h.setState(STATE_SENT_LOGIN)
 	}

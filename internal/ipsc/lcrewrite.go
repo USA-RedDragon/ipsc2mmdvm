@@ -141,7 +141,7 @@ func (st *lcStream) swap() {
 // carries the rewritten LC. Unlike DMRGateway, an embedded LC that failed to
 // decode is replaced rather than passed through.
 func (st *lcStream) processEmbedded(data *layer2.RawBurst, pos int) {
-	raw := layer2.RawBurst(*data)
+	raw := *data
 	emb := raw.EMB()
 	st.received[st.writeNum].add(raw.EmbeddedData(), emb, !emb.FEC.Uncorrectable, pos, st.lastPos)
 
@@ -191,7 +191,7 @@ func (r *LCRewriter) Rewrite(orig dmrd.Data, pkt *dmrd.Data) {
 			return
 		}
 		lc := rewrittenLC(&r.logs, pkt, dataType)
-		(*layer2.RawBurst)(&pkt.Burst).SetBPTCPayload(fullLCCodeword(lc, dataType))
+		pkt.Burst.SetBPTCPayload(fullLCCodeword(lc, dataType))
 		if dataType == enums.DataTypeTerminatorWithLC {
 			delete(r.streams, pkt.Stream)
 			return
@@ -212,7 +212,7 @@ func (r *LCRewriter) Rewrite(orig dmrd.Data, pkt *dmrd.Data) {
 		if !ok {
 			st = &lcStream{lc: constructLC(pkt.Source, pkt.Destination, !pkt.Private)}
 			st.embedded = layer2.EncodeEmbeddedLC(st.lc)
-			if emb := layer2.RawBurst(pkt.Burst).EMB(); !emb.FEC.Uncorrectable {
+			if emb := pkt.Burst.EMB(); !emb.FEC.Uncorrectable {
 				st.colorCode = emb.ColorCode
 			}
 			r.streams[pkt.Stream] = st
@@ -225,6 +225,7 @@ func (r *LCRewriter) Rewrite(orig dmrd.Data, pkt *dmrd.Data) {
 			st.processEmbedded(&pkt.Burst, pos)
 		}
 		st.lastPos = pos
+	case dmrd.FrameReserved:
 	}
 }
 
@@ -253,7 +254,7 @@ func rewriteDataBlock(pkt *dmrd.Data, dataType enums.DataType, edit func(b [12]b
 	if b, ok = edit(b, pkt); !ok {
 		return
 	}
-	(*layer2.RawBurst)(&pkt.Burst).SetBPTCPayload(b)
+	pkt.Burst.SetBPTCPayload(b)
 }
 
 // rewriteCSBK sets the addresses of a CSBK, as DMRGateway's
@@ -307,11 +308,11 @@ func rewrittenLC(logs *logging.Queue, pkt *dmrd.Data, dataType enums.DataType) p
 		flco = enums.FLCOGroupVoiceChannelUser
 	}
 	if lc.FLCO() != flco {
-		lc.SetFLCO(flco)
+		_ = lc.SetFLCO(flco) // a voice FLCO fits
 		lc.SetReserved(false)
 		lc.SetFID(enums.FIDStandardized)
 	}
-	lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source))
+	_ = lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) // lcAddress keeps 24 bits
 	return lc
 }
 
@@ -320,8 +321,7 @@ func rewrittenLC(logs *logging.Queue, pkt *dmrd.Data, dataType enums.DataType) p
 // matching LCSS, and PI clear. The burst's own EMB may be corrupt, so it
 // is not used.
 func putEmbeddedFragment(data *layer2.RawBurst, embedded [4][4]byte, pos int, colorCode enums.ColorCode) {
-	raw := (*layer2.RawBurst)(data)
-	raw.SetEmbeddedData(embedded[pos-burstB])
+	data.SetEmbeddedData(embedded[pos-burstB])
 	lcss, _ := voiceBurst(pos).LCSS()
-	raw.SetEMB(pdu.EmbeddedSignalling{ColorCode: colorCode, LCSS: lcss})
+	_ = data.SetEMB(pdu.EmbeddedSignalling{ColorCode: colorCode, LCSS: lcss}) // a 4-bit color code and the LCSS of a position fit
 }
