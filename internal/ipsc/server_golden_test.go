@@ -3,7 +3,6 @@ package ipsc
 import (
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"net"
 	"os"
 	"slices"
@@ -64,15 +63,11 @@ func TestGoldenXPR8400Control(t *testing.T) {
 	}
 	got := make([]string, 0, len(bodies)+1)
 	for _, b := range bodies {
-		data := signPacket(t, mustDecodeHex(t, b), goldenControlKey)
-		if _, err := s.handlePacket(data, addr); err != nil && !errors.Is(err, ErrPacketIgnored) {
-			t.Fatalf("%s: %v", b, err)
-		}
+		s.handlePacket(signPacket(t, mustDecodeHex(t, b), goldenControlKey), addr)
 		got = append(got, b+" -> "+readReplies(t, peer, addr))
 	}
-	if err := s.upsertPeer(0x0004ce2e, addr, 0x6a, [4]byte{0, 0, 0x80, 0xdc}); err != nil {
-		t.Fatal(err)
-	}
+	s.handlePacket(signPacket(t, mustDecodeHex(t, bodies[0]), goldenControlKey), addr)
+	readReplies(t, peer, addr)
 	s.deRegisterSelf()
 	got = append(got, "stop -> "+readReplies(t, peer, addr))
 	want := goldenControlReplies()
