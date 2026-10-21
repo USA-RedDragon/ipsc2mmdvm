@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,43 +67,6 @@ func TestParsePeerIDMaxValue(t *testing.T) {
 	}
 }
 
-func TestUint16ToBytes(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		val    uint16
-		expect [2]byte
-	}{
-		{0, [2]byte{0, 0}},
-		{1, [2]byte{0, 1}},
-		{0xFF00, [2]byte{0xFF, 0x00}},
-		{0xBEEF, [2]byte{0xBE, 0xEF}},
-	}
-	for _, tt := range tests {
-		b := uint16ToBytes(tt.val)
-		if b[0] != tt.expect[0] || b[1] != tt.expect[1] {
-			t.Errorf("uint16ToBytes(%d) = %v, want %v", tt.val, b, tt.expect)
-		}
-	}
-}
-
-func TestUint32ToBytes(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		val    uint32
-		expect [4]byte
-	}{
-		{0, [4]byte{0, 0, 0, 0}},
-		{1, [4]byte{0, 0, 0, 1}},
-		{0xDEADBEEF, [4]byte{0xDE, 0xAD, 0xBE, 0xEF}},
-	}
-	for _, tt := range tests {
-		b := uint32ToBytes(tt.val)
-		if b[0] != tt.expect[0] || b[1] != tt.expect[1] || b[2] != tt.expect[2] || b[3] != tt.expect[3] {
-			t.Errorf("uint32ToBytes(%d) = %v, want %v", tt.val, b, tt.expect)
-		}
-	}
-}
-
 func TestCloneUDPAddrNil(t *testing.T) {
 	t.Parallel()
 	if cloneUDPAddr(nil) != nil {
@@ -152,7 +116,7 @@ func TestAuth(t *testing.T) {
 	data = append(data, payload...)
 	data = append(data, hash...)
 
-	if !s.auth(data) {
+	if _, ok := s.verify(data); !ok {
 		t.Fatal("expected auth to pass")
 	}
 }
@@ -168,7 +132,7 @@ func TestAuthBadHash(t *testing.T) {
 	data = append(data, payload...)
 	data = append(data, bad...)
 
-	if s.auth(data) {
+	if _, ok := s.verify(data); ok {
 		t.Fatal("expected auth to fail with bad hash")
 	}
 }
@@ -215,9 +179,6 @@ func TestNewIPSCServerWithAuth(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 	if s.authKey == nil {
 		t.Fatal("expected non-nil auth key")
-	}
-	if len(s.authKey) != 20 {
-		t.Fatalf("expected 20-byte auth key, got %d", len(s.authKey))
 	}
 }
 
@@ -270,8 +231,8 @@ func TestBuildMasterRegisterReply(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 	reply := s.buildMasterRegisterReply()
 
-	if reply[0] != byte(PacketType_MasterRegisterReply) {
-		t.Fatalf("expected packet type 0x%02X, got 0x%02X", PacketType_MasterRegisterReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpRegisterReply) {
+		t.Fatalf("expected packet type 0x%02X, got 0x%02X", ipscpkt.OpRegisterReply, reply[0])
 	}
 
 	id := binary.BigEndian.Uint32(reply[1:5])
@@ -286,8 +247,8 @@ func TestBuildMasterAliveReply(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 	reply := s.buildMasterAliveReply()
 
-	if reply[0] != byte(PacketType_MasterAliveReply) {
-		t.Fatalf("expected packet type 0x%02X, got 0x%02X", PacketType_MasterAliveReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpAliveReply) {
+		t.Fatalf("expected packet type 0x%02X, got 0x%02X", ipscpkt.OpAliveReply, reply[0])
 	}
 }
 
@@ -297,8 +258,8 @@ func TestBuildPeerListReplyEmpty(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 	reply := s.buildPeerListReply()
 
-	if reply[0] != byte(PacketType_PeerListReply) {
-		t.Fatalf("expected packet type 0x%02X, got 0x%02X", PacketType_PeerListReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpPeerListReply) {
+		t.Fatalf("expected packet type 0x%02X, got 0x%02X", ipscpkt.OpPeerListReply, reply[0])
 	}
 
 	// Peer count should be 0
@@ -319,8 +280,8 @@ func TestBuildPeerListReplyWithPeers(t *testing.T) {
 	}
 
 	reply := s.buildPeerListReply()
-	if reply[0] != byte(PacketType_PeerListReply) {
-		t.Fatalf("expected packet type 0x%02X, got 0x%02X", PacketType_PeerListReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpPeerListReply) {
+		t.Fatalf("expected packet type 0x%02X, got 0x%02X", ipscpkt.OpPeerListReply, reply[0])
 	}
 
 	// Should have at least the peer entry bytes after the header
@@ -428,9 +389,9 @@ func TestHandlePacketReplyTypesIgnored(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
 
 	replyTypes := []byte{
-		byte(PacketType_MasterRegisterReply),
-		byte(PacketType_PeerListReply),
-		byte(PacketType_MasterAliveReply),
+		byte(ipscpkt.OpRegisterReply),
+		byte(ipscpkt.OpPeerListReply),
+		byte(ipscpkt.OpAliveReply),
 	}
 	for _, pt := range replyTypes {
 		data := make([]byte, 5)
@@ -457,31 +418,6 @@ func TestHandlePacketRepeaterStatusIgnored(t *testing.T) {
 		}
 		if _, err := s.handlePacket(data, addr); !errors.Is(err, ErrPacketIgnored) {
 			t.Fatalf("%s: got %v, want ErrPacketIgnored", h, err)
-		}
-	}
-}
-
-func TestPacketTypeValues(t *testing.T) {
-	t.Parallel()
-	// Verify the packet type constants match the IPSC protocol
-	expected := map[PacketType]byte{
-		PacketType_GroupVoice:            0x80,
-		PacketType_PrivateVoice:          0x81,
-		PacketType_GroupData:             0x83,
-		PacketType_PrivateData:           0x84,
-		PacketType_RepeaterWakeUp:        0x85,
-		PacketType_MasterRegisterRequest: 0x90,
-		PacketType_MasterRegisterReply:   0x91,
-		PacketType_PeerListRequest:       0x92,
-		PacketType_PeerListReply:         0x93,
-		PacketType_MasterAliveRequest:    0x96,
-		PacketType_MasterAliveReply:      0x97,
-		PacketType_DeRegisterRequest:     0x9A,
-		PacketType_DeRegisterReply:       0x9B,
-	}
-	for pt, val := range expected {
-		if byte(pt) != val {
-			t.Errorf("PacketType %v: expected 0x%02X, got 0x%02X", pt, val, byte(pt))
 		}
 	}
 }
@@ -584,7 +520,7 @@ func readUDP(t *testing.T, conn *net.UDPConn) []byte {
 }
 
 // makeControlPacket builds a minimal control packet (type + 4-byte peer ID).
-func makeControlPacket(packetType PacketType, peerID uint32) []byte {
+func makeControlPacket(packetType ipscpkt.Opcode, peerID uint32) []byte {
 	data := make([]byte, 5)
 	data[0] = byte(packetType)
 	binary.BigEndian.PutUint32(data[1:5], peerID)
@@ -592,7 +528,7 @@ func makeControlPacket(packetType PacketType, peerID uint32) []byte {
 }
 
 // makeControlPacketWithModeFlags builds a control packet with mode + flags.
-func makeControlPacketWithModeFlags(packetType PacketType, peerID uint32, mode byte, flags [4]byte) []byte {
+func makeControlPacketWithModeFlags(packetType ipscpkt.Opcode, peerID uint32, mode byte, flags [4]byte) []byte {
 	data := make([]byte, 10)
 	data[0] = byte(packetType)
 	binary.BigEndian.PutUint32(data[1:5], peerID)
@@ -693,7 +629,7 @@ func TestHandleMasterRegisterRequestFlow(t *testing.T) {
 
 	// Build a register request with mode and flags
 	peerID := uint32(55555)
-	reqData := makeControlPacketWithModeFlags(PacketType_MasterRegisterRequest, peerID, 0x6A, [4]byte{0, 0, 0, 0x0D})
+	reqData := makeControlPacketWithModeFlags(ipscpkt.OpRegisterRequest, peerID, 0x6A, [4]byte{0, 0, 0, 0x0D})
 	clientUDPAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -719,8 +655,8 @@ func TestHandleMasterRegisterRequestFlow(t *testing.T) {
 
 	// Verify reply was sent
 	reply := readUDP(t, client)
-	if reply[0] != byte(PacketType_MasterRegisterReply) {
-		t.Fatalf("expected register reply type 0x%02X, got 0x%02X", PacketType_MasterRegisterReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpRegisterReply) {
+		t.Fatalf("expected register reply type 0x%02X, got 0x%02X", ipscpkt.OpRegisterReply, reply[0])
 	}
 }
 
@@ -735,7 +671,7 @@ func TestHandleMasterRegisterRequestShortPacket(t *testing.T) {
 	defer client.Close()
 
 	// Short register request (no mode/flags) — should still work using defaults
-	reqData := makeControlPacket(PacketType_MasterRegisterRequest, 77777)
+	reqData := makeControlPacket(ipscpkt.OpRegisterRequest, 77777)
 	clientUDPAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -768,7 +704,7 @@ func TestHandleMasterAliveRequestFlow(t *testing.T) {
 	defer client.Close()
 
 	peerID := uint32(66666)
-	reqData := makeControlPacket(PacketType_MasterAliveRequest, peerID)
+	reqData := makeControlPacket(ipscpkt.OpAliveRequest, peerID)
 	aliveAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -792,8 +728,8 @@ func TestHandleMasterAliveRequestFlow(t *testing.T) {
 
 	// Verify reply was sent
 	reply := readUDP(t, client)
-	if reply[0] != byte(PacketType_MasterAliveReply) {
-		t.Fatalf("expected alive reply type 0x%02X, got 0x%02X", PacketType_MasterAliveReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpAliveReply) {
+		t.Fatalf("expected alive reply type 0x%02X, got 0x%02X", ipscpkt.OpAliveReply, reply[0])
 	}
 }
 
@@ -841,8 +777,8 @@ func TestKeepaliveRegistersPeerWithAuth(t *testing.T) {
 			if p.Addr.String() != peerAddr.String() || p.Mode != 0x6A || p.Flags != [4]byte{0x00, 0x00, 0x80, 0x5C} {
 				t.Errorf("%s: peer %v mode %02x flags % x", tc.name, p.Addr, p.Mode, p.Flags)
 			}
-			if reply := readUDP(t, peer); reply[0] != byte(PacketType_MasterAliveReply) {
-				t.Errorf("%s: reply type 0x%02X, want 0x%02X", tc.name, reply[0], PacketType_MasterAliveReply)
+			if reply := readUDP(t, peer); reply[0] != byte(ipscpkt.OpAliveReply) {
+				t.Errorf("%s: reply type 0x%02X, want 0x%02X", tc.name, reply[0], ipscpkt.OpAliveReply)
 			}
 		}
 		peer.Close()
@@ -859,7 +795,7 @@ func TestHandlePeerListRequestFlow(t *testing.T) {
 	}
 	defer client.Close()
 
-	reqData := makeControlPacket(PacketType_PeerListRequest, 88888)
+	reqData := makeControlPacket(ipscpkt.OpPeerListRequest, 88888)
 	peerListAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -871,8 +807,8 @@ func TestHandlePeerListRequestFlow(t *testing.T) {
 	}
 
 	reply := readUDP(t, client)
-	if reply[0] != byte(PacketType_PeerListReply) {
-		t.Fatalf("expected peer list reply type 0x%02X, got 0x%02X", PacketType_PeerListReply, reply[0])
+	if reply[0] != byte(ipscpkt.OpPeerListReply) {
+		t.Fatalf("expected peer list reply type 0x%02X, got 0x%02X", ipscpkt.OpPeerListReply, reply[0])
 	}
 }
 
@@ -887,7 +823,7 @@ func TestHandlePeerListRequestTooShort(t *testing.T) {
 	defer client.Close()
 
 	// Packet type + only 2 bytes (too short for peer ID)
-	data := []byte{byte(PacketType_PeerListRequest), 0x00, 0x01}
+	data := []byte{byte(ipscpkt.OpPeerListRequest), 0x00, 0x01}
 	shortAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -905,7 +841,7 @@ func TestHandleRepeaterWakeUp(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 3000}
 	peerID := uint32(11111)
-	data := makeControlPacket(PacketType_RepeaterWakeUp, peerID)
+	data := makeControlPacket(ipscpkt.OpWakeup, peerID)
 
 	registerPeer(t, s, peerID)
 	_, err := s.handlePacket(data, addr)
@@ -930,7 +866,7 @@ func TestHandleRepeaterWakeUpTooShort(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 3000}
-	data := []byte{byte(PacketType_RepeaterWakeUp), 0x00}
+	data := []byte{byte(ipscpkt.OpWakeup), 0x00}
 	_, err := s.handlePacket(data, addr)
 	if err == nil {
 		t.Fatal("expected error for too-short wake-up packet")
@@ -958,7 +894,7 @@ func TestHandleUserPacketCallsBurstHandler(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 	data := make([]byte, 54)
-	data[0] = byte(PacketType_GroupVoice)
+	data[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(data[1:5], 42)
 
 	registerPeer(t, s, 42)
@@ -971,7 +907,7 @@ func TestHandleUserPacketCallsBurstHandler(t *testing.T) {
 	if !received.Load() {
 		t.Fatal("burst handler was not called")
 	}
-	if gotType.Load() != uint32(PacketType_GroupVoice) {
+	if gotType.Load() != uint32(ipscpkt.OpGroupVoice) {
 		t.Fatalf("expected packet type 0x80, got 0x%02X", gotType.Load())
 	}
 
@@ -992,7 +928,7 @@ func TestHandleUserPacketNoBurstHandler(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 	data := make([]byte, 54)
-	data[0] = byte(PacketType_PrivateVoice)
+	data[0] = byte(ipscpkt.OpPrivateVoice)
 	binary.BigEndian.PutUint32(data[1:5], 43)
 
 	registerPeer(t, s, 43)
@@ -1005,11 +941,11 @@ func TestHandleUserPacketNoBurstHandler(t *testing.T) {
 func TestHandleUserPacketAllTypes(t *testing.T) {
 	t.Parallel()
 
-	types := []PacketType{
-		PacketType_GroupVoice,
-		PacketType_PrivateVoice,
-		PacketType_GroupData,
-		PacketType_PrivateData,
+	types := []ipscpkt.Opcode{
+		ipscpkt.OpGroupVoice,
+		ipscpkt.OpPrivateVoice,
+		ipscpkt.OpGroupData,
+		ipscpkt.OpPrivateData,
 	}
 
 	for _, pt := range types {
@@ -1035,7 +971,7 @@ func TestHandleUserPacketTooShortForPeerID(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
-	data := []byte{byte(PacketType_GroupVoice), 0x00, 0x01}
+	data := []byte{byte(ipscpkt.OpGroupVoice), 0x00, 0x01}
 
 	_, err := s.handlePacket(data, addr)
 	if err == nil {
@@ -1060,7 +996,7 @@ func TestHandleUserPacketBurstHandlerReceivesDataCopy(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 	data := make([]byte, 20)
-	data[0] = byte(PacketType_GroupVoice)
+	data[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(data[1:5], 42)
 	data[10] = 0xAA // sentinel value
 
@@ -1089,7 +1025,7 @@ func TestHandlePacketAuthEnabledTooShort(t *testing.T) {
 
 	// A packet with auth enabled but only 10 bytes (not enough for payload + hash)
 	data := make([]byte, 10)
-	data[0] = byte(PacketType_MasterRegisterRequest)
+	data[0] = byte(ipscpkt.OpRegisterRequest)
 	_, err := s.handlePacket(data, addr)
 	if err == nil {
 		t.Fatal("expected error for auth-enabled packet too short")
@@ -1103,7 +1039,7 @@ func TestHandlePacketAuthEnabledBadHash(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
 
 	// Valid-length packet but bad hash
-	payload := makeControlPacket(PacketType_MasterRegisterRequest, 12345)
+	payload := makeControlPacket(ipscpkt.OpRegisterRequest, 12345)
 	payload = append(payload, make([]byte, 10)...) // 10 zero bytes as bad hash
 	data := payload
 	_, err := s.handlePacket(data, addr)
@@ -1124,7 +1060,7 @@ func TestHandlePacketAuthEnabledSuccess(t *testing.T) {
 	defer client.Close()
 
 	peerID := uint32(99999)
-	payload := makeControlPacket(PacketType_MasterRegisterRequest, peerID)
+	payload := makeControlPacket(ipscpkt.OpRegisterRequest, peerID)
 	data := signPacket(t, payload, hexKey)
 
 	authAddr, ok := client.LocalAddr().(*net.UDPAddr)
@@ -1152,7 +1088,7 @@ func TestAuthDisabledAlwaysPasses(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
 
 	// When auth is disabled, no HMAC is needed
-	data := makeControlPacket(PacketType_RepeaterWakeUp, 12345)
+	data := makeControlPacket(ipscpkt.OpWakeup, 12345)
 	registerPeer(t, s, 12345)
 	_, err := s.handlePacket(data, addr)
 	if err != nil {
@@ -1447,7 +1383,7 @@ func TestHandlerLoopProcessesPackets(t *testing.T) {
 	defer client.Close()
 
 	peerID := uint32(22222)
-	data := makeControlPacket(PacketType_MasterRegisterRequest, peerID)
+	data := makeControlPacket(ipscpkt.OpRegisterRequest, peerID)
 	if _, err := client.Write(data); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -1549,7 +1485,7 @@ func TestHandlerLoopWithBurstHandler(t *testing.T) {
 	defer client.Close()
 
 	data := make([]byte, 54)
-	data[0] = byte(PacketType_GroupVoice)
+	data[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(data[1:5], 33333)
 
 	if _, err := client.Write(data); err != nil {
@@ -1581,7 +1517,7 @@ func TestBuildPeerListSkipsNilAddr(t *testing.T) {
 	peerList := s.buildPeerList()
 	// Both peers should be skipped (nil Addr, nil IP)
 	if len(peerList) != 0 {
-		t.Fatalf("expected empty peer list, got %d bytes", len(peerList))
+		t.Fatalf("expected empty peer list, got %d entries", len(peerList))
 	}
 }
 
@@ -1597,10 +1533,9 @@ func TestBuildPeerListMultiplePeers(t *testing.T) {
 		t.Fatalf("upsertPeer: %v", err)
 	}
 
-	peerList := s.buildPeerList()
 	// Each peer entry = 4 (ID) + 4 (IP) + 2 (port) + 1 (mode) = 11 bytes
-	if len(peerList) != 22 {
-		t.Fatalf("expected 22 bytes for 2 peers, got %d", len(peerList))
+	if reply := s.buildPeerListReply(); len(reply) != 7+22 {
+		t.Fatalf("expected 22 bytes for 2 peers, got %d", len(reply)-7)
 	}
 }
 
@@ -1642,35 +1577,35 @@ func TestFullRegistrationFlow(t *testing.T) {
 	peerID := uint32(44444)
 
 	// Step 1: Register
-	regReq := makeControlPacketWithModeFlags(PacketType_MasterRegisterRequest, peerID, 0x6A, [4]byte{0, 0, 0, 0x0D})
+	regReq := makeControlPacketWithModeFlags(ipscpkt.OpRegisterRequest, peerID, 0x6A, [4]byte{0, 0, 0, 0x0D})
 	_, err = s.handlePacket(regReq, clientAddr)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	regReply := readUDP(t, client)
-	if regReply[0] != byte(PacketType_MasterRegisterReply) {
+	if regReply[0] != byte(ipscpkt.OpRegisterReply) {
 		t.Fatal("expected register reply")
 	}
 
 	// Step 2: Keep-alive
-	aliveReq := makeControlPacket(PacketType_MasterAliveRequest, peerID)
+	aliveReq := makeControlPacket(ipscpkt.OpAliveRequest, peerID)
 	_, err = s.handlePacket(aliveReq, clientAddr)
 	if err != nil {
 		t.Fatalf("alive: %v", err)
 	}
 	aliveReply := readUDP(t, client)
-	if aliveReply[0] != byte(PacketType_MasterAliveReply) {
+	if aliveReply[0] != byte(ipscpkt.OpAliveReply) {
 		t.Fatal("expected alive reply")
 	}
 
 	// Step 3: Peer list
-	peerListReq := makeControlPacket(PacketType_PeerListRequest, peerID)
+	peerListReq := makeControlPacket(ipscpkt.OpPeerListRequest, peerID)
 	_, err = s.handlePacket(peerListReq, clientAddr)
 	if err != nil {
 		t.Fatalf("peer list: %v", err)
 	}
 	peerListReply := readUDP(t, client)
-	if peerListReply[0] != byte(PacketType_PeerListReply) {
+	if peerListReply[0] != byte(ipscpkt.OpPeerListReply) {
 		t.Fatal("expected peer list reply")
 	}
 
@@ -1719,7 +1654,7 @@ func TestHandleMasterAliveRequestTooShort(t *testing.T) {
 	}
 	defer client.Close()
 
-	data := []byte{byte(PacketType_MasterAliveRequest), 0x00, 0x01}
+	data := []byte{byte(ipscpkt.OpAliveRequest), 0x00, 0x01}
 	aliveShortAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -1742,7 +1677,7 @@ func TestHandleMasterRegisterRequestTooShort(t *testing.T) {
 	}
 	defer client.Close()
 
-	data := []byte{byte(PacketType_MasterRegisterRequest), 0x00}
+	data := []byte{byte(ipscpkt.OpRegisterRequest), 0x00}
 	regShortAddr, ok := client.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
@@ -1761,7 +1696,7 @@ func TestHandlePacketReturnsPacket(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
-	data := makeControlPacket(PacketType_RepeaterWakeUp, 12345)
+	data := makeControlPacket(ipscpkt.OpWakeup, 12345)
 	registerPeer(t, s, 12345)
 	pkt, err := s.handlePacket(data, addr)
 	if err != nil {
@@ -1784,7 +1719,7 @@ func TestHandlePacketStripsAuthHash(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
-	payload := makeControlPacket(PacketType_RepeaterWakeUp, 12345)
+	payload := makeControlPacket(ipscpkt.OpWakeup, 12345)
 	data := signPacket(t, payload, hexKey)
 
 	registerPeer(t, s, 12345)
@@ -1806,7 +1741,7 @@ func TestErrPacketIgnoredIsSentinel(t *testing.T) {
 	s := NewIPSCServer(cfg, nil)
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999}
 
-	data := makeControlPacket(PacketType_MasterRegisterReply, 12345)
+	data := makeControlPacket(ipscpkt.OpRegisterReply, 12345)
 	_, err := s.handlePacket(data, addr)
 	if !errors.Is(err, ErrPacketIgnored) {
 		t.Fatalf("expected ErrPacketIgnored, got %v", err)
@@ -1846,7 +1781,7 @@ func TestHandlerDeliversBurstsInOrder(t *testing.T) {
 		batch := min(window, total-sent)
 		for range batch {
 			data := make([]byte, 54)
-			data[0] = byte(PacketType_GroupVoice)
+			data[0] = byte(ipscpkt.OpGroupVoice)
 			binary.BigEndian.PutUint32(data[1:5], 1)
 			binary.BigEndian.PutUint32(data[20:24], uint32(sent))
 			if _, err := client.Write(data); err != nil {
@@ -1892,15 +1827,15 @@ func TestSlowBurstHandlerDoesNotBlockKeepalives(t *testing.T) {
 	defer client.Close()
 
 	const peerID = 4242
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterRegisterRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpRegisterRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterRegisterReply) {
+	if reply := readUDP(t, client); reply[0] != byte(ipscpkt.OpRegisterReply) {
 		t.Fatalf("expected register reply, got 0x%02X", reply[0])
 	}
 
 	voice := make([]byte, 54)
-	voice[0] = byte(PacketType_GroupVoice)
+	voice[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(voice[1:5], peerID)
 	if _, err := client.WriteToUDP(voice, srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
@@ -1911,10 +1846,10 @@ func TestSlowBurstHandlerDoesNotBlockKeepalives(t *testing.T) {
 		t.Fatal("burst handler was not called")
 	}
 
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterAliveRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpAliveRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterAliveReply) {
+	if reply := readUDP(t, client); reply[0] != byte(ipscpkt.OpAliveReply) {
 		t.Fatalf("expected alive reply, got 0x%02X", reply[0])
 	}
 
@@ -1931,7 +1866,7 @@ func TestBurstQueueFullDropsInsteadOfBlocking(t *testing.T) {
 
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 	data := make([]byte, 54)
-	data[0] = byte(PacketType_GroupVoice)
+	data[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(data[1:5], 42)
 
 	registerPeer(t, s, 42)
@@ -1961,7 +1896,7 @@ func TestPeersRegisteredGaugeCountsOnlyRegisteredPeers(t *testing.T) {
 	s := NewIPSCServer(testConfig(false, ""), m)
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1234}
 
-	_, _ = s.handlePacket(makeControlPacket(PacketType_RepeaterWakeUp, 42), addr)
+	_, _ = s.handlePacket(makeControlPacket(ipscpkt.OpWakeup, 42), addr)
 	registerPeer(t, s, 7)
 
 	if got := gaugeValue(t, m.IPSCPeersRegistered); got != 1 {
@@ -1993,7 +1928,7 @@ func expectNoUDP(t *testing.T, conn *net.UDPConn) {
 
 func makeVoicePacket(peerID, marker uint32) []byte {
 	data := make([]byte, 54)
-	data[0] = byte(PacketType_GroupVoice)
+	data[0] = byte(ipscpkt.OpGroupVoice)
 	binary.BigEndian.PutUint32(data[1:5], peerID)
 	binary.BigEndian.PutUint32(data[20:24], marker)
 	return data
@@ -2013,7 +1948,7 @@ func TestUnregisteredPeerCreatesNoPeerAndGetsNoTraffic(t *testing.T) {
 		t.Fatal("expected *net.UDPAddr from LocalAddr")
 	}
 
-	_, _ = s.handlePacket(makeControlPacket(PacketType_RepeaterWakeUp, 42), victimAddr)
+	_, _ = s.handlePacket(makeControlPacket(ipscpkt.OpWakeup, 42), victimAddr)
 	_, _ = s.handlePacket(makeVoicePacket(43, 0), victimAddr)
 
 	if n := s.peerCount(); n != 0 {
@@ -2073,7 +2008,7 @@ func TestUnregisteredPeerVoiceIsNotBridged(t *testing.T) {
 	if _, err := client.WriteToUDP(makeVoicePacket(peerID, 1), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterRegisterRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpRegisterRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	readUDP(t, client)
@@ -2113,11 +2048,11 @@ func TestUnregisteredPeerKeepaliveGetsNoReply(t *testing.T) {
 	defer client.Close()
 
 	const peerID = 88
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterAliveRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpAliveRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	expectNoUDP(t, client)
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_PeerListRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpPeerListRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	expectNoUDP(t, client)
@@ -2125,16 +2060,16 @@ func TestUnregisteredPeerKeepaliveGetsNoReply(t *testing.T) {
 		t.Fatalf("expected no peers, got %d", n)
 	}
 
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterRegisterRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpRegisterRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterRegisterReply) {
+	if reply := readUDP(t, client); reply[0] != byte(ipscpkt.OpRegisterReply) {
 		t.Fatalf("expected register reply, got 0x%02X", reply[0])
 	}
-	if _, err := client.WriteToUDP(makeControlPacket(PacketType_MasterAliveRequest, peerID), srvAddr); err != nil {
+	if _, err := client.WriteToUDP(makeControlPacket(ipscpkt.OpAliveRequest, peerID), srvAddr); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if reply := readUDP(t, client); reply[0] != byte(PacketType_MasterAliveReply) {
+	if reply := readUDP(t, client); reply[0] != byte(ipscpkt.OpAliveReply) {
 		t.Fatalf("expected alive reply, got 0x%02X", reply[0])
 	}
 
@@ -2242,7 +2177,7 @@ func TestExpirePeersRemovesSilentPeers(t *testing.T) {
 	}
 
 	reply := readUDP(t, live)
-	if reply[0] != byte(PacketType_PeerListReply) {
+	if reply[0] != byte(ipscpkt.OpPeerListReply) {
 		t.Fatalf("expected peer list broadcast, got 0x%02X", reply[0])
 	}
 	if n := binary.BigEndian.Uint16(reply[5:7]); n != 11 {
@@ -2466,7 +2401,7 @@ func TestDeRegisterRequestRemovesPeer(t *testing.T) {
 	if got := gaugeValue(t, m.IPSCPeersRegistered); got != 1 {
 		t.Fatalf("registered peers gauge is %v, want 1", got)
 	}
-	if list := s.buildPeerList(); len(list) != 11 || binary.BigEndian.Uint32(list) != 7 {
+	if list := s.buildPeerList(); len(list) != 1 || list[0].ID != 7 {
 		t.Fatalf("peer list %x, want only peer 7", list)
 	}
 	if got, want := readUDP(t, left), s.buildPeerListReply(); hex.EncodeToString(got) != hex.EncodeToString(want) {

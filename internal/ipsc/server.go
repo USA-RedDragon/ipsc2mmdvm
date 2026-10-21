@@ -2,10 +2,6 @@ package ipsc
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha1" //nolint:gosec
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/ipsc/auth"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/vishvananda/netlink"
@@ -27,7 +25,8 @@ type IPSCServer struct {
 	mu      sync.RWMutex
 
 	localID  uint32
-	authKey  []byte // 20-byte HMAC key decoded from hex
+	authMu   sync.Mutex
+	authKey  *auth.Key // signs and checks packets when authentication is on; guarded by authMu
 	peers    map[uint32]*Peer
 	lastSend map[uint32]time.Time
 	pace     time.Duration                   // minimum gap between packets to one peer
@@ -46,6 +45,11 @@ type IPSCServer struct {
 
 type Packet struct {
 	data []byte
+}
+
+// opcode returns octet 0 of data, the IPSC opcode.
+func opcode(data []byte) ipscpkt.Opcode {
+	return ipscpkt.Opcode(data[0])
 }
 
 type burst struct {
@@ -67,34 +71,6 @@ type Peer struct {
 	KeepAliveReceived  uint64
 	RegistrationStatus bool
 }
-
-type PacketType byte
-
-const (
-	PacketType_GroupVoice            PacketType = 0x80
-	PacketType_PrivateVoice          PacketType = 0x81
-	PacketType_GroupData             PacketType = 0x83
-	PacketType_PrivateData           PacketType = 0x84
-	PacketType_RepeaterWakeUp        PacketType = 0x85
-	PacketType_MasterRegisterRequest PacketType = 0x90
-	PacketType_MasterRegisterReply   PacketType = 0x91
-	PacketType_PeerListRequest       PacketType = 0x92
-	PacketType_PeerListReply         PacketType = 0x93
-	PacketType_MasterAliveRequest    PacketType = 0x96
-	PacketType_MasterAliveReply      PacketType = 0x97
-	PacketType_DeRegisterRequest     PacketType = 0x9A
-	PacketType_DeRegisterReply       PacketType = 0x9B
-	// PacketType_RepeaterStatus is sent by an XPR 8400 right after each
-	// master register or keepalive reply: the peer ID and four more bytes,
-	// zero or a value like 56 63 11 00. Its meaning is unknown and it needs
-	// no reply.
-	PacketType_RepeaterStatus PacketType = 0xF0
-)
-
-var (
-	//nolint:gochecknoglobals
-	ipscVersion = []byte{0x04, 0x02, 0x04, 0x01}
-)
 
 var (
 	ErrPacketIgnored    = errors.New("packet ignored")
@@ -121,21 +97,13 @@ const (
 )
 
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
-	// Decode the auth key from hex string to raw bytes.
-	// DMRlink left-pads the hex key to 40 characters (20 bytes) with zeros.
-	var authKey []byte
+	var authKey *auth.Key
 	if cfg.IPSC.Auth.Enabled && cfg.IPSC.Auth.Key != "" {
-		hexKey := cfg.IPSC.Auth.Key
-		// Left-pad with zeros to 40 hex characters (20 bytes)
-		for len(hexKey) < 40 {
-			hexKey = "0" + hexKey
-		}
-		var err error
-		authKey, err = hex.DecodeString(hexKey)
+		k, err := auth.ParseKey(cfg.IPSC.Auth.Key)
 		if err != nil {
-			slog.Error("failed to decode IPSC auth key as hex, using raw string", "error", err)
-			authKey = []byte(cfg.IPSC.Auth.Key)
+			slog.Error("failed to parse the IPSC auth key", "error", err)
 		}
+		authKey = auth.NewKey(k)
 	}
 
 	// Use the first MMDVM network's ID as the local peer identity.
@@ -301,77 +269,79 @@ func (s *IPSCServer) handlePacket(data []byte, addr *net.UDPAddr) (*Packet, erro
 		return nil, fmt.Errorf("packet too short")
 	}
 
-	packetType := data[0]
-
 	if s.cfg.IPSC.Auth.Enabled {
-		if len(data) <= 10 {
+		if len(data) <= auth.TrailerLen {
 			return nil, fmt.Errorf("packet too short for authentication")
 		}
-		if !s.auth(data) {
+		rest, ok := s.verify(data)
+		if !ok {
 			if s.metrics != nil {
 				s.metrics.IPSCAuthFailures.Inc()
 			}
 			return nil, fmt.Errorf("authentication failed")
 		}
-		data = data[:len(data)-10] // Remove the hash from the data
+		data = rest
 	}
 
-	switch PacketType(packetType) {
-	case PacketType_GroupVoice:
+	op := opcode(data)
+	switch op { //nolint:exhaustive // other opcodes are counted as other
+	case ipscpkt.OpGroupVoice:
 		s.countReceived("group_voice")
-		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
+		if err := s.handleUserPacket(op, data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_PrivateVoice:
+	case ipscpkt.OpPrivateVoice:
 		s.countReceived("private_voice")
-		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
+		if err := s.handleUserPacket(op, data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_GroupData:
+	case ipscpkt.OpGroupData:
 		s.countReceived("group_data")
-		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
+		if err := s.handleUserPacket(op, data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_PrivateData:
+	case ipscpkt.OpPrivateData:
 		s.countReceived("private_data")
-		if err := s.handleUserPacket(PacketType(packetType), data, addr); err != nil {
+		if err := s.handleUserPacket(op, data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_RepeaterWakeUp:
+	case ipscpkt.OpWakeup:
 		s.countReceived("wake_up")
 		if err := s.handleRepeaterWakeUp(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_MasterRegisterRequest:
+	case ipscpkt.OpRegisterRequest:
 		s.countReceived("register")
 		if err := s.handleMasterRegisterRequest(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_MasterAliveRequest:
+	case ipscpkt.OpAliveRequest:
 		s.countReceived("alive")
 		if err := s.handleMasterAliveRequest(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_PeerListRequest:
+	case ipscpkt.OpPeerListRequest:
 		s.countReceived("peer_list")
 		if err := s.handlePeerListRequest(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_DeRegisterRequest:
+	case ipscpkt.OpDeregisterRequest:
 		s.countReceived("de_register")
 		if err := s.handleDeRegisterRequest(data, addr); err != nil {
 			return nil, err
 		}
-	case PacketType_RepeaterStatus:
+	case ipscpkt.OpStatus:
+		// An XPR 8400 sends it after each register or keepalive reply; it
+		// needs no reply.
 		s.countReceived("repeater_status")
 		return nil, ErrPacketIgnored
-	case PacketType_MasterRegisterReply, PacketType_PeerListReply, PacketType_MasterAliveReply,
-		PacketType_DeRegisterReply:
+	case ipscpkt.OpRegisterReply, ipscpkt.OpPeerListReply, ipscpkt.OpAliveReply,
+		ipscpkt.OpDeregisterReply:
 		// These are reply packets, we shouldn't receive them as a server, keeping quiet.
 		return nil, ErrPacketIgnored
 	default:
 		s.countReceived("other")
-		return nil, fmt.Errorf("unknown packet type: %d", packetType)
+		return nil, fmt.Errorf("unknown packet type: %d", byte(op))
 	}
 
 	return &Packet{data: data}, nil
@@ -403,17 +373,14 @@ func (s *IPSCServer) handleMasterRegisterRequest(data []byte, addr *net.UDPAddr)
 	return nil
 }
 
-// peerModeAndFlags returns the mode byte and the 4 flag bytes that follow
-// the peer ID in a master register or alive request, or the defaults when
-// the request is too short to carry them.
+// peerModeAndFlags returns the mode and flags of a master register or alive
+// request, or the defaults when the request does not carry them.
 func (s *IPSCServer) peerModeAndFlags(data []byte) (byte, [4]byte) {
-	mode := s.defaultModeByte()
-	flags := s.defaultFlagsBytes()
-	if len(data) >= 10 {
-		mode = data[5]
-		copy(flags[:], data[6:10])
+	c, err := ipscpkt.DecodeControl(data)
+	if err != nil {
+		return s.defaultModeByte(), s.defaultFlagsBytes()
 	}
-	return mode, flags
+	return byte(c.Mode), c.Flags
 }
 
 // handleMasterAliveRequest answers a keepalive from a registered peer. With
@@ -497,7 +464,7 @@ func (s *IPSCServer) handleDeRegisterRequest(data []byte, addr *net.UDPAddr) err
 // DMRlink's de_register_self does on shutdown: a de-registration request
 // with the local ID.
 func (s *IPSCServer) deRegisterSelf() {
-	req := append([]byte{byte(PacketType_DeRegisterRequest)}, s.localIDBytes()...)
+	req := control(ipscpkt.Control{Opcode: ipscpkt.OpDeregisterRequest, ID: s.localID})
 	for _, target := range s.activePeers(time.Now()) {
 		packet := &Packet{data: append([]byte(nil), req...)}
 		if err := s.sendPacket(packet, target.addr); err != nil {
@@ -519,7 +486,7 @@ func (s *IPSCServer) handleRepeaterWakeUp(data []byte, addr *net.UDPAddr) error 
 	return nil
 }
 
-func (s *IPSCServer) handleUserPacket(packetType PacketType, data []byte, addr *net.UDPAddr) error {
+func (s *IPSCServer) handleUserPacket(packetType ipscpkt.Opcode, data []byte, addr *net.UDPAddr) error {
 	peerID, err := parsePeerID(data)
 	if err != nil {
 		return err
@@ -676,83 +643,80 @@ func (s *IPSCServer) isRegistered(peerID uint32) bool {
 	return ok && peerActive(peer, time.Now())
 }
 
-func (s *IPSCServer) buildMasterRegisterReply() []byte {
-	packet := make([]byte, 0, 1+4+5+2+4)
-	packet = append(packet, byte(PacketType_MasterRegisterReply))
-	packet = append(packet, s.localIDBytes()...)
-	packet = append(packet, s.defaultModeByte())
-	flags := s.defaultFlagsBytes()
-	packet = append(packet, flags[:]...)
+// ipscVersion is the protocol version the master sends, as DMRlink does.
+func ipscVersion() [4]byte {
+	return [4]byte{0x04, 0x02, 0x04, 0x01}
+}
 
-	numPeers := s.peerCount()
-	if numPeers > math.MaxUint16 {
-		numPeers = math.MaxUint16
+// control returns the control packet c, which the server builds from fields
+// that always encode.
+func control(c ipscpkt.Control) []byte {
+	data, err := c.AppendBinary(nil)
+	if err != nil {
+		slog.Error("cannot build IPSC control packet", "opcode", c.Opcode, "error", err)
 	}
-	packet = append(packet, uint16ToBytes(uint16(numPeers))...) //nolint:gosec // Bounds checked
-	packet = append(packet, ipscVersion...)
-	return packet
+	return data
+}
+
+func (s *IPSCServer) buildMasterRegisterReply() []byte {
+	return control(ipscpkt.Control{
+		Opcode:  ipscpkt.OpRegisterReply,
+		ID:      s.localID,
+		Mode:    ipscpkt.Mode(s.defaultModeByte()),
+		Flags:   s.defaultFlagsBytes(),
+		Peers:   uint16(min(s.peerCount(), math.MaxUint16)), //nolint:gosec // clamped
+		Version: ipscVersion(),
+	})
 }
 
 func (s *IPSCServer) buildMasterAliveReply() []byte {
-	packet := make([]byte, 0, 1+4+5+4)
-	packet = append(packet, byte(PacketType_MasterAliveReply))
-	packet = append(packet, s.localIDBytes()...)
-	packet = append(packet, s.defaultModeByte())
-	flags := s.defaultFlagsBytes()
-	packet = append(packet, flags[:]...)
-	packet = append(packet, ipscVersion...)
-	return packet
+	return control(ipscpkt.Control{
+		Opcode:  ipscpkt.OpAliveReply,
+		ID:      s.localID,
+		Mode:    ipscpkt.Mode(s.defaultModeByte()),
+		Flags:   s.defaultFlagsBytes(),
+		Version: ipscVersion(),
+	})
 }
 
 func (s *IPSCServer) buildPeerListReply() []byte {
-	peerList := s.buildPeerList()
-	packet := make([]byte, 0, 1+4+2+len(peerList))
-	packet = append(packet, byte(PacketType_PeerListReply))
-	packet = append(packet, s.localIDBytes()...)
-	if len(peerList) > math.MaxUint16 {
-		packet = append(packet, uint16ToBytes(math.MaxUint16)...)
-	} else {
-		packet = append(packet, uint16ToBytes(uint16(len(peerList)))...) //nolint:gosec // Bounds checked
-	}
-	packet = append(packet, peerList...)
-	return packet
+	return ipscpkt.AppendPeerListReply(nil, s.localID, s.buildPeerList())
 }
 
-func (s *IPSCServer) buildPeerList() []byte {
+// buildPeerList returns the entries of the active peers with an IPv4
+// address.
+func (s *IPSCServer) buildPeerList() []ipscpkt.PeerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if len(s.peers) == 0 {
-		return nil
-	}
-
 	now := time.Now()
-	peerList := make([]byte, 0, len(s.peers)*11)
+	entries := make([]ipscpkt.PeerEntry, 0, len(s.peers))
 	for _, peer := range s.peers {
-		if !peerActive(peer, now) || peer.Addr == nil || peer.Addr.IP == nil {
+		if !peerActive(peer, now) || peer.Addr == nil {
 			continue
-		} //nolint:gosec
-		peerList = append(peerList, uint32ToBytes(peer.ID)...)
-		peerList = append(peerList, peer.Addr.IP.To4()...)
-		peerPort := peer.Addr.Port
-		if peerPort < 0 || peerPort > 65535 {
-			peerPort = 0
 		}
-		peerList = append(peerList, uint16ToBytes(uint16(peerPort))...) //nolint:gosec // Bounds checked
-		peerList = append(peerList, peer.Mode)
+		ip := peer.Addr.IP.To4()
+		if ip == nil {
+			continue
+		}
+		port := peer.Addr.Port
+		if port < 0 || port > math.MaxUint16 {
+			port = 0
+		}
+		entries = append(entries, ipscpkt.PeerEntry{
+			ID:   peer.ID,
+			IP:   [4]byte(ip),
+			Port: uint16(port), //nolint:gosec // bounds checked
+			Mode: ipscpkt.Mode(peer.Mode),
+		})
 	}
-
-	return peerList
+	return entries
 }
 
 func (s *IPSCServer) peerCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.peers)
-}
-
-func (s *IPSCServer) localIDBytes() []byte {
-	return uint32ToBytes(s.localID)
 }
 
 func (s *IPSCServer) defaultModeByte() byte {
@@ -765,33 +729,24 @@ func (s *IPSCServer) defaultModeByte() byte {
 	return peerOperational | peerDigital | ts1On | ts2On
 }
 
-func (s *IPSCServer) defaultFlagsBytes() [4]byte {
-	flags := [4]byte{}
-	flags[2] = 0x00
-	flags[3] = 0x0D
-	if s.cfg.IPSC.Auth.Enabled {
-		flags[3] |= 0x10
-	}
+// defaultFlagsBytes returns the flags of the master: voice and data calls,
+// and authentication when it is on.
+func (s *IPSCServer) defaultFlagsBytes() ipscpkt.Flags {
+	var flags ipscpkt.Flags
+	flags.Set(ipscpkt.FlagMasterPeer, true)
+	flags.Set(ipscpkt.FlagVoice, true)
+	flags.Set(ipscpkt.FlagData, true)
+	flags.Set(ipscpkt.FlagAuth, s.cfg.IPSC.Auth.Enabled)
 	return flags
 }
 
+// parsePeerID returns the sender ID in octets 1 to 4 of data.
 func parsePeerID(data []byte) (uint32, error) {
-	if len(data) < 5 {
-		return 0, fmt.Errorf("packet too short for peer ID")
+	r, err := ipscpkt.DecodeRaw(data)
+	if err != nil {
+		return 0, fmt.Errorf("packet too short for peer ID: %w", err)
 	}
-	return binary.BigEndian.Uint32(data[1:5]), nil
-}
-
-func uint16ToBytes(value uint16) []byte {
-	buf := make([]byte, 2)
-	binary.BigEndian.PutUint16(buf, value)
-	return buf
-}
-
-func uint32ToBytes(value uint32) []byte {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, value)
-	return buf
+	return r.ID, nil
 }
 
 func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
@@ -805,23 +760,22 @@ func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
 	return cloned
 }
 
-func (s *IPSCServer) auth(data []byte) bool {
-	// Last 10 bytes are the sha hash
-	payload := data[:len(data)-10]
-	hash := data[len(data)-10:]
-	expectedHash := hmac.New(sha1.New, s.authKey)
-	expectedHash.Write(payload)
-	expectedHashSum := expectedHash.Sum(nil)[:10]
-
-	return hmac.Equal(hash, expectedHashSum)
+// verify reports whether data carries the authentication trailer of the
+// rest of it, and returns the rest.
+func (s *IPSCServer) verify(data []byte) ([]byte, bool) {
+	if s.authKey == nil {
+		return data, false
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.authKey.Verify(data)
 }
 
 func (s *IPSCServer) sendPacket(packet *Packet, addr *net.UDPAddr) error {
-	if s.cfg.IPSC.Auth.Enabled {
-		hash := hmac.New(sha1.New, s.authKey)
-		hash.Write(packet.data)
-		hashSum := hash.Sum(nil)[:10]
-		packet.data = append(packet.data, hashSum...)
+	if s.cfg.IPSC.Auth.Enabled && s.authKey != nil {
+		s.authMu.Lock()
+		packet.data = s.authKey.Sign(packet.data)
+		s.authMu.Unlock()
 	}
 
 	n, err := s.udp.WriteToUDP(packet.data, addr)
