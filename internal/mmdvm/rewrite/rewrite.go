@@ -9,7 +9,8 @@
 package rewrite
 
 import (
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 // Result indicates the outcome of applying a rewrite rule.
@@ -27,12 +28,12 @@ type Rule interface {
 	// Process inspects and potentially rewrites pkt. Returns Matched if the
 	// rule applied, Unmatched otherwise. When trace is true, debug logging
 	// is emitted.
-	Process(pkt *proto.Packet) Result
+	Process(pkt *dmrd.Data) Result
 }
 
 // Apply iterates over rules and returns true if any rule matched.
 // The first matching rule wins and the iteration stops.
-func Apply(rules []Rule, pkt *proto.Packet) bool {
+func Apply(rules []Rule, pkt *dmrd.Data) bool {
 	for _, r := range rules {
 		if r.Process(pkt) == Matched {
 			return true
@@ -57,9 +58,9 @@ type TGRewrite struct {
 
 func (r *TGRewrite) fromTGEnd() uint { return r.FromTG + r.Range - 1 }
 
-func (r *TGRewrite) Process(pkt *proto.Packet) Result {
+func (r *TGRewrite) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	if !pkt.GroupCall || slot != r.FromSlot || pkt.Dst < r.FromTG || pkt.Dst > r.fromTGEnd() {
+	if pkt.Private || slot != r.FromSlot || uint(pkt.Destination) < r.FromTG || uint(pkt.Destination) > r.fromTGEnd() {
 		return Unmatched
 	}
 
@@ -68,7 +69,7 @@ func (r *TGRewrite) Process(pkt *proto.Packet) Result {
 	}
 
 	if r.FromTG != r.ToTG {
-		pkt.Dst = pkt.Dst + r.ToTG - r.FromTG
+		pkt.Destination = id24(uint(pkt.Destination) + r.ToTG - r.FromTG)
 	}
 
 	return Matched
@@ -90,9 +91,9 @@ type PCRewrite struct {
 
 func (r *PCRewrite) fromIDEnd() uint { return r.FromID + r.Range - 1 }
 
-func (r *PCRewrite) Process(pkt *proto.Packet) Result {
+func (r *PCRewrite) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	if pkt.GroupCall || slot != r.FromSlot || pkt.Dst < r.FromID || pkt.Dst > r.fromIDEnd() {
+	if !pkt.Private || slot != r.FromSlot || uint(pkt.Destination) < r.FromID || uint(pkt.Destination) > r.fromIDEnd() {
 		return Unmatched
 	}
 
@@ -101,7 +102,7 @@ func (r *PCRewrite) Process(pkt *proto.Packet) Result {
 	}
 
 	if r.FromID != r.ToID {
-		pkt.Dst = pkt.Dst + r.ToID - r.FromID
+		pkt.Destination = id24(uint(pkt.Destination) + r.ToID - r.FromID)
 	}
 
 	return Matched
@@ -123,9 +124,9 @@ type TypeRewrite struct {
 
 func (r *TypeRewrite) fromTGEnd() uint { return r.FromTG + r.Range - 1 }
 
-func (r *TypeRewrite) Process(pkt *proto.Packet) Result {
+func (r *TypeRewrite) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	if !pkt.GroupCall || slot != r.FromSlot || pkt.Dst < r.FromTG || pkt.Dst > r.fromTGEnd() {
+	if pkt.Private || slot != r.FromSlot || uint(pkt.Destination) < r.FromTG || uint(pkt.Destination) > r.fromTGEnd() {
 		return Unmatched
 	}
 
@@ -134,11 +135,11 @@ func (r *TypeRewrite) Process(pkt *proto.Packet) Result {
 	}
 
 	if r.FromTG != r.ToID {
-		pkt.Dst = pkt.Dst + r.ToID - r.FromTG
+		pkt.Destination = id24(uint(pkt.Destination) + r.ToID - r.FromTG)
 	}
 
 	// Convert from Group to Private call
-	pkt.GroupCall = false
+	pkt.Private = true
 
 	return Matched
 }
@@ -161,9 +162,9 @@ type SrcRewrite struct {
 
 func (r *SrcRewrite) fromIDEnd() uint { return r.FromID + r.Range - 1 }
 
-func (r *SrcRewrite) Process(pkt *proto.Packet) Result {
+func (r *SrcRewrite) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	if pkt.GroupCall || slot != r.FromSlot || pkt.Src < r.FromID || pkt.Src > r.fromIDEnd() {
+	if !pkt.Private || slot != r.FromSlot || uint(pkt.Source) < r.FromID || uint(pkt.Source) > r.fromIDEnd() {
 		return Unmatched
 	}
 
@@ -171,8 +172,8 @@ func (r *SrcRewrite) Process(pkt *proto.Packet) Result {
 		setPktSlot(pkt, r.ToSlot)
 	}
 
-	pkt.Dst = r.ToTG
-	pkt.GroupCall = true
+	pkt.Destination = id24(r.ToTG)
+	pkt.Private = false
 
 	return Matched
 }
@@ -187,9 +188,9 @@ type PassAllTG struct {
 	Slot uint // 1 or 2
 }
 
-func (r *PassAllTG) Process(pkt *proto.Packet) Result {
+func (r *PassAllTG) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	matched := pkt.GroupCall && slot == r.Slot
+	matched := !pkt.Private && slot == r.Slot
 
 	if matched {
 		return Matched
@@ -207,9 +208,9 @@ type PassAllPC struct {
 	Slot uint // 1 or 2
 }
 
-func (r *PassAllPC) Process(pkt *proto.Packet) Result {
+func (r *PassAllPC) Process(pkt *dmrd.Data) Result {
 	slot := pktSlot(pkt)
-	matched := !pkt.GroupCall && slot == r.Slot
+	matched := pkt.Private && slot == r.Slot
 
 	if matched {
 		return Matched
@@ -219,16 +220,24 @@ func (r *PassAllPC) Process(pkt *proto.Packet) Result {
 
 // --- helpers -----------------------------------------------------------------
 
-// pktSlot returns the slot number (1 or 2) from a proto.Packet.
-// Slot=false → slot 1, Slot=true → slot 2.
-func pktSlot(pkt *proto.Packet) uint {
-	if pkt.Slot {
+// pktSlot returns the slot number (1 or 2) of pkt.
+func pktSlot(pkt *dmrd.Data) uint {
+	if pkt.Slot == enums.Slot2 {
 		return 2
 	}
 	return 1
 }
 
-// setPktSlot sets the slot on a proto.Packet. slot must be 1 or 2.
-func setPktSlot(pkt *proto.Packet, slot uint) {
-	pkt.Slot = (slot == 2)
+// setPktSlot sets the slot of pkt. slot must be 1 or 2.
+func setPktSlot(pkt *dmrd.Data, slot uint) {
+	pkt.Slot = enums.Slot1
+	if slot == 2 {
+		pkt.Slot = enums.Slot2
+	}
+}
+
+// id24 returns the low 24 bits of id, the part of it that a DMRD packet
+// carries.
+func id24(id uint) uint32 {
+	return uint32(id & 0xFFFFFF)
 }

@@ -4,7 +4,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 // interleavedMMDVMCalls returns the MMDVM packets of four calls, each on its
@@ -12,12 +13,12 @@ import (
 // call of rigLateEntryBursts, the unconfirmed rate 3/4 packet of
 // rigRate34Calls and the confirmed rate 1/2 packet of
 // rigConfirmedRate12Packet.
-func interleavedMMDVMCalls(t *testing.T) [][]mmdvm.Packet {
+func interleavedMMDVMCalls(t *testing.T) [][]dmrd.Data {
 	t.Helper()
-	pkt := func(stream uint, dst uint, ft, dt uint, data [33]byte) mmdvm.Packet {
-		return mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: dst, GroupCall: true, Slot: true,
-			FrameType: ft, DTypeOrVSeq: dt, StreamID: stream, DMRData: data,
+	pkt := func(stream, dst uint32, ft dmrd.FrameType, dt uint8, data [33]byte) dmrd.Data {
+		return dmrd.Data{
+			Source: 3191868, Destination: dst, Private: false, Slot: enums.Slot2,
+			Frame: ft, Value: dt, Stream: stream, Burst: data,
 		}
 	}
 	hexBurst := func(h string) [33]byte {
@@ -27,33 +28,33 @@ func interleavedMMDVMCalls(t *testing.T) [][]mmdvm.Packet {
 		}
 		return [33]byte(w)
 	}
-	calls := make([][]mmdvm.Packet, 0, 4)
-	pi := make([]mmdvm.Packet, 0, len(rigPICallBursts()))
+	calls := make([][]dmrd.Data, 0, 4)
+	pi := make([]dmrd.Data, 0, len(rigPICallBursts()))
 	for i, h := range rigPICallBursts() {
 		k := rigPICallKinds()[i]
-		pi = append(pi, pkt(78, 9, k[0], k[1], hexBurst(h)))
+		pi = append(pi, pkt(78, 9, dmrd.FrameType(k[0]), k[1], hexBurst(h)))
 	}
 	calls = append(calls, pi)
-	late := make([]mmdvm.Packet, 0, len(rigLateEntryBursts()))
+	late := make([]dmrd.Data, 0, len(rigLateEntryBursts()))
 	for i, h := range rigLateEntryBursts() {
-		ft := mmdvmFrameTypeVoice
+		ft := dmrd.FrameVoice
 		if i == burstA {
-			ft = mmdvmFrameTypeVoiceSync
+			ft = dmrd.FrameVoiceSync
 		}
-		late = append(late, pkt(79, 91, ft, uint(i), hexBurst(h)))
+		late = append(late, pkt(79, 91, ft, uint8(i), hexBurst(h)))
 	}
 	calls = append(calls, late)
 	c := rigRate34Calls()[0]
-	r34 := make([]mmdvm.Packet, 0, len(c.bursts))
+	r34 := make([]dmrd.Data, 0, len(c.bursts))
 	for i, h := range c.bursts {
-		r34 = append(r34, pkt(77, c.dst, mmdvmFrameTypeDataSync, uint(c.types[i]), hexBurst(h)))
+		r34 = append(r34, pkt(77, c.dst, dmrd.FrameDataSync, uint8(c.types[i]), hexBurst(h)))
 	}
 	calls = append(calls, r34)
 	bursts, types := rigConfirmedRate12Packet(false)
-	r12 := make([]mmdvm.Packet, 0, len(bursts))
+	r12 := make([]dmrd.Data, 0, len(bursts))
 	for i, b := range bursts {
-		p := pkt(85, 3140598, mmdvmFrameTypeDataSync, uint(types[i]), b)
-		p.GroupCall, p.Slot = false, false
+		p := pkt(85, 3140598, dmrd.FrameDataSync, uint8(types[i]), b)
+		p.Private, p.Slot = true, enums.Slot1
 		r12 = append(r12, p)
 	}
 	return append(calls, r12)
@@ -136,8 +137,8 @@ func TestInterleavedIPSCCallsTranslateAsAlone(t *testing.T) {
 		out := tr.TranslateToMMDVM(data[0], data)
 		got := make([]string, 0, len(out))
 		for _, p := range out {
-			p.StreamID = 0
-			got = append(got, hex.EncodeToString(p.Encode()))
+			p.Stream = 0
+			got = append(got, hex.EncodeToString(goldenDMRD(p)))
 		}
 		return got
 	}

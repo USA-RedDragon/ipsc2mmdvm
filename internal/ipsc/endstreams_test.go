@@ -4,7 +4,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 // TestEndStreamsEndsOpenCalls opens the PI voice call of rigPICallBursts
@@ -29,14 +30,14 @@ func TestEndStreamsEndsOpenCalls(t *testing.T) {
 	tr.SetColorCode(7)
 	for _, p := range pi[:len(pi)-1] {
 		if len(tr.TranslateToIPSC(p)) == 0 {
-			t.Fatalf("voice call packet %d/%d: no IPSC packets", p.FrameType, p.DTypeOrVSeq)
+			t.Fatalf("voice call packet %d/%d: no IPSC packets", p.Frame, p.Value)
 		}
 	}
 	c := rigRate34Calls()[1]
 	header, _ := hex.DecodeString(c.bursts[0])
-	if out := tr.TranslateToIPSC(mmdvm.Packet{
-		Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: c.group, Slot: true,
-		FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[0]), StreamID: 77, DMRData: [33]byte(header),
+	if out := tr.TranslateToIPSC(dmrd.Data{
+		Source: 3191868, Destination: c.dst, Private: !c.group, Slot: enums.Slot2,
+		Frame: dmrd.FrameDataSync, Value: uint8(c.types[0]), Stream: 77, Burst: [33]byte(header),
 	}); len(out) != 1 {
 		t.Fatalf("data header: got %d IPSC packets, want 1", len(out))
 	}

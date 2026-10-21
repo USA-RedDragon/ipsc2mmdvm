@@ -3,31 +3,24 @@ package rewrite
 import (
 	"testing"
 
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 const testRuleName = "test"
 
 // helper to create a basic group-call packet
-func groupPkt(slot uint, dst uint) *proto.Packet {
-	return &proto.Packet{
-		Signature: "DMRD",
-		Slot:      slot == 2,
-		GroupCall: true,
-		Dst:       dst,
-		Src:       1234,
-	}
+func groupPkt(slot uint, dst uint32) *dmrd.Data {
+	pkt := &dmrd.Data{Private: false, Destination: dst, Source: 1234}
+	setPktSlot(pkt, slot)
+	return pkt
 }
 
 // helper to create a basic private-call packet
-func privatePkt(slot uint, dst uint, src uint) *proto.Packet {
-	return &proto.Packet{
-		Signature: "DMRD",
-		Slot:      slot == 2,
-		GroupCall: false,
-		Dst:       dst,
-		Src:       src,
-	}
+func privatePkt(slot uint, dst, src uint32) *dmrd.Data {
+	pkt := &dmrd.Data{Private: true, Destination: dst, Source: src}
+	setPktSlot(pkt, slot)
+	return pkt
 }
 
 // ── TGRewrite ────────────────────────────────────────────────────────────────
@@ -41,8 +34,8 @@ func TestTGRewrite_Match_Single(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if pkt.Dst != 100 {
-		t.Fatalf("expected Dst=100, got %d", pkt.Dst)
+	if pkt.Destination != 100 {
+		t.Fatalf("expected Dst=100, got %d", pkt.Destination)
 	}
 	if pktSlot(pkt) != 2 {
 		t.Fatalf("expected slot 2, got %d", pktSlot(pkt))
@@ -59,8 +52,8 @@ func TestTGRewrite_Match_Range(t *testing.T) {
 		t.Fatal("expected Matched")
 	}
 	// 105 + 200 - 100 = 205
-	if pkt.Dst != 205 {
-		t.Fatalf("expected Dst=205, got %d", pkt.Dst)
+	if pkt.Destination != 205 {
+		t.Fatalf("expected Dst=205, got %d", pkt.Destination)
 	}
 }
 
@@ -106,8 +99,8 @@ func TestTGRewrite_SameSlot_SameTG(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched (passthrough)")
 	}
-	if pkt.Dst != 9 {
-		t.Fatalf("expected Dst=9 (unchanged), got %d", pkt.Dst)
+	if pkt.Destination != 9 {
+		t.Fatalf("expected Dst=9 (unchanged), got %d", pkt.Destination)
 	}
 }
 
@@ -133,8 +126,8 @@ func TestPCRewrite_Match_Single(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if pkt.Dst != 200 {
-		t.Fatalf("expected Dst=200, got %d", pkt.Dst)
+	if pkt.Destination != 200 {
+		t.Fatalf("expected Dst=200, got %d", pkt.Destination)
 	}
 	if pktSlot(pkt) != 2 {
 		t.Fatalf("expected slot 2, got %d", pktSlot(pkt))
@@ -151,8 +144,8 @@ func TestPCRewrite_Match_Range(t *testing.T) {
 		t.Fatal("expected Matched")
 	}
 	// 1050 + 2000 - 1000 = 2050
-	if pkt.Dst != 2050 {
-		t.Fatalf("expected Dst=2050, got %d", pkt.Dst)
+	if pkt.Destination != 2050 {
+		t.Fatalf("expected Dst=2050, got %d", pkt.Destination)
 	}
 }
 
@@ -189,10 +182,10 @@ func TestTypeRewrite_Match(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if pkt.Dst != 3100 {
-		t.Fatalf("expected Dst=3100, got %d", pkt.Dst)
+	if pkt.Destination != 3100 {
+		t.Fatalf("expected Dst=3100, got %d", pkt.Destination)
 	}
-	if pkt.GroupCall {
+	if !pkt.Private {
 		t.Fatal("expected GroupCall=false after TypeRewrite")
 	}
 	if pktSlot(pkt) != 2 {
@@ -210,10 +203,10 @@ func TestTypeRewrite_Match_Range(t *testing.T) {
 		t.Fatal("expected Matched")
 	}
 	// 107 + 5000 - 100 = 5007
-	if pkt.Dst != 5007 {
-		t.Fatalf("expected Dst=5007, got %d", pkt.Dst)
+	if pkt.Destination != 5007 {
+		t.Fatalf("expected Dst=5007, got %d", pkt.Destination)
 	}
-	if pkt.GroupCall {
+	if !pkt.Private {
 		t.Fatal("expected GroupCall=false")
 	}
 }
@@ -240,13 +233,13 @@ func TestSrcRewrite_Match(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if pkt.Src != 1234 {
-		t.Fatalf("expected Src unchanged at 1234, got %d", pkt.Src)
+	if pkt.Source != 1234 {
+		t.Fatalf("expected Src unchanged at 1234, got %d", pkt.Source)
 	}
-	if pkt.Dst != 9 {
-		t.Fatalf("expected Dst=TG9, got %d", pkt.Dst)
+	if pkt.Destination != 9 {
+		t.Fatalf("expected Dst=TG9, got %d", pkt.Destination)
 	}
-	if !pkt.GroupCall {
+	if pkt.Private {
 		t.Fatal("expected private call to become a group call")
 	}
 	if pktSlot(pkt) != 2 {
@@ -263,14 +256,14 @@ func TestSrcRewrite_Match_Range(t *testing.T) {
 	if res != Matched {
 		t.Fatal("expected Matched")
 	}
-	if !pkt.GroupCall {
+	if pkt.Private {
 		t.Fatal("expected private call to become a group call")
 	}
-	if pkt.Src != 1050 {
-		t.Fatalf("expected Src unchanged at 1050, got %d", pkt.Src)
+	if pkt.Source != 1050 {
+		t.Fatalf("expected Src unchanged at 1050, got %d", pkt.Source)
 	}
-	if pkt.Dst != 5000 {
-		t.Fatalf("expected every source in range to map to TG5000, got %d", pkt.Dst)
+	if pkt.Destination != 5000 {
+		t.Fatalf("expected every source in range to map to TG5000, got %d", pkt.Destination)
 	}
 	if pktSlot(pkt) != 1 {
 		t.Fatalf("expected slot 1, got %d", pktSlot(pkt))
@@ -281,13 +274,13 @@ func TestSrcRewrite_NoMatch_GroupCall(t *testing.T) {
 	t.Parallel()
 	r := &SrcRewrite{Name: testRuleName, FromSlot: 1, FromID: 100, ToSlot: 2, ToTG: 9, Range: 1}
 	pkt := groupPkt(1, 91)
-	pkt.Src = 100
+	pkt.Source = 100
 
 	res := r.Process(pkt)
 	if res != Unmatched {
 		t.Fatal("expected Unmatched for group call")
 	}
-	if pkt.Src != 100 || pkt.Dst != 91 || !pkt.GroupCall || pktSlot(pkt) != 1 {
+	if pkt.Source != 100 || pkt.Destination != 91 || pkt.Private || pktSlot(pkt) != 1 {
 		t.Fatalf("expected packet unchanged, got %+v", pkt)
 	}
 }
@@ -328,8 +321,8 @@ func TestApply_FirstMatchWins(t *testing.T) {
 		t.Fatal("expected a match")
 	}
 	// First rule should have set Dst=100
-	if pkt.Dst != 100 {
-		t.Fatalf("expected Dst=100 (first rule), got %d", pkt.Dst)
+	if pkt.Destination != 100 {
+		t.Fatalf("expected Dst=100 (first rule), got %d", pkt.Destination)
 	}
 }
 
@@ -368,8 +361,8 @@ func TestApply_MixedRuleTypes(t *testing.T) {
 	if !matched {
 		t.Fatal("expected match on PCRewrite")
 	}
-	if pkt.Dst != 60 {
-		t.Fatalf("expected Dst=60, got %d", pkt.Dst)
+	if pkt.Destination != 60 {
+		t.Fatalf("expected Dst=60, got %d", pkt.Destination)
 	}
 }
 
@@ -377,11 +370,11 @@ func TestApply_MixedRuleTypes(t *testing.T) {
 
 func TestPktSlot(t *testing.T) {
 	t.Parallel()
-	pkt := &proto.Packet{Slot: false}
+	pkt := &dmrd.Data{Slot: enums.Slot1}
 	if pktSlot(pkt) != 1 {
 		t.Fatalf("expected slot 1, got %d", pktSlot(pkt))
 	}
-	pkt.Slot = true
+	pkt.Slot = enums.Slot2
 	if pktSlot(pkt) != 2 {
 		t.Fatalf("expected slot 2, got %d", pktSlot(pkt))
 	}
@@ -389,14 +382,14 @@ func TestPktSlot(t *testing.T) {
 
 func TestSetPktSlot(t *testing.T) {
 	t.Parallel()
-	pkt := &proto.Packet{}
+	pkt := &dmrd.Data{}
 	setPktSlot(pkt, 2)
-	if !pkt.Slot {
-		t.Fatal("expected Slot=true for slot 2")
+	if pkt.Slot != enums.Slot2 {
+		t.Fatal("expected Slot2 for slot 2")
 	}
 	setPktSlot(pkt, 1)
-	if pkt.Slot {
-		t.Fatal("expected Slot=false for slot 1")
+	if pkt.Slot != enums.Slot1 {
+		t.Fatal("expected Slot1 for slot 1")
 	}
 }
 
@@ -412,8 +405,8 @@ func TestPassAllTG_Match(t *testing.T) {
 		t.Fatal("expected Matched")
 	}
 	// Should not modify any fields
-	if pkt.Dst != 12345 {
-		t.Fatalf("expected Dst=12345 unchanged, got %d", pkt.Dst)
+	if pkt.Destination != 12345 {
+		t.Fatalf("expected Dst=12345 unchanged, got %d", pkt.Destination)
 	}
 }
 
@@ -451,11 +444,11 @@ func TestPassAllPC_Match(t *testing.T) {
 		t.Fatal("expected Matched")
 	}
 	// Should not modify any fields
-	if pkt.Dst != 9990 {
-		t.Fatalf("expected Dst=9990 unchanged, got %d", pkt.Dst)
+	if pkt.Destination != 9990 {
+		t.Fatalf("expected Dst=9990 unchanged, got %d", pkt.Destination)
 	}
-	if pkt.Src != 1234 {
-		t.Fatalf("expected Src=1234 unchanged, got %d", pkt.Src)
+	if pkt.Source != 1234 {
+		t.Fatalf("expected Src=1234 unchanged, got %d", pkt.Source)
 	}
 }
 
@@ -503,8 +496,8 @@ func TestApply_PassAllFallback(t *testing.T) {
 	if !Apply(passallRules, pkt) {
 		t.Fatal("passall should match TG 9 group call on slot 1")
 	}
-	if pkt.Dst != 9 {
-		t.Fatalf("passall should not modify Dst, got %d", pkt.Dst)
+	if pkt.Destination != 9 {
+		t.Fatalf("passall should not modify Dst, got %d", pkt.Destination)
 	}
 
 	// Private call to 9990 doesn't match specific TG rules
@@ -515,8 +508,8 @@ func TestApply_PassAllFallback(t *testing.T) {
 	if !Apply(passallRules, pkt2) {
 		t.Fatal("passall PC should match private call on slot 1")
 	}
-	if pkt2.Dst != 9990 {
-		t.Fatalf("passall should not modify Dst, got %d", pkt2.Dst)
+	if pkt2.Destination != 9990 {
+		t.Fatalf("passall should not modify Dst, got %d", pkt2.Destination)
 	}
 }
 
@@ -533,7 +526,7 @@ func TestApply_SpecificTakesPriorityOverPassAll(t *testing.T) {
 		t.Fatal("expected match")
 	}
 	// Specific rule should have rewritten it
-	if pkt.Dst != 205 {
-		t.Fatalf("expected Dst=205 from specific rewrite, got %d", pkt.Dst)
+	if pkt.Destination != 205 {
+		t.Fatalf("expected Dst=205 from specific rewrite, got %d", pkt.Destination)
 	}
 }

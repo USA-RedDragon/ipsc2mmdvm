@@ -16,8 +16,8 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
@@ -54,13 +54,25 @@ func newSlotTestClient(t *testing.T, name string, mgr *timeslot.Manager) *MMDVMC
 	return c
 }
 
-func dmrd(streamID uint) []byte {
+func dmrdPacket(streamID uint32) []byte {
 	return dmrdFrom(1, streamID, 1)
 }
 
-func dmrdFrom(src, streamID, dtype uint) []byte {
-	p := proto.Packet{Signature: "DMRD", Src: src, Dst: 9, GroupCall: true, FrameType: 2, DTypeOrVSeq: dtype, StreamID: streamID}
-	return p.Encode()
+func dmrdFrom(src, streamID uint32, dtype uint8) []byte {
+	p := dmrd.Data{Source: src, Destination: 9, Private: false, Frame: 2, Value: dtype, Stream: streamID}
+	return encodeDMRD(p)
+}
+
+// encodeDMRD returns the 53 octets of p, on TS1 when p has no slot.
+func encodeDMRD(p dmrd.Data) []byte {
+	if p.Slot == 0 {
+		p.Slot = enums.Slot1
+	}
+	b, err := p.AppendBinary(nil)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 type ipscRecord struct {
@@ -143,8 +155,8 @@ func TestQueuedCallIsSentByItsOwnClient(t *testing.T) {
 	rec := &ipscRecorder{}
 	c1.SetIPSCHandler(rec.handler("net1"))
 	c2.SetIPSCHandler(rec.handler("net2"))
-	for i := range uint(5) {
-		c2.translator.TranslateToIPSC(proto.Packet{StreamID: 900 + i, FrameType: 2, DTypeOrVSeq: 1, Dst: 1, GroupCall: true})
+	for i := range uint32(5) {
+		c2.translator.TranslateToIPSC(dmrd.Data{Stream: 900 + i, Frame: 2, Value: 1, Destination: 1, Private: false})
 	}
 
 	c1.handleReady(dmrdFrom(srcA, 0xA, 1))
@@ -190,17 +202,17 @@ func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
 		"06dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
 		"403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
 	}
-	dtypes := []uint{6, 7, 7}
+	dtypes := []uint8{6, 7, 7}
 	start := time.Now()
-	for _, stream := range []uint{0xA, 0xB} {
+	for _, stream := range []uint32{0xA, 0xB} {
 		for i, h := range bursts {
 			b, err := hex.DecodeString(h)
 			if err != nil {
 				t.Fatal(err)
 			}
-			p := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
-				DTypeOrVSeq: dtypes[i], StreamID: stream, DMRData: [33]byte(b)}
-			c.handleReady(p.Encode())
+			p := dmrd.Data{Private: true, Source: 3191868, Destination: 3140598, Slot: enums.Slot2, Frame: 2,
+				Value: dtypes[i], Stream: stream, Burst: [33]byte(b)}
+			c.handleReady(encodeDMRD(p))
 		}
 	}
 	rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 6 })
@@ -211,23 +223,23 @@ func TestOutboundDataCallEndReleasesSlot(t *testing.T) {
 
 // outboundDataBursts are a confirmed rate 1/2 data packet from 3191868 to
 // 3140598, as dmrgo encodes it, with their data types.
-func outboundDataBursts() ([]string, []uint) {
+func outboundDataBursts() ([]string, []uint8) {
 	return []string{
 		"20f7370570bee26393b7cda7ddadff57d75df5de6accf9067160278e89420a3c95",
 		"06dd55694b3555ba4425c5649dcdff57d75df5ddc51065d0864171a60d174dab0b",
 		"403201b0010f0182003002c01dcdff57d75df5ddc42001b002541b4c08007630d5",
-	}, []uint{6, 7, 7}
+	}, []uint8{6, 7, 7}
 }
 
-func outboundPacket(t *testing.T, stream uint, h string, dtype uint) []byte {
+func outboundPacket(t *testing.T, stream uint32, h string, dtype uint8) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2,
-		DTypeOrVSeq: dtype, StreamID: stream, DMRData: [33]byte(b)}
-	return p.Encode()
+	p := dmrd.Data{Private: true, Source: 3191868, Destination: 3140598, Slot: enums.Slot2, Frame: 2,
+		Value: dtype, Stream: stream, Burst: [33]byte(b)}
+	return encodeDMRD(p)
 }
 
 // TestQueuedOutboundDataCallsEnd queues two data calls behind a voice call
@@ -242,17 +254,17 @@ func TestQueuedOutboundDataCallsEnd(t *testing.T) {
 	rec := &ipscRecorder{}
 	c.SetIPSCHandler(rec.handler("net1"))
 
-	voice := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 0xA}
-	c.handleReady(voice.Encode())
+	voice := dmrd.Data{Private: true, Source: 3191868, Destination: 3140598, Slot: enums.Slot2, Frame: 2, Value: 1, Stream: 0xA}
+	c.handleReady(encodeDMRD(voice))
 	bursts, dtypes := outboundDataBursts()
-	for _, stream := range []uint{0xB, 0xC} {
+	for _, stream := range []uint32{0xB, 0xC} {
 		for i, h := range bursts {
 			c.handleReady(outboundPacket(t, stream, h, dtypes[i]))
 		}
 	}
 	start := time.Now()
-	voice.FrameType, voice.DTypeOrVSeq = 2, 2
-	c.handleReady(voice.Encode())
+	voice.Frame, voice.Value = 2, 2
+	c.handleReady(encodeDMRD(voice))
 	rec.waitFor(t, func(recs []ipscRecord) bool {
 		n := 0
 		for _, r := range recs {
@@ -398,8 +410,8 @@ func TestBufferedPacketsAreNotCountedAsDropped(t *testing.T) {
 	c2 := newSlotTestClient(t, "net2", mgr)
 	c1.metrics = m
 	c2.metrics = m
-	c1.handleReady(dmrd(0xA))
-	c2.handleReady(dmrd(0xB))
+	c1.handleReady(dmrdPacket(0xA))
+	c2.handleReady(dmrdPacket(0xB))
 	if body := scrapeMetrics(t, m); strings.Contains(body, `reason="timeslot_busy"`) {
 		t.Fatalf("buffered packet counted as dropped:\n%s", grepLines(body, "mmdvm_packets_dropped_total"))
 	}
@@ -413,9 +425,9 @@ func TestTimeslotOverflowIsCountedAsDropped(t *testing.T) {
 	c1 := newSlotTestClient(t, "net1", mgr)
 	c2 := newSlotTestClient(t, "net2", mgr)
 	c2.metrics = m
-	c1.handleReady(dmrd(0xA))
+	c1.handleReady(dmrdPacket(0xA))
 	for range timeslot.MaxQueuedPackets + 3 {
-		c2.handleReady(dmrd(0xB))
+		c2.handleReady(dmrdPacket(0xB))
 	}
 	want := `mmdvm_packets_dropped_total{network="net2",reason="timeslot_full"} 3`
 	if body := scrapeMetrics(t, m); !strings.Contains(body, want) {
@@ -562,16 +574,16 @@ func TestCSBKInsideDataPacketKeepsCall(t *testing.T) {
 	rec := &ipscRecorder{}
 	c.SetIPSCHandler(rec.handler("net1"))
 
-	voice := proto.Packet{Signature: tagDMRD, Src: 3191868, Dst: 3140598, Slot: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 0xA}
-	c.handleReady(voice.Encode())
+	voice := dmrd.Data{Private: true, Source: 3191868, Destination: 3140598, Slot: enums.Slot2, Frame: 2, Value: 1, Stream: 0xA}
+	c.handleReady(encodeDMRD(voice))
 	bursts, dtypes := outboundDataBursts()
 	c.handleReady(outboundPacket(t, 0xB, bursts[0], dtypes[0]))
 	c.handleReady(outboundPacket(t, 0xB, nonPreambleCSBK(t), 3))
 	for i := 1; i < len(bursts); i++ {
 		c.handleReady(outboundPacket(t, 0xB, bursts[i], dtypes[i]))
 	}
-	voice.FrameType, voice.DTypeOrVSeq = 2, 2
-	c.handleReady(voice.Encode())
+	voice.Frame, voice.Value = 2, 2
+	c.handleReady(encodeDMRD(voice))
 	rec.waitFor(t, func(recs []ipscRecord) bool {
 		var types []byte
 		for _, r := range recs {
@@ -590,13 +602,13 @@ func TestIdleOutboundDataCallsArePruned(t *testing.T) {
 	t.Parallel()
 	c := newTestClient(t)
 	now := time.Now()
-	c.outData = map[uint]*outboundDataCall{
+	c.outData = map[uint32]*outboundDataCall{
 		1: {lastSeen: now.Add(-outDataIdle - time.Second)},
 		2: {lastSeen: now.Add(-outDataIdle + time.Second)},
 	}
 	bursts, dtypes := outboundDataBursts()
 	b, _ := hex.DecodeString(bursts[0])
-	c.outboundCallEnds(proto.Packet{FrameType: 2, DTypeOrVSeq: dtypes[0], StreamID: 3, DMRData: [33]byte(b)})
+	c.outboundCallEnds(dmrd.Data{Private: true, Frame: 2, Value: dtypes[0], Stream: 3, Burst: [33]byte(b)})
 	if _, ok := c.outData[1]; ok {
 		t.Error("idle data call was kept")
 	}

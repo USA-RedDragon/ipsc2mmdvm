@@ -7,8 +7,8 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
 // LCRewriter keeps the link control inside DMR bursts in step with the
@@ -27,7 +27,7 @@ import (
 // terminator, so one LCRewriter must see one direction of traffic only.
 type LCRewriter struct {
 	mu        sync.Mutex
-	streams   map[uint]*lcStream
+	streams   map[uint32]*lcStream
 	now       func() time.Time
 	lastPrune time.Time
 	logs      logging.Queue // records made while mu is held
@@ -140,7 +140,7 @@ func (st *lcStream) swap() {
 // GPS, passes through one superframe late. The first superframe always
 // carries the rewritten LC. Unlike DMRGateway, an embedded LC that failed to
 // decode is replaced rather than passed through.
-func (st *lcStream) processEmbedded(data *[33]byte, pos int) {
+func (st *lcStream) processEmbedded(data *layer2.RawBurst, pos int) {
 	raw := layer2.RawBurst(*data)
 	emb := raw.EMB()
 	st.received[st.writeNum].add(raw.EmbeddedData(), emb, !emb.FEC.Uncorrectable, pos, st.lastPos)
@@ -158,23 +158,23 @@ func (st *lcStream) processEmbedded(data *[33]byte, pos int) {
 
 // NewLCRewriter returns an empty LCRewriter.
 func NewLCRewriter() *LCRewriter {
-	return &LCRewriter{streams: make(map[uint]*lcStream), now: time.Now}
+	return &LCRewriter{streams: make(map[uint32]*lcStream), now: time.Now}
 }
 
-// Rewrite updates pkt.DMRData to match pkt when a rewrite rule changed the
+// Rewrite updates pkt.Burst to match pkt when a rewrite rule changed the
 // source, destination, or call type of orig. Other packets are not changed.
-func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
+func (r *LCRewriter) Rewrite(orig dmrd.Data, pkt *dmrd.Data) {
 	r.mu.Lock()
 	defer r.logs.Unlock(&r.mu)
 	now := r.now()
 	r.pruneLocked(now)
-	if orig.Src == pkt.Src && orig.Dst == pkt.Dst && orig.GroupCall == pkt.GroupCall {
+	if orig.Source == pkt.Source && orig.Destination == pkt.Destination && orig.Private == pkt.Private {
 		return
 	}
 
-	switch pkt.FrameType {
-	case mmdvmFrameTypeDataSync:
-		dataType := enums.DataType(pkt.DTypeOrVSeq) //nolint:gosec // compared against known data types only
+	switch pkt.Frame {
+	case dmrd.FrameDataSync:
+		dataType := enums.DataType(pkt.Value) //nolint:gosec // compared against known data types only
 		switch dataType {
 		case enums.DataTypeCSBK:
 			rewriteDataBlock(pkt, dataType, rewriteCSBK)
@@ -191,38 +191,38 @@ func (r *LCRewriter) Rewrite(orig mmdvm.Packet, pkt *mmdvm.Packet) {
 			return
 		}
 		lc := rewrittenLC(&r.logs, pkt, dataType)
-		(*layer2.RawBurst)(&pkt.DMRData).SetBPTCPayload(fullLCCodeword(lc, dataType))
+		(*layer2.RawBurst)(&pkt.Burst).SetBPTCPayload(fullLCCodeword(lc, dataType))
 		if dataType == enums.DataTypeTerminatorWithLC {
-			delete(r.streams, pkt.StreamID)
+			delete(r.streams, pkt.Stream)
 			return
 		}
-		r.streams[pkt.StreamID] = &lcStream{lc: lc, embedded: layer2.EncodeEmbeddedLC(lc), lastSeen: now, colorCode: slotTypeColorCode(pkt.DMRData)}
-	case mmdvmFrameTypeVoiceSync:
-		if st, ok := r.streams[pkt.StreamID]; ok {
+		r.streams[pkt.Stream] = &lcStream{lc: lc, embedded: layer2.EncodeEmbeddedLC(lc), lastSeen: now, colorCode: slotTypeColorCode(pkt.Burst)}
+	case dmrd.FrameVoiceSync:
+		if st, ok := r.streams[pkt.Stream]; ok {
 			st.lastSeen = now
 			st.swap()
 			st.lastPos = 0
 		}
-	case mmdvmFrameTypeVoice:
+	case dmrd.FrameVoice:
 		pos, ok := mmdvmVoiceBurstPosition(*pkt)
 		if !ok || pos < burstB {
 			return
 		}
-		st, ok := r.streams[pkt.StreamID]
+		st, ok := r.streams[pkt.Stream]
 		if !ok {
-			st = &lcStream{lc: constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)}
+			st = &lcStream{lc: constructLC(pkt.Source, pkt.Destination, !pkt.Private)}
 			st.embedded = layer2.EncodeEmbeddedLC(st.lc)
-			if emb := layer2.RawBurst(pkt.DMRData).EMB(); !emb.FEC.Uncorrectable {
+			if emb := layer2.RawBurst(pkt.Burst).EMB(); !emb.FEC.Uncorrectable {
 				st.colorCode = emb.ColorCode
 			}
-			r.streams[pkt.StreamID] = st
+			r.streams[pkt.Stream] = st
 		}
 		st.lastSeen = now
 		if pos < st.lastPos {
 			st.swap()
 		}
 		if pos <= burstE {
-			st.processEmbedded(&pkt.DMRData, pos)
+			st.processEmbedded(&pkt.Burst, pos)
 		}
 		st.lastPos = pos
 	}
@@ -245,15 +245,15 @@ func (r *LCRewriter) pruneLocked(now time.Time) {
 // CRC, as DMRGateway's CRewrite::processCSBK and processDataHeader do
 // (Rewrite.cpp lines 189-206 and 213-230). Blocks that fail their CRC, or
 // that edit refuses, are left alone.
-func rewriteDataBlock(pkt *mmdvm.Packet, dataType enums.DataType, edit func(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool)) {
-	b, ok := decodeBPTCPayload(pkt.DMRData, dataType)
+func rewriteDataBlock(pkt *dmrd.Data, dataType enums.DataType, edit func(b [12]byte, pkt *dmrd.Data) ([12]byte, bool)) {
+	b, ok := decodeBPTCPayload(pkt.Burst, dataType)
 	if !ok || !pdu.BlockCRCOK(b, dataType) {
 		return
 	}
 	if b, ok = edit(b, pkt); !ok {
 		return
 	}
-	(*layer2.RawBurst)(&pkt.DMRData).SetBPTCPayload(b)
+	(*layer2.RawBurst)(&pkt.Burst).SetBPTCPayload(b)
 }
 
 // rewriteCSBK sets the addresses of a CSBK, as DMRGateway's
@@ -262,12 +262,12 @@ func rewriteDataBlock(pkt *mmdvm.Packet, dataType enums.DataType, edit func(b [1
 // setGI sets it on the preamble only. It refuses a CSBK whose layout does
 // not carry both a target and a source address, such as C_ALOHA or a
 // manufacturer CSBK, where DMRGateway writes octets 4-9 anyway.
-func rewriteCSBK(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
+func rewriteCSBK(b [12]byte, pkt *dmrd.Data) ([12]byte, bool) {
 	csbk := pdu.CSBKBytes(b)
-	if csbk.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) != nil {
+	if csbk.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) != nil {
 		return b, false
 	}
-	csbk.SetGroup(pkt.GroupCall)
+	csbk.SetGroup(!pkt.Private)
 	csbk.Reseal()
 	return csbk, true
 }
@@ -277,12 +277,12 @@ func rewriteCSBK(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 // its reserved bit stays as it is where DMRGateway writes the flag.
 // Proprietary headers and reserved formats, which carry no addresses, are
 // not changed.
-func rewriteDataHeader(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
+func rewriteDataHeader(b [12]byte, pkt *dmrd.Data) ([12]byte, bool) {
 	h := pdu.DataHeaderBytes(b)
-	if h.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src)) != nil {
+	if h.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) != nil {
 		return b, false
 	}
-	h.SetGroup(pkt.GroupCall)
+	h.SetGroup(!pkt.Private)
 	h.Reseal()
 	return h, true
 }
@@ -292,18 +292,18 @@ func rewriteDataHeader(b [12]byte, pkt *mmdvm.Packet) ([12]byte, bool) {
 // in the burst, or from one built from the packet fields, and sets the
 // call type, destination, and source from pkt. The protect flag stays as
 // it is. A call type change clears the reserved bit, as DMRGateway does.
-func rewrittenLC(logs *logging.Queue, pkt *mmdvm.Packet, dataType enums.DataType) pdu.LCBytes {
+func rewrittenLC(logs *logging.Queue, pkt *dmrd.Data, dataType enums.DataType) pdu.LCBytes {
 	var lc pdu.LCBytes
-	if payload, ok := decodeBPTCPayload(pkt.DMRData, dataType); ok {
+	if payload, ok := decodeBPTCPayload(pkt.Burst, dataType); ok {
 		lc = pdu.LCBytes(payload[:9])
 	} else {
 		logs.Debug("invalid full LC in burst, constructing from packet fields",
 			"dtype", dataType.String())
-		lc = constructLC(pkt.Src, pkt.Dst, pkt.GroupCall)
+		lc = constructLC(pkt.Source, pkt.Destination, !pkt.Private)
 	}
 
 	flco := enums.FLCOUnitToUnitVoiceChannelUser
-	if pkt.GroupCall {
+	if !pkt.Private {
 		flco = enums.FLCOGroupVoiceChannelUser
 	}
 	if lc.FLCO() != flco {
@@ -311,7 +311,7 @@ func rewrittenLC(logs *logging.Queue, pkt *mmdvm.Packet, dataType enums.DataType
 		lc.SetReserved(false)
 		lc.SetFID(enums.FIDStandardized)
 	}
-	lc.SetAddresses(lcAddress(pkt.Dst), lcAddress(pkt.Src))
+	lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source))
 	return lc
 }
 
@@ -319,7 +319,7 @@ func rewrittenLC(logs *logging.Queue, pkt *mmdvm.Packet, dataType enums.DataType
 // (B-E) into a voice burst and gives it a new EMB with colorCode, the
 // matching LCSS, and PI clear. The burst's own EMB may be corrupt, so it
 // is not used.
-func putEmbeddedFragment(data *[33]byte, embedded [4][4]byte, pos int, colorCode enums.ColorCode) {
+func putEmbeddedFragment(data *layer2.RawBurst, embedded [4][4]byte, pos int, colorCode enums.ColorCode) {
 	raw := (*layer2.RawBurst)(data)
 	raw.SetEmbeddedData(embedded[pos-burstB])
 	lcss, _ := voiceBurst(pos).LCSS()

@@ -10,8 +10,8 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 )
 
 // rigPICall is a TS2 group call from 3191868 to 9 with a PI header (ALGID
@@ -47,14 +47,14 @@ func rigPICallBursts() []string {
 	}
 }
 
-func rigPICallKinds() [][2]uint {
-	return [][2]uint{
-		{mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader)},
-		{mmdvmFrameTypeDataSync, uint(enums.DataTypePIHeader)},
-		{mmdvmFrameTypeVoiceSync, 0},
-		{mmdvmFrameTypeVoice, 1}, {mmdvmFrameTypeVoice, 2}, {mmdvmFrameTypeVoice, 3},
-		{mmdvmFrameTypeVoice, 4}, {mmdvmFrameTypeVoice, 5},
-		{mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC)},
+func rigPICallKinds() [][2]uint8 {
+	return [][2]uint8{
+		{uint8(dmrd.FrameDataSync), uint8(enums.DataTypeVoiceLCHeader)},
+		{uint8(dmrd.FrameDataSync), uint8(enums.DataTypePIHeader)},
+		{uint8(dmrd.FrameVoiceSync), 0},
+		{uint8(dmrd.FrameVoice), 1}, {uint8(dmrd.FrameVoice), 2}, {uint8(dmrd.FrameVoice), 3},
+		{uint8(dmrd.FrameVoice), 4}, {uint8(dmrd.FrameVoice), 5},
+		{uint8(dmrd.FrameDataSync), uint8(enums.DataTypeTerminatorWithLC)},
 	}
 }
 
@@ -63,8 +63,8 @@ func TestRigPICallToMMDVM(t *testing.T) {
 	got := translateRig(t, rigPICall())
 	checkRigBursts(t, got, rigPICallBursts())
 	for i, k := range rigPICallKinds() {
-		if got[i].FrameType != k[0] || got[i].DTypeOrVSeq != k[1] {
-			t.Errorf("packet %d: frame type %d dtype/vseq %d, want %d %d", i, got[i].FrameType, got[i].DTypeOrVSeq, k[0], k[1])
+		if uint8(got[i].Frame) != k[0] || got[i].Value != k[1] {
+			t.Errorf("packet %d: frame type %d dtype/vseq %d, want %d %d", i, got[i].Frame, got[i].Value, k[0], k[1])
 		}
 	}
 }
@@ -73,7 +73,7 @@ func TestRigPICallToMMDVM(t *testing.T) {
 // 3191868 to 9 and returns, for each packet the repeater sent in ref, the
 // one the translator built in its place. The three voice headers the
 // translator sends stand for the repeater's one.
-func rigVoiceToIPSC(t *testing.T, ref, bursts []string, kinds [][2]uint) [][]byte {
+func rigVoiceToIPSC(t *testing.T, ref, bursts []string, kinds [][2]uint8) [][]byte {
 	t.Helper()
 	tr, err := NewIPSCTranslator()
 	if err != nil {
@@ -84,9 +84,9 @@ func rigVoiceToIPSC(t *testing.T, ref, bursts []string, kinds [][2]uint) [][]byt
 	got := make([][]byte, 0, len(bursts))
 	for i, b := range bursts {
 		w, _ := hex.DecodeString(b)
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 9, GroupCall: true, Slot: true,
-			FrameType: kinds[i][0], DTypeOrVSeq: kinds[i][1], StreamID: 78, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Source: 3191868, Destination: 9, Private: false, Slot: enums.Slot2,
+			Frame: dmrd.FrameType(kinds[i][0]), Value: kinds[i][1], Stream: 78, Burst: [33]byte(w),
 		})
 		if len(out) == 0 {
 			t.Fatalf("burst %d: no packets", i)
@@ -142,7 +142,7 @@ const rigBurstA = "6f7d2c51611e1813bb0927dee94755fd7df75f71bbfd6724638188a7a161c
 // TS2 from 3191868, the bursts dmrgo encodes for it, and their data types.
 type rigDataCall struct {
 	name    string
-	dst     uint
+	dst     uint32
 	group   bool
 	packets []string
 	bursts  []string
@@ -191,11 +191,11 @@ func TestRigRate34ToMMDVM(t *testing.T) {
 		}
 		for i, p := range got {
 			w, _ := hex.DecodeString(c.bursts[i])
-			if p.DMRData != [33]byte(w) {
-				t.Errorf("%s packet %d: burst\n got %x\nwant %x", c.name, i, p.DMRData, w)
+			if p.Burst != [33]byte(w) {
+				t.Errorf("%s packet %d: burst\n got %x\nwant %x", c.name, i, p.Burst, w)
 			}
-			if p.Src != 3191868 || p.Dst != c.dst || p.GroupCall != c.group || !p.Slot ||
-				p.FrameType != mmdvmFrameTypeDataSync || p.DTypeOrVSeq != uint(c.types[i]) {
+			if p.Source != 3191868 || p.Destination != c.dst || !p.Private != c.group || p.Slot == enums.Slot1 ||
+				p.Frame != dmrd.FrameDataSync || p.Value != uint8(c.types[i]) {
 				t.Errorf("%s packet %d: got %+v", c.name, i, p)
 			}
 		}
@@ -220,9 +220,9 @@ func rigDataToIPSC(t *testing.T, c rigDataCall) [][]byte {
 	all := make([][]byte, 0, len(c.bursts))
 	for i, b := range c.bursts {
 		w, _ := hex.DecodeString(b)
-		pkt := mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: c.group, Slot: true,
-			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 77, DMRData: [33]byte(w),
+		pkt := dmrd.Data{
+			Source: 3191868, Destination: c.dst, Private: !c.group, Slot: enums.Slot2,
+			Frame: dmrd.FrameDataSync, Value: uint8(c.types[i]), Stream: 77, Burst: [33]byte(w),
 		}
 		out := tr.TranslateToIPSC(pkt)
 		if len(out) != 1 {
@@ -282,9 +282,10 @@ func TestUndecodableLastBlockEndsCall(t *testing.T) {
 				w[j] ^= 0xA5
 			}
 		}
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, Slot: true,
-			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 80, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Private: true,
+			Source:  3191868, Destination: c.dst, Slot: enums.Slot2,
+			Frame: dmrd.FrameDataSync, Value: uint8(c.types[i]), Stream: 80, Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets, want 1", i, len(out))
@@ -313,9 +314,10 @@ func TestRate1LastBlockEndsCall(t *testing.T) {
 	got := make([][]byte, 0, len(bursts))
 	for i, h := range bursts {
 		w, _ := hex.DecodeString(h)
-		got = append(got, tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 3140598, Slot: true,
-			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(types[i]), StreamID: 84, DMRData: [33]byte(w),
+		got = append(got, tr.TranslateToIPSC(dmrd.Data{
+			Private: true,
+			Source:  3191868, Destination: 3140598, Slot: enums.Slot2,
+			Frame: dmrd.FrameDataSync, Value: uint8(types[i]), Stream: 84, Burst: [33]byte(w),
 		})...)
 	}
 	if len(got) != 2 || got[0][30] != ipscBurstDataHeader {
@@ -349,9 +351,9 @@ func TestRate34CallEndsAtLastBlock(t *testing.T) {
 	for range 2 {
 		for i, h := range c.bursts {
 			w, _ := hex.DecodeString(h)
-			out := tr.TranslateToIPSC(mmdvm.Packet{
-				Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: true, Slot: true,
-				FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 81, DMRData: [33]byte(w),
+			out := tr.TranslateToIPSC(dmrd.Data{
+				Source: 3191868, Destination: c.dst, Private: false, Slot: enums.Slot2,
+				Frame: dmrd.FrameDataSync, Value: uint8(c.types[i]), Stream: 81, Burst: [33]byte(w),
 			})
 			if len(out) != 1 {
 				t.Fatalf("burst %d: got %d packets", i, len(out))
@@ -389,9 +391,9 @@ func TestRate34MessageCRCFailureEndsCall(t *testing.T) {
 			}
 			w = b[:]
 		}
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: true, Slot: true,
-			FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[i]), StreamID: 82, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Source: 3191868, Destination: c.dst, Private: false, Slot: enums.Slot2,
+			Frame: dmrd.FrameDataSync, Value: uint8(c.types[i]), Stream: 82, Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets", i, len(out))
@@ -439,7 +441,7 @@ func rigVoiceCallBursts() []string {
 
 // translateRig feeds hex IPSC packets to a translator with color code 7 and
 // returns the MMDVM packets it builds.
-func translateRig(t *testing.T, packets []string) []mmdvm.Packet {
+func translateRig(t *testing.T, packets []string) []dmrd.Data {
 	t.Helper()
 	tr, err := NewIPSCTranslator()
 	if err != nil {
@@ -447,7 +449,7 @@ func translateRig(t *testing.T, packets []string) []mmdvm.Packet {
 	}
 	tr.SetPeerID(3149999)
 	tr.SetColorCode(7)
-	out := make([]mmdvm.Packet, 0, len(packets))
+	out := make([]dmrd.Data, 0, len(packets))
 	for _, h := range packets {
 		data, err := hex.DecodeString(h)
 		if err != nil {
@@ -460,7 +462,7 @@ func translateRig(t *testing.T, packets []string) []mmdvm.Packet {
 
 // checkRigBursts checks that got carries exactly the want bursts in order,
 // on TS2 for the group call 3191868 to 9.
-func checkRigBursts(t *testing.T, got []mmdvm.Packet, want []string) {
+func checkRigBursts(t *testing.T, got []dmrd.Data, want []string) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("got %d packets, want %d", len(got), len(want))
@@ -470,11 +472,11 @@ func checkRigBursts(t *testing.T, got []mmdvm.Packet, want []string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if [33]byte(w) != p.DMRData {
-			t.Errorf("packet %d (frame type %d, dtype/vseq %d): burst\n got %x\nwant %x", i, p.FrameType, p.DTypeOrVSeq, p.DMRData, w)
+		if [33]byte(w) != p.Burst {
+			t.Errorf("packet %d (frame type %d, dtype/vseq %d): burst\n got %x\nwant %x", i, p.Frame, p.Value, p.Burst, w)
 		}
-		if p.Src != 3191868 || p.Dst != 9 || !p.GroupCall || !p.Slot {
-			t.Errorf("packet %d: got src %d dst %d group %v ts2 %v", i, p.Src, p.Dst, p.GroupCall, p.Slot)
+		if p.Source != 3191868 || p.Destination != 9 || p.Private || p.Slot == enums.Slot1 {
+			t.Errorf("packet %d: got src %d dst %d group %v ts2 %v", i, p.Source, p.Destination, !p.Private, p.Slot)
 		}
 	}
 }
@@ -505,8 +507,8 @@ func TestRigLostBurstAAfterHeader(t *testing.T) {
 	want := append([]string{all[0]}, all[2:]...)
 	checkRigBursts(t, got, want)
 	for i, p := range got[1:6] {
-		if p.FrameType != mmdvmFrameTypeVoice || p.DTypeOrVSeq != uint(burstB+i) {
-			t.Errorf("voice packet %d: frame type %d vseq %d, want voice burst %c", i, p.FrameType, p.DTypeOrVSeq, 'B'+i)
+		if p.Frame != dmrd.FrameVoice || p.Value != uint8(burstB+i) {
+			t.Errorf("voice packet %d: frame type %d vseq %d, want voice burst %c", i, p.Frame, p.Value, 'B'+i)
 		}
 	}
 }
@@ -524,7 +526,7 @@ func TestRigLateEntryHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].DMRData != [33]byte(want) {
+	if len(got) != 1 || got[0].Burst != [33]byte(want) {
 		t.Fatalf("got %d packets %+v, want one with burst %x", len(got), got, want)
 	}
 }
@@ -585,7 +587,7 @@ func TestRigBadFramesAreSilence(t *testing.T) {
 	for i, h := range ipsc[2:8] {
 		p := got[i+1]
 		var b layer2.Burst
-		_ = b.DecodeFromBytesWith(p.DMRData, mmdvmVoiceDecodeOptions(p))
+		_ = b.DecodeFromBytesWith(p.Burst, mmdvmVoiceDecodeOptions(p))
 		frames, _ := b.AMBEFrames()
 		in, _ := hex.DecodeString(h)
 		want := vocoder.UnpackAMBEVoice([19]byte(in[33:52]))
@@ -617,7 +619,7 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d packets, want 2", len(got))
 	}
-	hb, err := layer2.NewBurstFromBytes(got[0].DMRData)
+	hb, err := layer2.NewBurstFromBytes(got[0].Burst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +631,7 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 	if r.LLIDSource != 3140598 || r.LLIDDestination != 3191868 || r.ResponseClass != 2 || r.BlocksToFollow != 1 {
 		t.Errorf("response header %+v", r)
 	}
-	db, err := layer2.NewBurstFromBytes(got[1].DMRData)
+	db, err := layer2.NewBurstFromBytes(got[1].Burst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +655,7 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 		t.Errorf("retry blocks %v, want %v", retry, want.RetryBlocks())
 	}
 	for i, p := range got {
-		if p.Src != 3140598 || p.Dst != 3191868 || p.GroupCall || !p.Slot || p.FrameType != mmdvmFrameTypeDataSync {
+		if p.Source != 3140598 || p.Destination != 3191868 || !p.Private || p.Slot == enums.Slot1 || p.Frame != dmrd.FrameDataSync {
 			t.Errorf("packet %d: %+v", i, p)
 		}
 	}
@@ -671,7 +673,7 @@ func TestRigRate1BlockIsDropped(t *testing.T) {
 		"840004ce2e6830b43c2febf6010000251c40805e2dd30f39712f000000000642000a800a006013054441204104844141601500765e7a",
 		"840004ce2e6830b43c2febf6010000251c40805e2dd40f39730f0000000013000000",
 	})
-	if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeDataHeader) {
+	if len(got) != 1 || got[0].Value != uint8(enums.DataTypeDataHeader) {
 		t.Fatalf("got %+v, want the data header only", got)
 	}
 }
@@ -688,10 +690,10 @@ func TestMBCContinuationPassesWithoutCRC(t *testing.T) {
 		t.Fatal("payload passes the CRC check")
 	}
 	got := translateRig(t, []string{ipsc})
-	if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeMBCContinuation) {
+	if len(got) != 1 || got[0].Value != uint8(enums.DataTypeMBCContinuation) {
 		t.Fatalf("got %+v, want the MBC continuation", got)
 	}
-	if p, _ := layer2.RawBurst(got[0].DMRData).BPTCPayload(); p != [12]byte(d[38:50]) {
+	if p, _ := layer2.RawBurst(got[0].Burst).BPTCPayload(); p != [12]byte(d[38:50]) {
 		t.Errorf("payload %x, want %x", p, d[38:50])
 	}
 }
@@ -726,13 +728,13 @@ func TestRigLateEntryToIPSCCarriesEmbeddedLC(t *testing.T) {
 	var e []byte
 	for i, h := range bursts {
 		w, _ := hex.DecodeString(h)
-		ft := mmdvmFrameTypeVoice
+		ft := dmrd.FrameVoice
 		if i == burstA {
-			ft = mmdvmFrameTypeVoiceSync
+			ft = dmrd.FrameVoiceSync
 		}
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 91, GroupCall: true, Slot: true,
-			FrameType: ft, DTypeOrVSeq: uint(i), StreamID: 79, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Source: 3191868, Destination: 91, Private: false, Slot: enums.Slot2,
+			Frame: ft, Value: uint8(i), Stream: 79, Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets", i, len(out))
@@ -747,20 +749,20 @@ func TestRigLateEntryToIPSCCarriesEmbeddedLC(t *testing.T) {
 // lateEntryToIPSC sends bursts, hex-encoded MMDVM voice bursts of one
 // superframe from burst A on, to IPSC as a TS2 call from 3191868 to dst
 // with no voice header, and returns the packet built for each.
-func lateEntryToIPSC(t *testing.T, bursts []string, dst uint, group bool) [][]byte {
+func lateEntryToIPSC(t *testing.T, bursts []string, dst uint32, group bool) [][]byte {
 	t.Helper()
 	tr := newTestTranslator(t)
 	tr.SetColorCode(7)
 	got := make([][]byte, 0, len(bursts))
 	for i, h := range bursts {
 		w, _ := hex.DecodeString(h)
-		ft := mmdvmFrameTypeVoice
+		ft := dmrd.FrameVoice
 		if i == burstA {
-			ft = mmdvmFrameTypeVoiceSync
+			ft = dmrd.FrameVoiceSync
 		}
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: dst, GroupCall: group, Slot: true,
-			FrameType: ft, DTypeOrVSeq: uint(i), StreamID: 83, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Source: 3191868, Destination: dst, Private: !group, Slot: enums.Slot2,
+			Frame: ft, Value: uint8(i), Stream: 83, Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets", i, len(out))
@@ -822,13 +824,13 @@ func TestLateEntryNeverMixesSuperframes(t *testing.T) {
 			b = burstB
 		}
 		w, _ := hex.DecodeString(bursts[b])
-		ft := mmdvmFrameTypeVoice
+		ft := dmrd.FrameVoice
 		if pos == burstA {
-			ft = mmdvmFrameTypeVoiceSync
+			ft = dmrd.FrameVoiceSync
 		}
-		out := tr.TranslateToIPSC(mmdvm.Packet{
-			Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 91, GroupCall: true, Slot: true,
-			FrameType: ft, DTypeOrVSeq: uint(pos), StreamID: 81, DMRData: [33]byte(w),
+		out := tr.TranslateToIPSC(dmrd.Data{
+			Source: 3191868, Destination: 91, Private: false, Slot: enums.Slot2,
+			Frame: ft, Value: uint8(pos), Stream: 81, Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %c: got %d packets", 'A'+pos, len(out))
@@ -869,9 +871,9 @@ func TestRigCallSequence(t *testing.T) {
 	}
 
 	tr := newTestTranslator(t)
-	a := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK)))
-	b := makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, uint(enums.DataTypeCSBK))
-	b.StreamID++
+	a := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeCSBK)))
+	b := makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeCSBK))
+	b.Stream++
 	if out := tr.TranslateToIPSC(b); len(a) != 1 || len(out) != 1 || a[0][5] == out[0][5] {
 		t.Errorf("two calls share byte 5")
 	}
@@ -912,9 +914,10 @@ func TestDroppedHeaderDropsItsBlocks(t *testing.T) {
 		tr := newTestTranslator(t)
 		bursts, types := rigConfirmedRate12Packet(badCRC)
 		for i, b := range bursts {
-			out := tr.TranslateToIPSC(mmdvm.Packet{
-				Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: 3140598,
-				FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(types[i]), StreamID: 85, DMRData: b,
+			out := tr.TranslateToIPSC(dmrd.Data{
+				Private: true,
+				Source:  3191868, Destination: 3140598,
+				Frame: dmrd.FrameDataSync, Value: uint8(types[i]), Stream: 85, Burst: b,
 			})
 			want := 1
 			if badCRC {
@@ -934,9 +937,9 @@ func TestDroppedHeaderDropsItsBlocks(t *testing.T) {
 	c := rigRate34Calls()[0]
 	block, _ := hex.DecodeString(c.bursts[1])
 	tr := newTestTranslator(t)
-	if out := tr.TranslateToIPSC(mmdvm.Packet{
-		Signature: mmdvm.DMRDSignature, Src: 3191868, Dst: c.dst, GroupCall: c.group, Slot: true,
-		FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(c.types[1]), StreamID: 86, DMRData: [33]byte(block),
+	if out := tr.TranslateToIPSC(dmrd.Data{
+		Source: 3191868, Destination: c.dst, Private: !c.group, Slot: enums.Slot2,
+		Frame: dmrd.FrameDataSync, Value: uint8(c.types[1]), Stream: 86, Burst: [33]byte(block),
 	}); len(out) != 0 || len(tr.streams) != 0 {
 		t.Errorf("rate 3/4 block with no header: got %d packets and %d streams, want none", len(out), len(tr.streams))
 	}
@@ -976,7 +979,7 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 	}
 	for _, skip := range []int{-1, 1} {
 		tr := newTestTranslator(t)
-		var got []mmdvm.Packet
+		var got []dmrd.Data
 		for i, h := range packets {
 			if i == skip {
 				continue
@@ -984,7 +987,7 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 			d, _ := hex.DecodeString(h)
 			got = append(got, tr.TranslateToMMDVM(d[0], d)...)
 		}
-		if len(got) != 1 || got[0].DTypeOrVSeq != uint(enums.DataTypeDataHeader) {
+		if len(got) != 1 || got[0].Value != uint8(enums.DataTypeDataHeader) {
 			t.Fatalf("without packet %d: got %+v, want the data header only", skip, got)
 		}
 		if len(tr.reverseStreams) != 0 {

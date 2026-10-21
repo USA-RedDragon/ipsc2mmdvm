@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -180,6 +180,11 @@ func replayGroup(t *testing.T, g captureGroup) []byte {
 }
 
 // goldenDMRD returns the 53 octets of pkt.
-func goldenDMRD(pkt mmdvm.Packet) []byte {
-	return pkt.Encode()
+func goldenDMRD(pkt dmrd.Data) []byte {
+	pkt.Size = 0
+	b, err := pkt.AppendBinary(nil)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

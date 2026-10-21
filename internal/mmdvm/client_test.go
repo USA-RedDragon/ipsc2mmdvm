@@ -19,10 +19,10 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
@@ -72,7 +72,7 @@ func newTestClient(t *testing.T) *MMDVMClient {
 		cfg:        cfg,
 		connTX:     make(chan []byte, 16),
 		connRX:     make(chan rxPacket, 16),
-		tx_chan:    make(chan proto.Packet, 16),
+		tx_chan:    make(chan dmrd.Data, 16),
 		done:       make(chan struct{}),
 		translator: translator,
 		netLC:      ipsc.NewLCRewriter(),
@@ -219,8 +219,7 @@ func TestSendRPTCPacket(t *testing.T) {
 func TestSendRPTKPacket(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	random := []byte("12345678")
-	client.sendRPTK(random)
+	client.sendRPTK(0x31323334)
 
 	data := <-client.connTX
 	// Should start with "RPTK"
@@ -239,7 +238,7 @@ func TestSendRPTKPacket(t *testing.T) {
 
 	// Verify the token is the correct sha256(random + password)
 	s256 := sha256.New()
-	s256.Write(random)
+	s256.Write([]byte("1234"))
 	s256.Write([]byte(client.cfg.Password))
 	expectedToken := s256.Sum(nil)
 	if !bytes.Equal(token, expectedToken) {
@@ -274,17 +273,16 @@ func TestSendPacketEncodesAndSends(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	client.setState(STATE_READY)
-	pkt := proto.Packet{
-		Signature:   tagDMRD,
+	pkt := dmrd.Data{
 		Seq:         1,
-		Src:         100,
-		Dst:         200,
+		Source:      100,
+		Destination: 200,
 		Repeater:    3001,
-		Slot:        true,
-		GroupCall:   true,
-		FrameType:   0,
-		DTypeOrVSeq: 0,
-		StreamID:    0x1234,
+		Slot:        enums.Slot2,
+		Private:     false,
+		Frame:       0,
+		Value:       0,
+		Stream:      0x1234,
 	}
 	client.sendPacket(pkt)
 
@@ -317,13 +315,6 @@ func TestSetIPSCHandler(t *testing.T) {
 	}
 }
 
-func TestPacketTypeMstack(t *testing.T) {
-	t.Parallel()
-	if packetTypeMstack != "MSTACK" {
-		t.Fatalf("expected packetTypeMstack=%q, got %q", "MSTACK", packetTypeMstack)
-	}
-}
-
 func TestSendLoginBinaryIDFormat(t *testing.T) {
 	t.Parallel()
 	// Test with ID=1 to verify binary encoding
@@ -346,11 +337,11 @@ func TestSendRPTKDifferentRandomProducesDifferentToken(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 
-	client.sendRPTK([]byte("aaaaaaaa"))
+	client.sendRPTK(0x61616161)
 	data1 := <-client.connTX
 	token1 := data1[8:40]
 
-	client.sendRPTK([]byte("bbbbbbbb"))
+	client.sendRPTK(0x62626262)
 	data2 := <-client.connTX
 	token2 := data2[8:40]
 
@@ -565,8 +556,8 @@ func TestHandlerSentLoginMSTACK(t *testing.T) {
 	client.wg.Add(1)
 	go client.handler()
 
-	// Simulate RPTACK response with random suffix (last 4 bytes used)
-	resp := append([]byte("RPTACK"), []byte("12345678")...)
+	// Simulate an RPTACK response with its salt
+	resp := append([]byte("RPTACK"), []byte("1234")...)
 	client.connRX <- rxPacket{gen: client.connGen.Load(), data: resp}
 
 	// Should transition to SENT_AUTH and send RPTK
@@ -763,7 +754,7 @@ func TestHandlerMSTCLReconnects(t *testing.T) {
 		oldConn := client.conn
 
 		client.keepAlive = time.Second
-		client.handleState(client.connGen.Load(), append([]byte(packetTypeMstcl), 0, 4, 0xC2, 0x34))
+		client.handleState(client.connGen.Load(), append([]byte("MSTCL"), 0, 4, 0xC2, 0x34))
 
 		if got := client.currentState(); got != STATE_TIMEOUT {
 			t.Fatalf("state %d: expected STATE_TIMEOUT, got %d", st, got)
@@ -854,19 +845,18 @@ func TestHandlerReadyDMRDPacket(t *testing.T) {
 	go client.handler()
 
 	// Build a valid 53-byte DMRD packet
-	pkt := proto.Packet{
-		Signature:   tagDMRD,
+	pkt := dmrd.Data{
 		Seq:         0,
-		Src:         100,
-		Dst:         200,
+		Source:      100,
+		Destination: 200,
 		Repeater:    3001,
-		Slot:        false,
-		GroupCall:   true,
-		FrameType:   2, // data sync
-		DTypeOrVSeq: 1, // voice LC header
-		StreamID:    0x5555,
+		Slot:        enums.Slot1,
+		Private:     false,
+		Frame:       2, // data sync
+		Value:       1, // voice LC header
+		Stream:      0x5555,
 	}
-	encoded := pkt.Encode()
+	encoded := encodeDMRD(pkt)
 	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encoded}
 
 	waitFor(t, 2*time.Second, "IPSC packets", func() bool {
@@ -902,18 +892,17 @@ func TestHandlerReadyDMRDNoHandler(t *testing.T) {
 	client.wg.Add(1)
 	go client.handler()
 
-	pkt := proto.Packet{
-		Signature:   tagDMRD,
+	pkt := dmrd.Data{
 		Seq:         0,
-		Src:         100,
-		Dst:         200,
+		Source:      100,
+		Destination: 200,
 		Repeater:    3001,
-		GroupCall:   true,
-		FrameType:   2,
-		DTypeOrVSeq: 1,
-		StreamID:    0x6666,
+		Private:     false,
+		Frame:       2,
+		Value:       1,
+		Stream:      0x6666,
 	}
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: pkt.Encode()}
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encodeDMRD(pkt)}
 
 	// Should not panic
 	time.Sleep(50 * time.Millisecond)
@@ -1007,7 +996,7 @@ func TestTickResendsHandshakeSteps(t *testing.T) {
 	} {
 		client := newTestClient(t)
 		client.timeout = 5 * time.Second
-		client.salt = []byte{1, 2, 3, 4}
+		client.salt = 0x01020304
 		client.setState(tc.st)
 		client.tick(time.Now())
 		data := <-client.connTX
@@ -1082,14 +1071,14 @@ func TestForwardTXSendsPackets(t *testing.T) {
 	client.wg.Add(1)
 	go client.forwardTX()
 
-	pkt := proto.Packet{
-		Signature: tagDMRD,
-		Seq:       5,
-		Src:       100,
-		Dst:       200,
-		Repeater:  3001,
-		GroupCall: true,
-		StreamID:  0x7777,
+	pkt := dmrd.Data{
+		Seq:         5,
+		Source:      100,
+		Destination: 200,
+		Repeater:    3001,
+		Private:     false,
+		Slot:        enums.Slot1,
+		Stream:      0x7777,
 	}
 	client.tx_chan <- pkt
 
@@ -1189,11 +1178,11 @@ func TestHandleIPSCBurstTranslatesAndSends(t *testing.T) {
 	// Should produce at least 1 MMDVM packet on tx_chan
 	select {
 	case pkt := <-client.tx_chan:
-		if pkt.Signature != tagDMRD {
-			t.Fatalf("expected DMRD, got %q", pkt.Signature)
+		if pkt.Source == 0 {
+			t.Fatalf("expected a DMRD packet, got %+v", pkt)
 		}
-		if pkt.Src != 100 {
-			t.Fatalf("expected src 100, got %d", pkt.Src)
+		if pkt.Source != 100 {
+			t.Fatalf("expected src 100, got %d", pkt.Source)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for translated packet")
@@ -1240,7 +1229,7 @@ func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 
 	// Fill tx_chan to make it block
 	for i := 0; i < cap(client.tx_chan); i++ {
-		client.tx_chan <- proto.Packet{}
+		client.tx_chan <- dmrd.Data{}
 	}
 
 	// Should not hang — done channel will prevent blocking send
@@ -1394,7 +1383,7 @@ func TestStartAndFullHandshake(t *testing.T) {
 	}
 
 	// Step 2: Server sends RPTACK with random
-	rptack := append([]byte("RPTACK"), []byte("ABCDEFGH")...)
+	rptack := append([]byte("RPTACK"), []byte("EFGH")...)
 	if _, err := serverConn.WriteToUDP(rptack, clientAddr); err != nil {
 		t.Fatalf("server write RPTACK: %v", err)
 	}
@@ -1534,8 +1523,8 @@ func TestSendRPTCURL(t *testing.T) {
 func TestSendRPTKTokenVerification(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
-	random := []byte("ABCDEFGH")
-	client.sendRPTK(random)
+	random := []byte("ABCD")
+	client.sendRPTK(binary.BigEndian.Uint32(random))
 
 	data := <-client.connTX
 	token := data[8:40]
@@ -1556,28 +1545,27 @@ func TestSendPacketFieldsEncoded(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	client.setState(STATE_READY)
-	pkt := proto.Packet{
-		Signature:   tagDMRD,
+	pkt := dmrd.Data{
 		Seq:         42,
-		Src:         0x123456,
-		Dst:         0xABCDEF,
+		Source:      0x123456,
+		Destination: 0xABCDEF,
 		Repeater:    0xDEADBEEF,
-		Slot:        true,
-		GroupCall:   false,
-		FrameType:   2,
-		DTypeOrVSeq: 3,
-		StreamID:    0x12345678,
+		Slot:        enums.Slot2,
+		Private:     true,
+		Frame:       2,
+		Value:       3,
+		Stream:      0x12345678,
 	}
 	client.sendPacket(pkt)
 
 	data := <-client.connTX
 
 	// Decode back and verify
-	decoded, ok := proto.Decode(data)
-	if !ok {
-		t.Fatal("failed to decode sent packet")
+	decoded, err := dmrd.DecodeData(data)
+	if err != nil {
+		t.Fatalf("failed to decode sent packet: %v", err)
 	}
-	if !pkt.Equal(decoded) {
+	if decoded.Size = 0; decoded != pkt {
 		t.Fatalf("packet mismatch:\n  sent: %+v\n  got:  %+v", pkt, decoded)
 	}
 }
@@ -1751,7 +1739,7 @@ type fakeMaster struct {
 	pings        atomic.Int32
 	peer         atomic.Pointer[net.UDPAddr]
 	pongsEnabled atomic.Bool
-	dmrd         chan proto.Packet
+	dmrd         chan dmrd.Data
 }
 
 func newFakeMaster(t *testing.T) *fakeMaster {
@@ -1760,7 +1748,7 @@ func newFakeMaster(t *testing.T) *fakeMaster {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	m := &fakeMaster{conn: conn, dmrd: make(chan proto.Packet, 64)}
+	m := &fakeMaster{conn: conn, dmrd: make(chan dmrd.Data, 64)}
 	m.answer.Store(true)
 	m.pongsEnabled.Store(true)
 	t.Cleanup(func() { conn.Close() })
@@ -1781,7 +1769,7 @@ func newFakeMaster(t *testing.T) *fakeMaster {
 					reply = []byte("MSTPONG\x00\x00\x00\x01")
 				}
 			case bytes.HasPrefix(data, []byte(tagDMRD)):
-				if pkt, ok := proto.Decode(data); ok {
+				if pkt, err := dmrd.DecodeData(data); err == nil {
 					select {
 					case m.dmrd <- pkt:
 					default:
@@ -1856,8 +1844,8 @@ func TestSetIPSCHandlerAfterStartIsRaceFree(t *testing.T) {
 		default:
 		}
 	})
-	pkt := proto.Packet{Signature: tagDMRD, Dst: 91, GroupCall: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 9}
-	m.send(t, pkt.Encode())
+	pkt := dmrd.Data{Destination: 91, Private: false, Frame: 2, Value: 1, Stream: 9}
+	m.send(t, encodeDMRD(pkt))
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
@@ -1900,13 +1888,13 @@ func TestStartSetsTranslatorColorCode(t *testing.T) {
 		select {
 		case pkt := <-m.dmrd:
 			switch {
-			case pkt.FrameType == 2:
-				if cc := testSlotTypeColorCode(pkt.DMRData); cc != 9 {
+			case pkt.Frame == 2:
+				if cc := testSlotTypeColorCode(pkt.Burst); cc != 9 {
 					t.Fatalf("header slot type color code %d, want 9", cc)
 				}
 				sawHeader = true
-			case pkt.FrameType == 0 && pkt.DTypeOrVSeq == 1:
-				if emb := testBurstEMB(pkt.DMRData); emb.FEC.Uncorrectable || emb.ColorCode != 9 {
+			case pkt.Frame == 0 && pkt.Value == 1:
+				if emb := testBurstEMB(pkt.Burst); emb.FEC.Uncorrectable || emb.ColorCode != 9 {
 					t.Fatalf("voice burst B EMB %s, want color code 9", emb.String())
 				}
 				sawEMB = true
@@ -1937,11 +1925,11 @@ func TestStopEndsOpenIPSCCalls(t *testing.T) {
 	client.wg.Add(1)
 	go client.handler()
 
-	pkt := proto.Packet{
-		Signature: tagDMRD, Src: 100, Dst: 200, Repeater: 3001, GroupCall: true,
-		FrameType: 2, DTypeOrVSeq: 1, StreamID: 0x5555,
+	pkt := dmrd.Data{
+		Source: 100, Destination: 200, Repeater: 3001, Private: false,
+		Frame: 2, Value: 1, Stream: 0x5555,
 	}
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: pkt.Encode()}
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: encodeDMRD(pkt)}
 	waitFor(t, 2*time.Second, "voice headers", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
@@ -2000,12 +1988,12 @@ func TestSlowIPSCHandlerDoesNotHoldUpTheMaster(t *testing.T) {
 	read := make(chan struct{})
 	go func() {
 		defer close(read)
-		for _, slot := range []bool{false, true} {
-			pkt := proto.Packet{
-				Signature: tagDMRD, Src: 100, Dst: 200, Repeater: 3001, GroupCall: true, Slot: slot,
-				FrameType: 2, DTypeOrVSeq: 1, StreamID: uint(slotIndex(slot)) + 0x100,
+		for _, slot := range []enums.Slot{enums.Slot1, enums.Slot2} {
+			pkt := dmrd.Data{
+				Source: 100, Destination: 200, Repeater: 3001, Private: false, Slot: slot,
+				Frame: 2, Value: 1, Stream: uint32(slotIndex(slot)) + 0x100, //nolint:gosec // 0 or 1
 			}
-			client.handleReady(pkt.Encode())
+			client.handleReady(encodeDMRD(pkt))
 		}
 	}()
 	select {
@@ -2034,7 +2022,7 @@ func TestOutboundPacketKind(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
-		frameType uint
+		frameType dmrd.FrameType
 		dtype     enums.DataType
 		want      timeslot.PacketKind
 	}{
@@ -2049,7 +2037,7 @@ func TestOutboundPacketKind(t *testing.T) {
 		{"rate 1 block", 2, enums.DataTypeRate1, timeslot.KindData},
 		{"CSBK", 2, enums.DataTypeCSBK, timeslot.KindOther},
 	} {
-		p := proto.Packet{FrameType: tc.frameType, DTypeOrVSeq: uint(tc.dtype)}
+		p := dmrd.Data{Frame: tc.frameType, Value: uint8(tc.dtype)}
 		if got := OutboundPacketKind(p); got != tc.want {
 			t.Errorf("%s: kind %d, want %d", tc.name, got, tc.want)
 		}
@@ -2079,8 +2067,8 @@ func TestStopReturnsWhileSendBlockedOnFullQueue(t *testing.T) {
 		client.sendLogin()
 		client.sendPing()
 		client.sendRPTC()
-		client.sendRPTK([]byte{1, 2, 3, 4})
-		client.sendPacket(proto.Packet{Signature: tagDMRD})
+		client.sendRPTK(0x01020304)
+		client.sendPacket(dmrd.Data{})
 	}()
 
 	stopped := make(chan struct{})
@@ -2348,8 +2336,8 @@ func TestBusyHandlerDoesNotCauseReconnect(t *testing.T) {
 			}
 
 			for i := range packets {
-				pkt := proto.Packet{Signature: tagDMRD, Dst: 91, GroupCall: true, FrameType: 2, DTypeOrVSeq: 1, StreamID: 9, Seq: uint(i)}
-				m.send(t, pkt.Encode())
+				pkt := dmrd.Data{Destination: 91, Private: false, Frame: 2, Value: 1, Stream: 9, Seq: uint8(i)}
+				m.send(t, encodeDMRD(pkt))
 			}
 			<-blocked
 			busyUntil := time.Now().Add(4 * c.timeout)
@@ -2439,7 +2427,7 @@ func TestSendPacketDroppedUntilReady(t *testing.T) {
 	client.metrics = metrics.NewMetrics()
 	for _, st := range []state{STATE_IDLE, STATE_SENT_LOGIN, STATE_SENT_AUTH, STATE_SENT_RPTC, STATE_TIMEOUT} {
 		client.setState(st)
-		client.sendPacket(proto.Packet{Signature: tagDMRD})
+		client.sendPacket(dmrd.Data{})
 		if n := len(client.connTX); n != 0 {
 			t.Fatalf("state %d: expected DMRD to be dropped, got %d queued", st, n)
 		}
@@ -2559,12 +2547,12 @@ func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
 		client.HandleIPSCBurst(data[0], data, addr)
 		select {
 		case pkt := <-client.tx_chan:
-			wantSrc := uint(3191868)
+			wantSrc := uint32(3191868)
 			if i >= 3 {
 				wantSrc = 3140598
 			}
-			if pkt.Src != wantSrc || !pkt.Slot {
-				t.Fatalf("packet %d: src %d slot %v, want %d on TS2", i, pkt.Src, pkt.Slot, wantSrc)
+			if pkt.Source != wantSrc || pkt.Slot == enums.Slot1 {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS2", i, pkt.Source, pkt.Slot, wantSrc)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("packet %d was held back", i)
@@ -2604,11 +2592,11 @@ func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
 		}
 		client.HandleIPSCBurst(data[0], data, addr)
 	}
-	for i, wantSrc := range []uint{3191868, 3140598, 3140598} {
+	for i, wantSrc := range []uint32{3191868, 3140598, 3140598} {
 		select {
 		case pkt := <-client.tx_chan:
-			if pkt.Src != wantSrc || pkt.Slot {
-				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Src, pkt.Slot, wantSrc)
+			if pkt.Source != wantSrc || pkt.Slot != enums.Slot1 {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Source, pkt.Slot, wantSrc)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("packet %d was held back", i)
@@ -2654,11 +2642,11 @@ func TestHandleIPSCBurstQueuedDroppedDataEnd(t *testing.T) {
 		}
 		client.HandleIPSCBurst(data[0], data, addr)
 	}
-	for i, wantSrc := range []uint{3191868, 3191868, 3191868, 3140598, 3140598} {
+	for i, wantSrc := range []uint32{3191868, 3191868, 3191868, 3140598, 3140598} {
 		select {
 		case pkt := <-client.tx_chan:
-			if pkt.Src != wantSrc || pkt.Slot {
-				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Src, pkt.Slot, wantSrc)
+			if pkt.Source != wantSrc || pkt.Slot != enums.Slot1 {
+				t.Fatalf("packet %d: src %d slot %v, want %d on TS1", i, pkt.Source, pkt.Slot, wantSrc)
 			}
 		case <-time.After(time.Second):
 			t.Fatalf("packet %d was held back", i)
@@ -2672,18 +2660,18 @@ func TestInboundSlotsAreBounded(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	now := time.Now()
-	client.inboundSlots = make(map[uint]inboundCall)
-	for i := range uint(maxInboundCalls) {
+	client.inboundSlots = make(map[uint32]inboundCall)
+	for i := range uint32(maxInboundCalls) {
 		client.inboundSlots[i+1] = inboundCall{lastSeen: now.Add(time.Duration(i) * time.Millisecond)}
 	}
-	client.noteInboundSlot(1000, true, false)
+	client.noteInboundSlot(1000, enums.Slot2, false)
 	if len(client.inboundSlots) != maxInboundCalls {
 		t.Fatalf("tracking %d calls, want %d", len(client.inboundSlots), maxInboundCalls)
 	}
 	if _, ok := client.inboundSlots[1]; ok {
 		t.Error("the oldest call was kept")
 	}
-	if c, ok := client.inboundSlots[1000]; !ok || !c.slot {
+	if c, ok := client.inboundSlots[1000]; !ok || c.slot != enums.Slot2 {
 		t.Error("the new call was not tracked")
 	}
 }
@@ -2694,8 +2682,8 @@ func TestStopStopsInboundTimeslotManager(t *testing.T) {
 	client.setState(STATE_READY)
 	mgr := timeslot.NewManager()
 	client.inboundTSMgr = mgr
-	pkt := func(stream uint) proto.Packet {
-		return proto.Packet{Signature: tagDMRD, StreamID: stream, GroupCall: true}
+	pkt := func(stream uint32) dmrd.Data {
+		return dmrd.Data{Stream: stream, Private: false}
 	}
 
 	if v := mgr.Submit(false, 1, "ipsc", pkt(1), false, client.forwardInbound); v != timeslot.Deliver {
@@ -2744,7 +2732,7 @@ func TestStopReturnsWhileIPSCHandlerBlocks(t *testing.T) {
 	})
 	client.wg.Add(1)
 	go client.handler()
-	client.connRX <- rxPacket{gen: client.connGen.Load(), data: dmrd(1)}
+	client.connRX <- rxPacket{gen: client.connGen.Load(), data: dmrdPacket(1)}
 	<-entered
 
 	stopped := make(chan struct{})

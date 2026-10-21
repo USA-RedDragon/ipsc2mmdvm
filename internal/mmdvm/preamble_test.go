@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
@@ -36,27 +36,27 @@ func newPreambleTestClient(t *testing.T) (*MMDVMClient, *ipscRecorder) {
 
 // sendRig sends packets of rigPreambleCall to c with the stream IDs ids,
 // as an MMDVM master sends them.
-func sendRig(t *testing.T, c *MMDVMClient, packets []string, ids []uint) {
+func sendRig(t *testing.T, c *MMDVMClient, packets []string, ids []uint32) {
 	t.Helper()
 	for i, h := range packets {
 		b, err := hex.DecodeString(h)
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, ok := proto.Decode(b)
-		if !ok {
-			t.Fatalf("packet %d does not decode", i)
+		p, err := dmrd.DecodeData(b)
+		if err != nil {
+			t.Fatalf("packet %d does not decode: %v", i, err)
 		}
-		p.StreamID = ids[i]
-		c.handleReady(p.Encode())
+		p.Stream = ids[i]
+		c.handleReady(encodeDMRD(p))
 	}
 }
 
 // mmdvmHostIDs returns stream IDs in the form MMDVMHost gives the data
 // call of rigPreambleCall: a new one for each CSBK and for the data header,
 // whose blocks keep it.
-func mmdvmHostIDs() []uint {
-	return []uint{101, 102, 103, 104, 105, 105, 105}
+func mmdvmHostIDs() []uint32 {
+	return []uint32{101, 102, 103, 104, 105, 105, 105}
 }
 
 // TestMMDVMHostPreamblesAreOneCall sends the data call of rigPreambleCall
@@ -108,7 +108,7 @@ const xprPreambleEnd = "840004ce2e5730b43c30b43c010000093460805e4c74706966a60000
 // timeslot to the next call.
 func TestPreamblesWithoutDataEnd(t *testing.T) {
 	t.Parallel()
-	for _, ids := range [][]uint{mmdvmHostIDs()[:4], {7, 7, 7, 7}} {
+	for _, ids := range [][]uint32{mmdvmHostIDs()[:4], {7, 7, 7, 7}} {
 		c, rec := newPreambleTestClient(t)
 		sendRig(t, c, rigPreambleCall()[8:11], ids[:3])
 		last := time.Now()
@@ -128,7 +128,7 @@ func TestPreamblesWithoutDataEnd(t *testing.T) {
 		}
 
 		start := time.Now()
-		sendRig(t, c, rigPreambleCall()[:1], []uint{5})
+		sendRig(t, c, rigPreambleCall()[:1], []uint32{5})
 		rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 8 })
 		if d := time.Since(start); d > time.Second {
 			t.Fatalf("ids %v: next call went out after %v", ids, d)
@@ -145,7 +145,7 @@ func TestOtherCallEndsPreambleCall(t *testing.T) {
 	c, rec := newPreambleTestClient(t)
 	call := rigPreambleCall()
 	start := time.Now()
-	sendRig(t, c, []string{call[8], call[0]}, []uint{101, 5})
+	sendRig(t, c, []string{call[8], call[0]}, []uint32{101, 5})
 	recs := rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 5 })
 	if d := time.Since(start); d >= preambleGap {
 		t.Fatalf("voice call went out after %v", d)
@@ -255,7 +255,7 @@ func TestPreambleJoinsOnlyItsCall(t *testing.T) {
 	for _, tc := range []string{"other destination", "late", "late before the timer"} {
 		c, rec := newPreambleTestClient(t)
 		call := rigPreambleCall()
-		sendRig(t, c, call[8:9], []uint{101})
+		sendRig(t, c, call[8:9], []uint32{101})
 		data := append([]string(nil), call[12:]...)
 		switch tc {
 		case "other destination":
@@ -271,7 +271,7 @@ func TestPreambleJoinsOnlyItsCall(t *testing.T) {
 			c.preambles[0].seen = c.preambles[0].seen.Add(-preambleGap)
 			c.preambleMu.Unlock()
 		}
-		sendRig(t, c, data, []uint{105, 105, 105})
+		sendRig(t, c, data, []uint32{105, 105, 105})
 		recs := rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == 5 })
 		if recs[2].callControl == recs[0].callControl {
 			t.Errorf("%s: data header joined the preamble call", tc)

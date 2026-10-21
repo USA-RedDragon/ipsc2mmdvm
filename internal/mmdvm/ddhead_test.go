@@ -48,15 +48,15 @@ func TestXPRDDHeadCall(t *testing.T) {
 		c.HandleIPSCBurst(b[0], b, addr)
 		last = b
 	}
-	var types []uint
+	var types []uint8
 	for len(c.tx_chan) > 0 {
 		p := <-c.tx_chan
-		if !p.Slot || p.Src != 3191868 || p.Dst != 3140598 || p.GroupCall {
-			t.Errorf("packet with slot %t src %d dst %d group %t", p.Slot, p.Src, p.Dst, p.GroupCall)
+		if p.Slot == enums.Slot1 || p.Source != 3191868 || p.Destination != 3140598 || !p.Private {
+			t.Errorf("packet with slot %v src %d dst %d group %t", p.Slot, p.Source, p.Destination, !p.Private)
 		}
-		types = append(types, p.DTypeOrVSeq)
+		types = append(types, p.Value)
 	}
-	want := slices.Repeat([]uint{uint(enums.DataTypeCSBK)}, 6)
+	want := slices.Repeat([]uint8{uint8(enums.DataTypeCSBK)}, 6)
 	if !slices.Equal(types, want) {
 		t.Fatalf("sent %v, want %v", types, want)
 	}

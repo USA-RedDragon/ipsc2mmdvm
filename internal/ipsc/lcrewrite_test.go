@@ -8,7 +8,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 // positionLCSS returns the LCSS of the EMB of the voice burst at superframe
@@ -42,11 +42,11 @@ func fragmentsOf(t *testing.T, bursts [][33]byte) [4][4]byte {
 	return fragments
 }
 
-func checkEmbeddedLC(t *testing.T, fragments [4][4]byte, wantSrc, wantDst uint) {
+func checkEmbeddedLC(t *testing.T, fragments [4][4]byte, wantSrc, wantDst uint32) {
 	t.Helper()
 	lc := embeddedLCOf(t, fragments)
-	dst := uint(lc[3])<<16 | uint(lc[4])<<8 | uint(lc[5])
-	src := uint(lc[6])<<16 | uint(lc[7])<<8 | uint(lc[8])
+	dst := uint32(lc[3])<<16 | uint32(lc[4])<<8 | uint32(lc[5])
+	src := uint32(lc[6])<<16 | uint32(lc[7])<<8 | uint32(lc[8])
 	if dst != wantDst || src != wantSrc {
 		t.Fatalf("embedded LC % X: dst %d src %d, want dst %d src %d", lc, dst, src, wantDst, wantSrc)
 	}
@@ -67,20 +67,19 @@ func TestEncodeEmbeddedLCMatchesAirData(t *testing.T) {
 		"444d52446c20baf80008650020baef84212a6849e1e48370246e951422bda7c73511505223f3a07309cda701bdb6e4733318ef91220000",
 	}
 	bursts := make([][33]byte, 0, len(frames))
-	var pkt mmdvm.Packet
+	var pkt dmrd.Data
 	for i, f := range frames {
 		data, err := hex.DecodeString(f)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var ok bool
-		pkt, ok = mmdvm.Decode(data)
-		if !ok || pkt.DTypeOrVSeq != uint(i+1) { //nolint:gosec // i is in [0,3]
-			t.Fatalf("frame %d: decode ok=%t vseq=%d", i, ok, pkt.DTypeOrVSeq)
+		pkt, err = dmrd.DecodeData(data)
+		if err != nil || pkt.Value != uint8(i+1) { //nolint:gosec // i is in [0,3]
+			t.Fatalf("frame %d: decode %v vseq=%d", i, err, pkt.Value)
 		}
-		bursts = append(bursts, pkt.DMRData)
+		bursts = append(bursts, pkt.Burst)
 	}
-	checkEmbeddedLC(t, fragmentsOf(t, bursts), pkt.Src, pkt.Dst)
+	checkEmbeddedLC(t, fragmentsOf(t, bursts), pkt.Source, pkt.Destination)
 }
 
 func burstWithLC(t *testing.T, lc9 [9]byte, dataType enums.DataType, colorCode enums.ColorCode) [33]byte {
@@ -88,14 +87,14 @@ func burstWithLC(t *testing.T, lc9 [9]byte, dataType enums.DataType, colorCode e
 	return buildLCDataBurst(t, testFullLC(t, lc9, dataType), dataType, colorCode)
 }
 
-func lcPacket(dataType enums.DataType, src, dst uint, group bool, data [33]byte) mmdvm.Packet {
-	return mmdvm.Packet{
-		Signature: mmdvm.DMRDSignature, Src: src, Dst: dst, GroupCall: group,
-		FrameType: mmdvmFrameTypeDataSync, DTypeOrVSeq: uint(dataType), StreamID: 7, DMRData: data,
+func lcPacket(dataType enums.DataType, src, dst uint32, group bool, data [33]byte) dmrd.Data {
+	return dmrd.Data{
+		Source: src, Destination: dst, Private: !group,
+		Frame: dmrd.FrameDataSync, Value: uint8(dataType), Stream: 7, Burst: data,
 	}
 }
 
-func voicePacket(vseq uint, lcss enums.LCSS) mmdvm.Packet {
+func voicePacket(vseq uint, lcss enums.LCSS) dmrd.Data {
 	b := layer2.Burst{Kind: layer2.KindVoice}
 	if vseq == 0 {
 		b.SyncPattern = enums.SyncMSSourcedVoice
@@ -104,9 +103,9 @@ func voicePacket(vseq uint, lcss enums.LCSS) mmdvm.Packet {
 		b.SyncPattern = enums.SyncNone
 		b.EmbeddedSignalling = pdu.EmbeddedSignalling{ColorCode: 3, PreemptionAndPowerControlIndicator: true, LCSS: lcss}
 	}
-	ft := mmdvmFrameTypeVoice
+	ft := dmrd.FrameVoice
 	if vseq == 0 {
-		ft = mmdvmFrameTypeVoiceSync
+		ft = dmrd.FrameVoiceSync
 	}
 	data, err := b.Encode()
 	if err != nil {
@@ -115,15 +114,16 @@ func voicePacket(vseq uint, lcss enums.LCSS) mmdvm.Packet {
 	if vseq != 0 {
 		data.SetEmbeddedData([4]byte{0x55, 0x55, 0x55, 0x55})
 	}
-	return mmdvm.Packet{
-		Signature: mmdvm.DMRDSignature, Src: 1234, Dst: 5555,
-		FrameType: ft, DTypeOrVSeq: vseq, StreamID: 7, DMRData: data,
+	return dmrd.Data{
+		Private: true,
+		Source:  1234, Destination: 5555,
+		Frame: ft, Value: uint8(vseq), Stream: 7, Burst: data, //nolint:gosec // vseq is 0 to 5
 	}
 }
 
-func decodedLC(t *testing.T, pkt mmdvm.Packet, dataType enums.DataType) [12]byte {
+func decodedLC(t *testing.T, pkt dmrd.Data, dataType enums.DataType) [12]byte {
 	t.Helper()
-	lc, ok := decodeBPTCPayload(pkt.DMRData, dataType)
+	lc, ok := decodeBPTCPayload(pkt.Burst, dataType)
 	if !ok || !layer2.MMDVMHostAccepts(dataType, lc) {
 		t.Fatalf("%s: invalid full LC % X", dataType.String(), lc)
 	}
@@ -150,12 +150,12 @@ func TestLCRewriterPrivateToGroup(t *testing.T) {
 	for _, dt := range []enums.DataType{enums.DataTypeVoiceLCHeader, enums.DataTypeTerminatorWithLC} {
 		orig := lcPacket(dt, 1234, 5555, false, burstWithLC(t, priv, dt, 5))
 		pkt := orig
-		pkt.Dst, pkt.GroupCall = 9, true
+		pkt.Destination, pkt.Private = 9, false
 		r.Rewrite(orig, &pkt)
 		if got := decodedLC(t, pkt, dt); got != testFullLC(t, want, dt) {
 			t.Fatalf("%s: LC % X, want % X", dt.String(), got, testFullLC(t, want, dt))
 		}
-		if !sameBits(orig.DMRData, pkt.DMRData, 98, 166) {
+		if !sameBits(orig.Burst, pkt.Burst, 98, 166) {
 			t.Fatalf("%s: slot type or sync changed", dt.String())
 		}
 	}
@@ -168,7 +168,7 @@ func TestLCRewriterKeepsFeatureSetForSameCallType(t *testing.T) {
 	want := [9]byte{0x00, 0x10, 0x20, 0x00, 0x00, 0x5B, 0x2F, 0x9B, 0xE5}
 	orig := lcPacket(enums.DataTypeVoiceLCHeader, 0x2F9BE5, 3120, true, burstWithLC(t, in, enums.DataTypeVoiceLCHeader, 1))
 	pkt := orig
-	pkt.Dst = 91
+	pkt.Destination = 91
 	r.Rewrite(orig, &pkt)
 	if got := decodedLC(t, pkt, enums.DataTypeVoiceLCHeader); got != testFullLC(t, want, enums.DataTypeVoiceLCHeader) {
 		t.Fatalf("LC % X, want % X", got, testFullLC(t, want, enums.DataTypeVoiceLCHeader))
@@ -184,7 +184,7 @@ func TestLCRewriterClearsReservedBit(t *testing.T) {
 	want := [9]byte{0x80, 0x00, 0x20, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
 	orig := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, in, enums.DataTypeVoiceLCHeader, 1))
 	pkt := orig
-	pkt.Dst, pkt.GroupCall = 9, true
+	pkt.Destination, pkt.Private = 9, false
 	r.Rewrite(orig, &pkt)
 	if got := decodedLC(t, pkt, enums.DataTypeVoiceLCHeader); got != testFullLC(t, want, enums.DataTypeVoiceLCHeader) {
 		t.Fatalf("LC % X, want % X", got, testFullLC(t, want, enums.DataTypeVoiceLCHeader))
@@ -196,7 +196,7 @@ func TestLCRewriterBuildsLCWhenBurstLCIsInvalid(t *testing.T) {
 	r := NewLCRewriter()
 	orig := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, [33]byte{})
 	pkt := orig
-	pkt.Dst, pkt.GroupCall = 9, true
+	pkt.Destination, pkt.Private = 9, false
 	r.Rewrite(orig, &pkt)
 	if got, want := decodedLC(t, pkt, enums.DataTypeVoiceLCHeader), constructFullLC(1234, 9, true, enums.DataTypeVoiceLCHeader); got != want {
 		t.Fatalf("LC % X, want % X", got, want)
@@ -209,15 +209,15 @@ func TestLCRewriterLeavesUnchangedPacketsAlone(t *testing.T) {
 	in := [9]byte{0x03, 0x00, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
 	orig := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, in, enums.DataTypeVoiceLCHeader, 1))
 	pkt := orig
-	pkt.Slot = true
+	pkt.Slot = enums.Slot2
 	r.Rewrite(orig, &pkt)
-	if pkt.DMRData != orig.DMRData {
+	if pkt.Burst != orig.Burst {
 		t.Fatal("a slot-only rewrite changed the burst")
 	}
 	v := voicePacket(1, enums.LCSSFirstFragment)
 	vp := v
 	r.Rewrite(v, &vp)
-	if vp.DMRData != v.DMRData {
+	if vp.Burst != v.Burst {
 		t.Fatal("an unrewritten voice burst changed")
 	}
 	if len(r.streams) != 0 {
@@ -231,7 +231,7 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
 	orig := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 	pkt := orig
-	pkt.Dst, pkt.GroupCall = 9, true
+	pkt.Destination, pkt.Private = 9, false
 	r.Rewrite(orig, &pkt)
 
 	lcss := [6]enums.LCSS{enums.LCSSSingleFragment, enums.LCSSFirstFragment, enums.LCSSContinuationFragment,
@@ -240,21 +240,21 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 	for vseq := uint(0); vseq < 6; vseq++ {
 		v := voicePacket(vseq, lcss[vseq])
 		out := v
-		out.Dst, out.GroupCall = 9, true
+		out.Destination, out.Private = 9, false
 		r.Rewrite(v, &out)
 		if vseq == 0 || vseq == 5 {
-			if out.DMRData != v.DMRData {
+			if out.Burst != v.Burst {
 				t.Fatalf("burst %c changed", 'A'+vseq)
 			}
 			continue
 		}
-		bursts = append(bursts, out.DMRData)
-		raw := layer2.RawBurst(out.DMRData)
+		bursts = append(bursts, out.Burst)
+		raw := layer2.RawBurst(out.Burst)
 		emb := raw.EMB()
 		if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != 1 || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 			t.Fatalf("burst %c EMB %s", 'A'+vseq, emb.String())
 		}
-		if !sameBits(v.DMRData, out.DMRData, 0, 108) || !sameBits(v.DMRData, out.DMRData, 156, 264) {
+		if !sameBits(v.Burst, out.Burst, 0, 108) || !sameBits(v.Burst, out.Burst, 156, 264) {
 			t.Fatalf("burst %c voice bits changed", 'A'+vseq)
 		}
 	}
@@ -266,7 +266,7 @@ func TestLCRewriterRewritesEmbeddedLC(t *testing.T) {
 
 	term := lcPacket(enums.DataTypeTerminatorWithLC, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeTerminatorWithLC, 1))
 	tp := term
-	tp.Dst, tp.GroupCall = 9, true
+	tp.Destination, tp.Private = 9, false
 	r.Rewrite(term, &tp)
 	if len(r.streams) != 0 {
 		t.Fatal("terminator did not end the stream")
@@ -280,9 +280,9 @@ func TestLCRewriterLateEntryUsesPacketFields(t *testing.T) {
 	for vseq := uint(1); vseq <= 4; vseq++ {
 		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
 		out := v
-		out.Dst, out.GroupCall = 9, true
+		out.Destination, out.Private = 9, false
 		r.Rewrite(v, &out)
-		bursts = append(bursts, out.DMRData)
+		bursts = append(bursts, out.Burst)
 	}
 	checkEmbeddedLC(t, fragmentsOf(t, bursts), 1234, 9)
 }
@@ -299,15 +299,15 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
 	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 	out := hdr
-	out.Dst, out.GroupCall = 9, true
+	out.Destination, out.Private = 9, false
 	r.Rewrite(hdr, &out)
-	if out.DMRData == hdr.DMRData {
+	if out.Burst == hdr.Burst {
 		t.Fatal("the voice header was not rewritten")
 	}
 
 	dt := enums.DataTypeVoiceLCHeader
 	var b layer2.Burst
-	if err := b.DecodeFromBytesWith(out.DMRData, &layer2.DecodeOptions{Kind: layer2.KindData, DataType: &dt}); err != nil {
+	if err := b.DecodeFromBytesWith(out.Burst, &layer2.DecodeOptions{Kind: layer2.KindData, DataType: &dt}); err != nil {
 		t.Fatal(err)
 	}
 	flc, ok := b.Data.(*pdu.FullLinkControl)
@@ -317,7 +317,7 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 	if target, source, ok := flc.Addresses(); !ok || flc.FLCO != enums.FLCOGroupVoiceChannelUser || target != 9 || source != 1234 {
 		t.Fatalf("voice header LC %s, want a group call from 1234 to 9", flc.String())
 	}
-	if again, err := b.Encode(); err != nil || again != out.DMRData {
+	if again, err := b.Encode(); err != nil || again != out.Burst {
 		t.Fatalf("voice header does not encode back to the rewritten bytes: %v", err)
 	}
 
@@ -325,20 +325,20 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 	for vseq := uint(1); vseq <= 4; vseq++ {
 		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [1,4]
 		o := v
-		o.Dst, o.GroupCall = 9, true
+		o.Destination, o.Private = 9, false
 		r.Rewrite(v, &o)
-		if o.DMRData == v.DMRData {
+		if o.Burst == v.Burst {
 			t.Fatalf("burst %c was not rewritten", 'A'+vseq)
 		}
 		var vb layer2.Burst
 		opts := layer2.DecodeOptions{Kind: layer2.KindVoice, VoiceBurst: voiceBurst(int(vseq))} //nolint:gosec // vseq is in [1,4]
-		if err := vb.DecodeFromBytesWith(o.DMRData, &opts); err != nil {
+		if err := vb.DecodeFromBytesWith(o.Burst, &opts); err != nil {
 			t.Fatal(err)
 		}
-		if again, err := vb.Encode(); err != nil || again != o.DMRData {
+		if again, err := vb.Encode(); err != nil || again != o.Burst {
 			t.Fatalf("burst %c does not encode back to the rewritten bytes: %v", 'A'+vseq, err)
 		}
-		raw := layer2.RawBurst(o.DMRData)
+		raw := layer2.RawBurst(o.Burst)
 		fragments[vseq-1] = raw.EmbeddedData()
 	}
 	lc := layer2.DecodeEmbeddedFullLinkControl(fragments, true)
@@ -354,15 +354,15 @@ func TestLCRewriterPrunesIdleStreams(t *testing.T) {
 	r.now = clock.now
 	v := voicePacket(1, enums.LCSSFirstFragment)
 	out := v
-	out.Dst = 9
+	out.Destination = 9
 	r.Rewrite(v, &out)
 	if len(r.streams) != 1 {
 		t.Fatalf("expected 1 stream, got %d", len(r.streams))
 	}
 	clock.t = clock.t.Add(streamIdleTimeout + pruneInterval + time.Second)
-	v.StreamID = 8
+	v.Stream = 8
 	out = v
-	out.Dst = 9
+	out.Destination = 9
 	r.Rewrite(v, &out)
 	if _, ok := r.streams[7]; ok || len(r.streams) != 1 {
 		t.Fatalf("idle stream not pruned: %d streams", len(r.streams))
@@ -378,10 +378,10 @@ func TestLCRewriterPrunesWithoutRewrites(t *testing.T) {
 	r.now = clock.now
 	v := voicePacket(1, enums.LCSSFirstFragment)
 	out := v
-	out.Dst = 9
+	out.Destination = 9
 	r.Rewrite(v, &out)
 	clock.t = clock.t.Add(streamIdleTimeout + pruneInterval + time.Second)
-	v.StreamID = 8
+	v.Stream = 8
 	out = v
 	r.Rewrite(v, &out)
 	r.mu.Lock()
@@ -410,7 +410,7 @@ func TestTranslateToIPSCFullLCFollowsPacketFields(t *testing.T) {
 	}
 	for vseq := uint(0); vseq <= 4; vseq++ {
 		v := voicePacket(vseq, positionLCSS(int(vseq))) //nolint:gosec // vseq is in [0,4]
-		v.Src, v.Dst, v.GroupCall = 1234, 9, true
+		v.Source, v.Destination, v.Private = 1234, 9, false
 		out = tr.TranslateToIPSC(v)
 	}
 	if len(out) != 1 || len(out[0]) != 66 || string(out[0][56:59]) != string(group[0:3]) {
@@ -430,15 +430,15 @@ func withCRC(p [12]byte, dt enums.DataType) [12]byte {
 	return p
 }
 
-func rewriteBlock(t *testing.T, dataType enums.DataType, in [12]byte, src, dst uint) [12]byte {
+func rewriteBlock(t *testing.T, dataType enums.DataType, in [12]byte, src, dst uint32) [12]byte {
 	t.Helper()
 	r := NewLCRewriter()
 	orig := lcPacket(dataType, src, dst, false, buildLCDataBurst(t, in, dataType, 1))
 	pkt := orig
-	pkt.Dst, pkt.GroupCall = 9, true
+	pkt.Destination, pkt.Private = 9, false
 	r.Rewrite(orig, &pkt)
-	got, _ := decodeBPTCPayload(pkt.DMRData, dataType)
-	if !sameBits(orig.DMRData, pkt.DMRData, 98, 166) {
+	got, _ := decodeBPTCPayload(pkt.Burst, dataType)
+	if !sameBits(orig.Burst, pkt.Burst, 98, 166) {
 		t.Fatalf("%s: slot type or sync changed", dataType.String())
 	}
 	return got
@@ -518,15 +518,15 @@ func TestLCRewriterRewritesDataHeader(t *testing.T) {
 
 // voiceWithEmbeddedLC returns voice burst vseq (1-5) of a superframe whose
 // bursts B-E carry fragments as their embedded LC.
-func voiceWithEmbeddedLC(vseq uint, fragments [4][4]byte) mmdvm.Packet {
+func voiceWithEmbeddedLC(vseq uint, fragments [4][4]byte) dmrd.Data {
 	pos := int(vseq) //nolint:gosec // vseq is in [1,5]
 	p := voicePacket(vseq, positionLCSS(pos))
 	if pos > burstE {
 		return p
 	}
-	raw := layer2.RawBurst(p.DMRData)
+	raw := layer2.RawBurst(p.Burst)
 	raw.SetEmbeddedData(fragments[pos-burstB])
-	p.DMRData = raw
+	p.Burst = raw
 	return p
 }
 
@@ -544,7 +544,7 @@ func TestLCRewriterPassesNonVoiceEmbeddedLC(t *testing.T) {
 
 	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 	out := hdr
-	out.Dst, out.GroupCall = 9, true
+	out.Destination, out.Private = 9, false
 	r.Rewrite(hdr, &out)
 
 	in := [][9]byte{alias1, alias2, priv, priv}
@@ -558,15 +558,15 @@ func TestLCRewriterPassesNonVoiceEmbeddedLC(t *testing.T) {
 				v = voiceWithEmbeddedLC(vseq, raw)
 			}
 			o := v
-			o.Dst, o.GroupCall = 9, true
+			o.Destination, o.Private = 9, false
 			r.Rewrite(v, &o)
 			if vseq == 0 || vseq == 5 {
-				if o.DMRData != v.DMRData {
+				if o.Burst != v.Burst {
 					t.Fatalf("superframe %d: burst %c changed", sf, 'A'+vseq)
 				}
 				continue
 			}
-			bursts = append(bursts, o.DMRData)
+			bursts = append(bursts, o.Burst)
 		}
 		if lc := embeddedLCOf(t, fragmentsOf(t, bursts)); lc != want[sf] {
 			t.Fatalf("superframe %d: embedded LC % X, want % X", sf, lc, want[sf])
@@ -599,7 +599,7 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 		r := NewLCRewriter()
 		hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 		out := hdr
-		out.Dst, out.GroupCall = 9, true
+		out.Destination, out.Private = 9, false
 		r.Rewrite(hdr, &out)
 
 		var bursts [][33]byte
@@ -610,10 +610,10 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 					v = voiceWithEmbeddedLC(vseq, in)
 				}
 				o := v
-				o.Dst, o.GroupCall = 9, true
+				o.Destination, o.Private = 9, false
 				r.Rewrite(v, &o)
 				if sf == 1 && vseq >= 1 && vseq <= 4 {
-					bursts = append(bursts, o.DMRData)
+					bursts = append(bursts, o.Burst)
 				}
 			}
 		}
@@ -625,10 +625,10 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 
 // withUncorrectableEMB flips bits of the EMB of a voice burst until it can
 // no longer be decoded.
-func withUncorrectableEMB(t *testing.T, v mmdvm.Packet) mmdvm.Packet {
+func withUncorrectableEMB(t *testing.T, v dmrd.Data) dmrd.Data {
 	t.Helper()
 	for mask := 1; mask < 1<<16; mask++ {
-		d := v.DMRData
+		d := v.Burst
 		for i := range 16 {
 			if mask>>i&1 == 0 {
 				continue
@@ -640,7 +640,7 @@ func withUncorrectableEMB(t *testing.T, v mmdvm.Packet) mmdvm.Packet {
 			d[bit/8] ^= 1 << (7 - bit%8)
 		}
 		if res := (*layer2.RawBurst)(&d).EMB().FEC; res.Uncorrectable {
-			v.DMRData = d
+			v.Burst = d
 			return v
 		}
 	}
@@ -669,7 +669,7 @@ func TestLCRewriterRebuildsEMB(t *testing.T) {
 			lc := [9]byte{0x00, 0x00, 0x00, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
 			h := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, true, burstWithLC(t, lc, enums.DataTypeVoiceLCHeader, 1))
 			out := h
-			out.Dst = 9
+			out.Destination = 9
 			r.Rewrite(h, &out)
 		}
 		for vseq := uint(1); vseq <= 4; vseq++ {
@@ -678,9 +678,9 @@ func TestLCRewriterRebuildsEMB(t *testing.T) {
 				v = withUncorrectableEMB(t, v)
 			}
 			out := v
-			out.Dst = 9
+			out.Destination = 9
 			r.Rewrite(v, &out)
-			emb := (*layer2.RawBurst)(&out.DMRData).EMB()
+			emb := (*layer2.RawBurst)(&out.Burst).EMB()
 			if emb.FEC.Uncorrectable || emb.LCSS != positionLCSS(int(vseq)) || emb.ColorCode != tc.wantCC || emb.PreemptionAndPowerControlIndicator { //nolint:gosec // vseq is in [1,4]
 				t.Errorf("%s: burst %c EMB %s", tc.name, 'A'+vseq, emb.String())
 			}
@@ -703,7 +703,7 @@ func TestLCRewriterNeverMixesSuperframes(t *testing.T) {
 
 	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 	out := hdr
-	out.Dst, out.GroupCall = 9, true
+	out.Destination, out.Private = 9, false
 	r.Rewrite(hdr, &out)
 
 	var bursts [][33]byte
@@ -714,10 +714,10 @@ func TestLCRewriterNeverMixesSuperframes(t *testing.T) {
 				v = voiceWithEmbeddedLC(vseq, alias)
 			}
 			o := v
-			o.Dst, o.GroupCall = 9, true
+			o.Destination, o.Private = 9, false
 			r.Rewrite(v, &o)
 			if sf == 3 && vseq >= 1 && vseq <= 4 {
-				bursts = append(bursts, o.DMRData)
+				bursts = append(bursts, o.Burst)
 			}
 		}
 	}
@@ -780,7 +780,7 @@ func TestLCRewriterForgetsOldSuperframes(t *testing.T) {
 
 	hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
 	out := hdr
-	out.Dst, out.GroupCall = 9, true
+	out.Destination, out.Private = 9, false
 	r.Rewrite(hdr, &out)
 
 	var bursts [][33]byte
@@ -791,10 +791,10 @@ func TestLCRewriterForgetsOldSuperframes(t *testing.T) {
 				v = voiceWithEmbeddedLC(vseq, alias)
 			}
 			o := v
-			o.Dst, o.GroupCall = 9, true
+			o.Destination, o.Private = 9, false
 			r.Rewrite(v, &o)
 			if sf == 3 && vseq >= 1 && vseq <= 4 {
-				bursts = append(bursts, o.DMRData)
+				bursts = append(bursts, o.Burst)
 			}
 		}
 	}

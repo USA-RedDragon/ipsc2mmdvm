@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 	"github.com/lmittmann/tint"
 )
@@ -49,13 +49,13 @@ func TestBlockedLogOutputStallsNothing(t *testing.T) {
 		m := timeslot.NewManager()
 		defer m.Stop()
 		for i := range 50 {
-			tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 99))
+			tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, 99))
 			tr.TranslateToMMDVM(0x80, make([]byte, 20))
 			orig := lcPacket(enums.DataTypeVoiceLCHeader, 1, 2, true, [33]byte{})
 			rewritten := orig
-			rewritten.Dst = 3
+			rewritten.Destination = 3
 			r.Rewrite(orig, &rewritten)
-			m.Submit(false, uint(i), "net1", mmdvm.Packet{}, true, func(any) {})
+			m.Submit(false, uint(i), "net1", dmrd.Data{}, true, func(any) {})
 			m.Release(false, uint(i))
 			s.SendUserPacket(t.Context(), make([]byte, 54))
 		}
@@ -116,7 +116,7 @@ func TestPacketLocksAreFreeWhileLogging(t *testing.T) {
 		lock func(tr *IPSCTranslator, r *LCRewriter)
 	}{
 		{"translator to IPSC", func(tr *IPSCTranslator, _ *LCRewriter) {
-			tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, mmdvmFrameTypeDataSync, 99))
+			tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, 99))
 		}, func(tr *IPSCTranslator, _ *LCRewriter) { tr.SetColorCode(1) }},
 		{"translator to MMDVM", func(tr *IPSCTranslator, _ *LCRewriter) {
 			tr.TranslateToMMDVM(0x80, make([]byte, 20))
@@ -124,7 +124,7 @@ func TestPacketLocksAreFreeWhileLogging(t *testing.T) {
 		{"LC rewriter", func(_ *IPSCTranslator, r *LCRewriter) {
 			orig := lcPacket(enums.DataTypeVoiceLCHeader, 1, 2, true, [33]byte{})
 			rewritten := orig
-			rewritten.Dst = 3
+			rewritten.Destination = 3
 			r.Rewrite(orig, &rewritten)
 		}, func(_ *IPSCTranslator, r *LCRewriter) {
 			p := lcPacket(enums.DataTypeVoiceLCHeader, 1, 2, true, [33]byte{})

@@ -12,7 +12,7 @@ func TestGoldenLoginMessages(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
 	client.sendLogin()
-	client.sendRPTK([]byte{0x12, 0x34, 0xab, 0xcd})
+	client.sendRPTK(0x1234abcd)
 	client.sendRPTC()
 	client.sendPing()
 	got := []string{

@@ -10,7 +10,7 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
-	mmdvm "github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
 // Voice calls captured from a MOTOTRBO repeater on a weak signal, taken
@@ -109,16 +109,16 @@ func replayStreams(t *testing.T, packets []string) (string, []uint) {
 			ids = append(ids, 0)
 		}
 		for _, p := range out {
-			ids = append(ids, p.StreamID)
+			ids = append(ids, uint(p.Stream))
 			switch {
-			case p.FrameType == mmdvmFrameTypeDataSync && p.DTypeOrVSeq == 1:
+			case p.Frame == dmrd.FrameDataSync && p.Value == 1:
 				sb.WriteByte('H')
-			case p.FrameType == mmdvmFrameTypeDataSync:
+			case p.Frame == dmrd.FrameDataSync:
 				sb.WriteByte('T')
-			case p.FrameType == mmdvmFrameTypeVoiceSync:
+			case p.Frame == dmrd.FrameVoiceSync:
 				sb.WriteByte('A')
 			default:
-				sb.WriteByte("ABCDEF"[p.DTypeOrVSeq%6])
+				sb.WriteByte("ABCDEF"[p.Value%6])
 			}
 		}
 	}
@@ -144,7 +144,7 @@ func without(packets []string, drop ...int) []string {
 func TestIPSCEndBitRestartsSuperframe(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
-	burst := func(seq uint16, length int, end bool) []mmdvm.Packet {
+	burst := func(seq uint16, length int, end bool) []dmrd.Data {
 		d := makeTestIPSCPacket(0x80, ipscBurstSlot1, true, false)
 		d = append(d, make([]byte, 66)...)[:length]
 		if length == 52 {
@@ -159,7 +159,7 @@ func TestIPSCEndBitRestartsSuperframe(t *testing.T) {
 	burst(1, 52, false)
 	burst(2, 57, true)
 	out := burst(4, 57, false)
-	if len(out) != 1 || out[0].FrameType != mmdvmFrameTypeVoice || out[0].DTypeOrVSeq != burstB {
+	if len(out) != 1 || out[0].Frame != dmrd.FrameVoice || out[0].Value != burstB {
 		t.Fatalf("burst after a lost restart A: got %+v, want burst B", out)
 	}
 }
@@ -219,12 +219,12 @@ func TestIPSCVoiceBurstPositionsFromCapture(t *testing.T) {
 func headerTermDataPackets(t *testing.T, group, slot bool) [][]byte {
 	t.Helper()
 	tr := newTestTranslator(t)
-	data := makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypePIHeader))
-	data.StreamID = 0x5678
+	data := makeTestMMDVMPacket(group, slot, dmrd.FrameDataSync, uint8(enums.DataTypePIHeader))
+	data.Stream = 0x5678
 	out := make([][]byte, 0, 5)
-	for _, p := range []mmdvm.Packet{
-		makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeVoiceLCHeader)),
-		makeTestMMDVMPacket(group, slot, mmdvmFrameTypeDataSync, uint(enums.DataTypeTerminatorWithLC)),
+	for _, p := range []dmrd.Data{
+		makeTestMMDVMPacket(group, slot, dmrd.FrameDataSync, uint8(enums.DataTypeVoiceLCHeader)),
+		makeTestMMDVMPacket(group, slot, dmrd.FrameDataSync, uint8(enums.DataTypeTerminatorWithLC)),
 		data,
 	} {
 		out = append(out, tr.TranslateToIPSC(p)...)
@@ -287,7 +287,7 @@ func TestIPSCVoiceBurstEndBitKeepsStream(t *testing.T) {
 			t.Fatalf("packet %d: %v", i, err)
 		}
 		for _, p := range tr.TranslateToMMDVM(data[0], data) {
-			streams[p.StreamID] = true
+			streams[uint(p.Stream)] = true
 		}
 	}
 	if len(streams) != 1 {
@@ -329,11 +329,11 @@ func TestIPSCEmbeddedSignallingFromCapture(t *testing.T) {
 			t.Fatalf("packet %d: %v", i, err)
 		}
 		out := tr.TranslateToMMDVM(data[0], data)
-		if len(out) != 1 || out[0].FrameType != mmdvmFrameTypeVoice {
+		if len(out) != 1 || out[0].Frame != dmrd.FrameVoice {
 			continue
 		}
-		pos := int(out[0].DTypeOrVSeq) //nolint:gosec // a voice sequence is 1-5
-		raw := layer2.RawBurst(out[0].DMRData)
+		pos := int(out[0].Value) //nolint:gosec // a voice sequence is 1-5
+		raw := layer2.RawBurst(out[0].Burst)
 		emb := raw.EMB()
 		if got := emb.LCSS; got != positionLCSS(pos) {
 			t.Errorf("packet %d burst %c: LCSS %d, want %d", i, 'A'+pos, got, positionLCSS(pos))

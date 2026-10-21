@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 )
 
@@ -102,8 +102,8 @@ func TestSrcRewriteRewritesLinkControlToIPSC(t *testing.T) {
 	}
 	for _, p := range call {
 		for _, pkt := range src.TranslateToMMDVM(p[0], p) {
-			pkt.StreamID = 0x77
-			c.handleReady(pkt.Encode())
+			pkt.Stream = 0x77
+			c.handleReady(encodeDMRD(pkt))
 		}
 	}
 
@@ -152,7 +152,7 @@ func TestTGRewriteRewritesLinkControlToMMDVM(t *testing.T) {
 	// Captured MOTOTRBO group call LC: Motorola FID, TG 3120.
 	call := ipscCall(0x2F9BE5, 3120, true,
 		mustHex(t, "001020000C302F9BE5DAD45A"), mustHex(t, "001020000C302F9BE5D5DB55"))
-	var out []proto.Packet
+	var out []dmrd.Data
 	for _, p := range call {
 		c.HandleIPSCBurst(p[0], p, addr)
 		for len(c.tx_chan) > 0 {
@@ -175,7 +175,7 @@ func TestTGRewriteRewritesLinkControlToMMDVM(t *testing.T) {
 	}
 	// Embedded LC fragments of 00 10 20 00 00 5B 2F 9B E5.
 	for i, want := range []string{"470f0f06", "0f090047", "0c121803", "17421747"} {
-		if g := hex.EncodeToString(embeddedFragment(out[2+i].DMRData)); g != want {
+		if g := hex.EncodeToString(embeddedFragment(out[2+i].Burst)); g != want {
 			t.Fatalf("burst %c embedded fragment %s, want %s", 'B'+i, g, want)
 		}
 	}
@@ -218,7 +218,7 @@ func TestSrcRewriteRewritesCSBKToIPSC(t *testing.T) {
 	if len(pkts) != 1 {
 		t.Fatalf("expected 1 MMDVM packet, got %d", len(pkts))
 	}
-	c.handleReady(pkts[0].Encode())
+	c.handleReady(encodeDMRD(pkts[0]))
 	var p []byte
 	select {
 	case p = <-got:

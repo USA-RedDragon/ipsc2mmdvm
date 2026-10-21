@@ -14,10 +14,10 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
-	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/proto"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
@@ -29,7 +29,7 @@ type MMDVMClient struct {
 	done         chan struct{}
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
-	tx_chan      chan proto.Packet
+	tx_chan      chan dmrd.Data
 	conn         net.Conn
 	connMu       sync.Mutex    // protects conn and connStop
 	connStop     chan struct{} // closed when conn is replaced
@@ -55,7 +55,7 @@ type MMDVMClient struct {
 	dial        func(ctx context.Context, network, address string) (net.Conn, error)
 	dialTimeout time.Duration
 	sessMu      sync.Mutex // serializes handshake transitions with supervise
-	salt        []byte     // last RPTACK salt, guarded by sessMu
+	salt        uint32     // last RPTACK salt, guarded by sessMu
 	resentAt    time.Time  // last handshake resend, guarded by sessMu
 
 	// Rewrite rules built from config, applied to packets
@@ -73,24 +73,24 @@ type MMDVMClient struct {
 	// outData holds the data packet so far of each outbound data call,
 	// to find the block that ends it.
 	outDataMu sync.Mutex
-	outData   map[uint]*outboundDataCall
+	outData   map[uint32]*outboundDataCall
 
 	// preambles holds the outbound call with preambles on each timeslot,
 	// to send its preambles and data as one call. slotStreams holds when
 	// each outbound stream on each timeslot was last seen.
 	preambleMu  sync.Mutex
 	preambles   [2]*preambleCall
-	slotStreams [2]map[uint]time.Time
+	slotStreams [2]map[uint32]time.Time
 
 	// inboundSlots holds the timeslot of each inbound call that has not
 	// ended, to end a data call whose last packet was dropped.
 	inboundMu    sync.Mutex
-	inboundSlots map[uint]inboundCall
+	inboundSlots map[uint32]inboundCall
 }
 
 // inboundCall is the timeslot of an IPSC call that has not ended.
 type inboundCall struct {
-	slot     bool
+	slot     enums.Slot
 	lastSeen time.Time
 }
 
@@ -99,7 +99,7 @@ const maxInboundCalls = 64
 
 // noteInboundSlot records the timeslot, after rewriting, of the inbound
 // call streamID, or forgets it when end is set.
-func (h *MMDVMClient) noteInboundSlot(streamID uint, slot, end bool) {
+func (h *MMDVMClient) noteInboundSlot(streamID uint32, slot enums.Slot, end bool) {
 	h.inboundMu.Lock()
 	defer h.inboundMu.Unlock()
 	if end {
@@ -107,10 +107,10 @@ func (h *MMDVMClient) noteInboundSlot(streamID uint, slot, end bool) {
 		return
 	}
 	if h.inboundSlots == nil {
-		h.inboundSlots = make(map[uint]inboundCall)
+		h.inboundSlots = make(map[uint32]inboundCall)
 	}
 	if _, ok := h.inboundSlots[streamID]; !ok && len(h.inboundSlots) >= maxInboundCalls {
-		var oldest uint
+		var oldest uint32
 		var t time.Time
 		for id, c := range h.inboundSlots {
 			if t.IsZero() || c.lastSeen.Before(t) {
@@ -133,7 +133,7 @@ type dataCallEnd struct{}
 // one ends when its buffered packets have been sent. A call whose end
 // packet reached the timeslot manager is no longer tracked, so it is left
 // alone.
-func (h *MMDVMClient) endInboundCall(streamID uint) {
+func (h *MMDVMClient) endInboundCall(streamID uint32) {
 	h.inboundMu.Lock()
 	c, ok := h.inboundSlots[streamID]
 	delete(h.inboundSlots, streamID)
@@ -141,8 +141,8 @@ func (h *MMDVMClient) endInboundCall(streamID uint) {
 	if !ok || h.inboundTSMgr == nil {
 		return
 	}
-	if h.inboundTSMgr.Submit(c.slot, streamID, "ipsc", dataCallEnd{}, true, h.forwardInbound) == timeslot.Deliver {
-		h.inboundTSMgr.Release(c.slot, streamID)
+	if h.inboundTSMgr.Submit(isTS2(c.slot), uint(streamID), "ipsc", dataCallEnd{}, true, h.forwardInbound) == timeslot.Deliver {
+		h.inboundTSMgr.Release(isTS2(c.slot), uint(streamID))
 	}
 }
 
@@ -180,20 +180,8 @@ const (
 	STATE_TIMEOUT
 )
 
-const (
-	packetTypeMstack = "MSTACK"
-	packetTypeMstnak = "MSTNAK"
-	packetTypeMstcl  = "MSTCL"
-)
-
-// DMR frame type and data type constants for call termination detection.
-const (
-	frameTypeDataSync     uint = 2 // FrameType value for data sync (header/terminator)
-	dtypeTerminatorWithLC uint = 2 // DataType value for Terminator with Link Control
-)
-
 func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
-	tx_chan := make(chan proto.Packet, 256)
+	tx_chan := make(chan dmrd.Data, 256)
 	translator, err := ipsc.NewIPSCTranslator()
 	if err != nil {
 		slog.Warn("failed to load IPSC translator", "error", err)
@@ -383,8 +371,6 @@ func (h *MMDVMClient) connect() (net.Conn, error) {
 	return conn, nil
 }
 
-const rptAck = "RPTACK"
-
 const defaultDialTimeout = 10 * time.Second
 
 func (h *MMDVMClient) handler() {
@@ -426,14 +412,15 @@ func (h *MMDVMClient) handleState(gen uint64, data []byte) {
 		slog.Debug("Dropping packet from a closed connection", "network", h.cfg.Name)
 		return
 	}
-	if len(data) >= 5 && string(data[:5]) == packetTypeMstcl {
+	cmd := dmrd.Classify(data, dialect)
+	if cmd == dmrd.CommandMSTCL {
 		defer h.sessMu.Unlock()
 		slog.Warn("Master closed the connection, reconnecting after the retry interval", "network", h.cfg.Name)
 		h.reconnect()
 		return
 	}
 	if h.currentState() == STATE_READY {
-		if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+		if cmd == dmrd.CommandMSTNAK {
 			defer h.sessMu.Unlock()
 			h.relogin()
 			return
@@ -447,11 +434,11 @@ func (h *MMDVMClient) handleState(gen uint64, data []byte) {
 	case STATE_IDLE:
 		slog.Info("Got data from MMDVM server while idle", "network", h.cfg.Name)
 	case STATE_SENT_LOGIN:
-		h.handleSentLogin(data)
+		h.handleSentLogin(cmd, data)
 	case STATE_SENT_AUTH:
-		h.handleSentAuth(data)
+		h.handleSentAuth(cmd)
 	case STATE_SENT_RPTC:
-		h.handleSentRPTC(data)
+		h.handleSentRPTC(cmd)
 	case STATE_READY:
 	case STATE_TIMEOUT:
 		slog.Info("Got data from MMDVM server while in timeout state", "network", h.cfg.Name)
@@ -461,14 +448,15 @@ func (h *MMDVMClient) handleState(gen uint64, data []byte) {
 // The handleSent* functions run with sessMu held. A rejected step is not
 // resent here; supervise retries it on its next tick.
 
-func (h *MMDVMClient) handleSentLogin(data []byte) {
-	if len(data) >= 6 && string(data[:6]) == rptAck {
-		if len(data) < 10 {
-			slog.Warn("RPTACK response too short", "network", h.cfg.Name, "length", len(data))
+func (h *MMDVMClient) handleSentLogin(cmd dmrd.Command, data []byte) {
+	if cmd == dmrd.CommandRPTACK {
+		ack, err := dmrd.DecodeControl(data, dialect)
+		if err != nil {
+			slog.Warn("RPTACK response without a salt", "network", h.cfg.Name, "length", len(data), "error", err)
 			return
 		}
 		slog.Info("Connected. Authenticating", "network", h.cfg.Name)
-		h.salt = append(h.salt[:0], data[len(data)-4:]...)
+		h.salt = ack.ID
 		h.setState(STATE_SENT_AUTH)
 		h.sendRPTK(h.salt)
 	} else {
@@ -476,12 +464,12 @@ func (h *MMDVMClient) handleSentLogin(data []byte) {
 	}
 }
 
-func (h *MMDVMClient) handleSentAuth(data []byte) {
-	if len(data) >= 6 && string(data[:6]) == rptAck {
+func (h *MMDVMClient) handleSentAuth(cmd dmrd.Command) {
+	if cmd == dmrd.CommandRPTACK {
 		slog.Info("Authenticated. Sending configuration", "network", h.cfg.Name)
 		h.setState(STATE_SENT_RPTC)
 		h.sendRPTC()
-	} else if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+	} else if cmd == dmrd.CommandMSTNAK {
 		slog.Warn("Password rejected", "network", h.cfg.Name)
 		if h.metrics != nil {
 			h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
@@ -490,8 +478,8 @@ func (h *MMDVMClient) handleSentAuth(data []byte) {
 	}
 }
 
-func (h *MMDVMClient) handleSentRPTC(data []byte) {
-	if len(data) >= 6 && string(data[:6]) == rptAck {
+func (h *MMDVMClient) handleSentRPTC(cmd dmrd.Command) {
+	if cmd == dmrd.CommandRPTACK {
 		slog.Info("Config accepted, logged in", "network", h.cfg.Name)
 		h.lastHeard.Store(time.Now().UnixNano())
 		h.setState(STATE_READY)
@@ -499,22 +487,20 @@ func (h *MMDVMClient) handleSentRPTC(data []byte) {
 			h.metrics.MMDVMConnectionState.WithLabelValues(h.cfg.Name).Set(2)
 		}
 		h.sendPing()
-	} else if len(data) >= 6 && string(data[:6]) == packetTypeMstnak {
+	} else if cmd == dmrd.CommandMSTNAK {
 		slog.Warn("Configuration rejected, logging in again", "network", h.cfg.Name)
 		h.setState(STATE_SENT_LOGIN)
 	}
 }
 
 func (h *MMDVMClient) handleReady(data []byte) {
-	switch string(data[:4]) {
-	case "RPTS":
-		if len(data) >= 7 && string(data[:7]) == "RPTSBKN" {
-			slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
-		}
-	case "DMRD":
-		packet, ok := proto.Decode(data)
-		if !ok {
-			slog.Info("Error unpacking packet", "network", h.cfg.Name)
+	switch dmrd.Classify(data, dialect) { //nolint:exhaustive // the master sends nothing else once logged in
+	case dmrd.CommandRPTSBKN:
+		slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
+	case dmrd.CommandDMRD:
+		packet, err := dmrd.DecodeData(data)
+		if err != nil {
+			slog.Info("Error unpacking packet", "network", h.cfg.Name, "error", err)
 			return
 		}
 		if h.metrics != nil {
@@ -740,7 +726,7 @@ func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}, gen uint64) {
 			continue
 		}
 		h.lastHeard.Store(time.Now().UnixNano())
-		if n >= 7 && string(data[:7]) == "MSTPONG" {
+		if dmrd.Classify(data[:n], dialect) == dmrd.CommandMSTPONG {
 			h.handlePong()
 			continue
 		}
@@ -868,8 +854,8 @@ func (h *MMDVMClient) forwardTX() {
 	}
 }
 
-// translateAndForwardToIPSC converts a proto.Packet to IPSC and sends it.
-func (h *MMDVMClient) translateAndForwardToIPSC(packet proto.Packet) {
+// translateAndForwardToIPSC converts a dmrd.Data to IPSC and sends it.
+func (h *MMDVMClient) translateAndForwardToIPSC(packet dmrd.Data) {
 	if h.ipscHandler.Load() != nil && h.translator != nil {
 		h.sendIPSC(h.translator.TranslateToIPSC(packet))
 	}
@@ -931,17 +917,17 @@ func (h *MMDVMClient) forwardIPSC() {
 // rate 1/2, 3/4 or 1 block is data, and anything else, such as a CSBK or
 // the end of a call of preambles, is neither.
 func OutboundPacketKind(packet any) timeslot.PacketKind {
-	p, ok := packet.(proto.Packet)
+	p, ok := packet.(dmrd.Data)
 	if !ok {
 		return timeslot.KindOther
 	}
-	if p.FrameType != frameTypeDataSync {
-		if p.FrameType < frameTypeDataSync {
+	if p.Frame != dmrd.FrameDataSync {
+		if p.Frame < dmrd.FrameDataSync {
 			return timeslot.KindVoice
 		}
 		return timeslot.KindOther
 	}
-	switch enums.DataType(p.DTypeOrVSeq) { //nolint:exhaustive,gosec // the other data types are neither; the data type has 4 bits
+	switch enums.DataType(p.Value) { //nolint:exhaustive,gosec // the other data types are neither; the data type has 4 bits
 	case enums.DataTypeVoiceLCHeader, enums.DataTypePIHeader, enums.DataTypeTerminatorWithLC:
 		return timeslot.KindVoice
 	case enums.DataTypeDataHeader, enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
@@ -954,11 +940,11 @@ func OutboundPacketKind(packet any) timeslot.PacketKind {
 // timeslot: a voice terminator, a CSBK that nothing of its call follows, or
 // the burst that completes a data packet. Data calls have no terminator, so
 // without this they hold the slot until it times out.
-func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
-	if pkt.FrameType != frameTypeDataSync {
+func (h *MMDVMClient) outboundCallEnds(pkt dmrd.Data) bool {
+	if pkt.Frame != dmrd.FrameDataSync {
 		return false
 	}
-	switch enums.DataType(pkt.DTypeOrVSeq) { //nolint:exhaustive,gosec // other data types never end a call; the data type has 4 bits
+	switch enums.DataType(pkt.Value) { //nolint:exhaustive,gosec // other data types never end a call; the data type has 4 bits
 	case enums.DataTypeTerminatorWithLC:
 		return true
 	case enums.DataTypeCSBK:
@@ -970,7 +956,7 @@ func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
 	h.outDataMu.Lock()
 	defer h.outDataMu.Unlock()
 	now := time.Now()
-	call := h.outData[pkt.StreamID]
+	call := h.outData[pkt.Stream]
 	if call == nil {
 		for id, c := range h.outData {
 			if now.Sub(c.lastSeen) > outDataIdle {
@@ -978,16 +964,16 @@ func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
 			}
 		}
 		if h.outData == nil {
-			h.outData = make(map[uint]*outboundDataCall)
+			h.outData = make(map[uint32]*outboundDataCall)
 		}
 		call = &outboundDataCall{}
-		h.outData[pkt.StreamID] = call
+		h.outData[pkt.Stream] = call
 	}
 	call.lastSeen = now
-	if !ipsc.DataBurstEndsCall(&call.data, pkt.DMRData) {
+	if !ipsc.DataBurstEndsCall(&call.data, pkt.Burst) {
 		return false
 	}
-	delete(h.outData, pkt.StreamID)
+	delete(h.outData, pkt.Stream)
 	return true
 }
 
@@ -997,20 +983,20 @@ func (h *MMDVMClient) outboundCallEnds(pkt proto.Packet) bool {
 // to follow. MMDVMHost sends each CSBK and data header with a new stream
 // ID, so its CSBKs other than preambles end their call; ipsc2mmdvm sends a
 // whole call, preambles and data, with one stream ID.
-func (h *MMDVMClient) csbkEndsCall(pkt proto.Packet) bool {
-	if isPreambleCSBK(pkt.DMRData) {
+func (h *MMDVMClient) csbkEndsCall(pkt dmrd.Data) bool {
+	if isPreambleCSBK(pkt.Burst) {
 		return false
 	}
 	h.outDataMu.Lock()
 	defer h.outDataMu.Unlock()
-	call, ok := h.outData[pkt.StreamID]
+	call, ok := h.outData[pkt.Stream]
 	return !ok || time.Since(call.lastSeen) > outDataIdle
 }
 
 // isPreambleCSBK reports whether data, a CSBK burst, is a preamble CSBK
 // (ETSI TS 102 361-2 7.1.2.5).
-func isPreambleCSBK(data [33]byte) bool {
-	payload, _ := layer2.RawBurst(data).BPTCPayload()
+func isPreambleCSBK(data layer2.RawBurst) bool {
+	payload, _ := data.BPTCPayload()
 	csbk := pdu.CSBKBytes(payload)
 	return csbk.FID() == enums.FIDStandardized && csbk.Opcode() == pdu.CSBKPreamble
 }
@@ -1031,14 +1017,20 @@ func (c stopContext) Err() error {
 	}
 }
 
-func isTerminator(pkt proto.Packet) bool {
-	return pkt.FrameType == frameTypeDataSync && pkt.DTypeOrVSeq == dtypeTerminatorWithLC
+// isTS2 reports whether slot is timeslot 2, as the timeslot managers take
+// it.
+func isTS2(slot enums.Slot) bool {
+	return slot == enums.Slot2
+}
+
+func isTerminator(pkt dmrd.Data) bool {
+	return pkt.Frame == dmrd.FrameDataSync && pkt.Value == uint8(enums.DataTypeTerminatorWithLC)
 }
 
 // submitOutbound passes a packet for the MMDVM→IPSC direction through
 // the shared timeslot manager. Buffered packets are later sent by
 // forwardOutbound on this client, so a call always uses one translator.
-func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
+func (h *MMDVMClient) submitOutbound(packet dmrd.Data) {
 	packet, ended := h.joinPreambleCall(packet)
 	if ended != nil {
 		h.endOutboundCall(ended)
@@ -1051,23 +1043,23 @@ func (h *MMDVMClient) submitOutbound(packet proto.Packet) {
 		h.translateAndForwardToIPSC(packet)
 		return
 	}
-	switch h.outboundTSMgr.Submit(packet.Slot, packet.StreamID, h.cfg.Name, packet, end, h.forwardOutbound) {
+	switch h.outboundTSMgr.Submit(isTS2(packet.Slot), uint(packet.Stream), h.cfg.Name, packet, end, h.forwardOutbound) {
 	case timeslot.Deliver:
 		h.translateAndForwardToIPSC(packet)
 		if end {
-			h.outboundTSMgr.Release(packet.Slot, packet.StreamID)
+			h.outboundTSMgr.Release(isTS2(packet.Slot), uint(packet.Stream))
 		}
 	case timeslot.Queued:
 		slog.Debug("MMDVM DMRD buffered (timeslot busy)",
-			"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.StreamID)
+			"network", h.cfg.Name, "slot", packet.Slot, "streamID", packet.Stream)
 	case timeslot.Dropped:
 		h.countTimeslotDrop(packet)
 	}
 }
 
-func (h *MMDVMClient) countTimeslotDrop(pkt proto.Packet) {
+func (h *MMDVMClient) countTimeslotDrop(pkt dmrd.Data) {
 	slog.Debug("packet dropped (timeslot buffer full)",
-		"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
+		"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.Stream)
 	if h.metrics != nil {
 		h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "timeslot_full").Inc()
 	}
@@ -1075,7 +1067,7 @@ func (h *MMDVMClient) countTimeslotDrop(pkt proto.Packet) {
 
 func (h *MMDVMClient) forwardOutbound(packet any) {
 	switch p := packet.(type) {
-	case proto.Packet:
+	case dmrd.Data:
 		h.translateAndForwardToIPSC(p)
 	case outboundEnd:
 		if h.translator != nil {
@@ -1085,14 +1077,14 @@ func (h *MMDVMClient) forwardOutbound(packet any) {
 }
 
 func (h *MMDVMClient) forwardInbound(packet any) {
-	if pkt, ok := packet.(proto.Packet); ok {
+	if pkt, ok := packet.(dmrd.Data); ok {
 		h.sendInbound(pkt)
 	}
 }
 
 // sendInbound queues a packet for the MMDVM master. It returns false
 // if the client is stopping.
-func (h *MMDVMClient) sendInbound(pkt proto.Packet) bool {
+func (h *MMDVMClient) sendInbound(pkt dmrd.Data) bool {
 	select {
 	case h.tx_chan <- pkt:
 		return true
@@ -1129,11 +1121,14 @@ func (h *MMDVMClient) MatchesRules(packetType byte, data []byte, passallOnly boo
 		return false
 	}
 	// Build a probe packet from IPSC header fields.
-	probe := proto.Packet{
-		Src:       uint(data[6])<<16 | uint(data[7])<<8 | uint(data[8]),
-		Dst:       uint(data[9])<<16 | uint(data[10])<<8 | uint(data[11]),
-		GroupCall: packetType == 0x80 || packetType == 0x83,
-		Slot:      (data[17] & 0x20) != 0,
+	probe := dmrd.Data{
+		Source:      uint32(data[6])<<16 | uint32(data[7])<<8 | uint32(data[8]),
+		Destination: uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11]),
+		Private:     packetType != 0x80 && packetType != 0x83,
+		Slot:        enums.Slot1,
+	}
+	if data[17]&0x20 != 0 {
+		probe.Slot = enums.Slot2
 	}
 	if passallOnly {
 		return rewrite.Apply(h.passallRewrites, &probe)
@@ -1158,11 +1153,11 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 	matched := false
 	defer func() {
 		if dataEnd && hadStream {
-			h.endInboundCall(uint(streamID))
+			h.endInboundCall(streamID)
 		}
 	}()
 	for i, pkt := range packets {
-		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
+		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Source, "dst", pkt.Destination, "groupCall", !pkt.Private, "slot", pkt.Slot)
 		// Apply RF→Net rewrite rules (outbound to this master).
 		// Try specific rewrites first; if none match, try passall
 		// rules as a fallback.
@@ -1177,7 +1172,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			}
 		}
 		h.rfLC.Rewrite(orig, &pkt)
-		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Src, "dst", pkt.Dst, "groupCall", pkt.GroupCall, "slot", pkt.Slot)
+		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Source, "dst", pkt.Destination, "groupCall", !pkt.Private, "slot", pkt.Slot)
 
 		if h.inboundTSMgr == nil {
 			matched = true
@@ -1188,19 +1183,19 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 		}
 
 		end := isTerminator(pkt) || (dataEnd && i == len(packets)-1)
-		h.noteInboundSlot(pkt.StreamID, pkt.Slot, end)
-		switch h.inboundTSMgr.Submit(pkt.Slot, pkt.StreamID, "ipsc", pkt, end, h.forwardInbound) {
+		h.noteInboundSlot(pkt.Stream, pkt.Slot, end)
+		switch h.inboundTSMgr.Submit(isTS2(pkt.Slot), uint(pkt.Stream), "ipsc", pkt, end, h.forwardInbound) {
 		case timeslot.Deliver:
 			matched = true
 			if !h.sendInbound(pkt) {
 				return matched
 			}
 			if end {
-				h.inboundTSMgr.Release(pkt.Slot, pkt.StreamID)
+				h.inboundTSMgr.Release(isTS2(pkt.Slot), uint(pkt.Stream))
 			}
 		case timeslot.Queued:
 			slog.Debug("HandleIPSCBurst: buffered (timeslot busy)",
-				"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.StreamID)
+				"network", h.cfg.Name, "slot", pkt.Slot, "streamID", pkt.Stream)
 		case timeslot.Dropped:
 			h.countTimeslotDrop(pkt)
 		}
