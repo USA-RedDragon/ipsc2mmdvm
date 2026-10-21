@@ -387,7 +387,7 @@ func (s *IPSCServer) deRegisterSelf() {
 	if s.master == nil {
 		return
 	}
-	s.out = s.master.Close(s.clock(), s.out[:0])
+	s.out = s.master.Close(s.out[:0])
 	s.actLocked(0)
 }
 

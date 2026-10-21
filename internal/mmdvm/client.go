@@ -438,7 +438,7 @@ func (h *MMDVMClient) outputs(out []session.Output) {
 			if o.Command == dmrd.CommandRPTSBKN {
 				slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
 			}
-		case session.OutputLogin, session.OutputConfig, session.OutputOptions:
+		case session.OutputLogin, session.OutputConfig, session.OutputOptions, session.OutputPong:
 		}
 	}
 }
@@ -693,7 +693,7 @@ func (h *MMDVMClient) closeSession() {
 	defer h.peerMu.Unlock()
 	var out []session.Output
 	if h.peer != nil {
-		out = h.peer.Close(h.clock(), make([]session.Output, 0, session.MaxOutputs))
+		out = h.peer.Close(make([]session.Output, 0, session.MaxOutputs))
 	}
 	h.up.Store(false)
 	h.connMu.Lock()

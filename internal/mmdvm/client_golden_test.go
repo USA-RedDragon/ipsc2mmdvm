@@ -32,7 +32,7 @@ func TestGoldenLoginMessages(t *testing.T) {
 	keep(p.Packet(0, ack, nil))
 	keep(p.Packet(0, ack, nil))
 	keep(p.Tick(session.RetryDefault, nil))
-	keep(p.Close(session.RetryDefault, nil))
+	keep(p.Close(nil))
 	want := []string{
 		goldenRPTL, goldenRPTK, goldenRPTC, goldenRPTPING, goldenRPTCL,
 	}
