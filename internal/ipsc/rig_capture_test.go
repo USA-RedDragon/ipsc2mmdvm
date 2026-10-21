@@ -734,7 +734,7 @@ func TestRigLateEntryToIPSCCarriesEmbeddedLC(t *testing.T) {
 		}
 		out := tr.TranslateToIPSC(dmrd.Data{
 			Source: 3191868, Destination: 91, Private: false, Slot: enums.Slot2,
-			Frame: ft, Value: uint8(i), Stream: 79, Burst: [33]byte(w),
+			Frame: ft, Value: uint8(i), Stream: 79, Seq: uint8(i), Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets", i, len(out))
@@ -762,7 +762,7 @@ func lateEntryToIPSC(t *testing.T, bursts []string, dst uint32, group bool) [][]
 		}
 		out := tr.TranslateToIPSC(dmrd.Data{
 			Source: 3191868, Destination: dst, Private: !group, Slot: enums.Slot2,
-			Frame: ft, Value: uint8(i), Stream: 83, Burst: [33]byte(w),
+			Frame: ft, Value: uint8(i), Stream: 83, Seq: uint8(i), Burst: [33]byte(w),
 		})
 		if len(out) != 1 {
 			t.Fatalf("burst %d: got %d packets", i, len(out))

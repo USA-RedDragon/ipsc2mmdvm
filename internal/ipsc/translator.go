@@ -16,6 +16,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
+	"github.com/USA-RedDragon/dmrgo/v2/voice"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/logging"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
@@ -36,6 +37,8 @@ type IPSCTranslator struct {
 	streams        map[uint32]*streamState
 	reverseStreams map[uint32]*reverseStreamState
 	burst          layer2.Burst  // reusable burst to reduce allocations
+	scratch        *layer2.Burst // the decode burst of the voice receivers
+	events         []voice.Event // the events of a voice receiver
 	logs           logging.Queue // records made while mu is held
 	now            func() time.Time
 	lastPrune      time.Time
@@ -66,13 +69,12 @@ type streamState struct {
 	headersSent  int   // number of voice headers sent (3 required)
 	lastSeen     time.Time
 	lc           [9]byte
-	hasLC        bool              // lc holds the full LC from the voice header
-	privacy      bool              // the call is encrypted: privacy LC or a PI header
-	data         DataCall          // the data packet of the call so far
-	embedded     embeddedFragments // embedded LC fragments of bursts B-E
-	lastVoicePos int               // superframe position of the last voice burst
-	firstPacket  bool              // true for the very first packet
-	last         dmrd.Data         // the last MMDVM packet of the stream
+	hasLC        bool            // lc holds the full LC from the voice header
+	privacy      bool            // the call is encrypted: privacy LC or a PI header
+	data         DataCall        // the data packet of the call so far
+	voice        *voice.Receiver // learns the LC of a late-entry call from its embedded LC
+	firstPacket  bool            // true for the very first packet
+	last         dmrd.Data       // the last MMDVM packet of the stream
 }
 
 // IPSC burst type constants (byte 30 of an IPSC user packet). Voice header,
@@ -138,6 +140,8 @@ func NewIPSCTranslator() (*IPSCTranslator, error) {
 		streams:        make(map[uint32]*streamState),
 		reverseStreams: make(map[uint32]*reverseStreamState),
 		endedData:      make(map[uint32]time.Time),
+		scratch:        layer2.NewBurst(),
+		events:         make([]voice.Event, 0, voice.MaxEvents),
 		now:            time.Now,
 	}, nil
 }
@@ -788,15 +792,16 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 		return nil
 	}
 	emb := embByte(&t.burst, burstIdx)
-	embeddedLC := ss.collectEmbedded(&t.burst, pkt.Burst, burstIdx)
+	call, learned := t.lateEntryLCLocked(ss, pkt)
 
 	u := t.newUser(pkt, ss, false, false, false, 0x5D)
 	if burstIdx == burstE {
 		// The call's full LC with the destination and source of the
 		// packet. A call that started without a voice header uses the LC
 		// of its embedded signalling.
-		if !ss.hasLC && embeddedLC {
-			ss.learnEmbeddedLC(!pkt.Private)
+		if !ss.hasLC && learned && call.Group == !pkt.Private {
+			ss.lc, ss.hasLC = call.LC, true
+			ss.privacy = ss.privacy || lcPrivacy(call.LC)
 		}
 		lc := pdu.LCBytes(ss.lc)
 		if !ss.hasLC {
@@ -818,34 +823,27 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 	return t.encodeUser(&u)
 }
 
-// collectEmbedded keeps the embedded signalling fragment of voice burst
-// burstIdx (B-E) of an MMDVM voice burst and reports whether it completes
-// the embedded LC of one superframe, which burst E can then carry (see
-// embeddedFragments).
-func (ss *streamState) collectEmbedded(burst *layer2.Burst, data [33]byte, burstIdx int) bool {
-	lastPos := ss.lastVoicePos
-	ss.lastVoicePos = burstIdx
-	if burstIdx < burstB || burstIdx > burstE {
-		ss.embedded.next = 0
-		return false
+// lateEntryLCLocked runs the MMDVM voice burst pkt through the voice
+// receiver of the call ss, and returns the call when the receiver learned
+// its LC from the embedded LC of bursts B to E of one superframe, a late
+// entry. An XPR 8400 builds the voice header of such a call from the LC
+// that burst E carries in bytes 56-64. The caller must hold t.mu.
+func (t *IPSCTranslator) lateEntryLCLocked(ss *streamState, pkt dmrd.Data) (voice.Call, bool) {
+	if ss.voice == nil {
+		var err error
+		ss.voice, err = voice.NewReceiver(&voice.ReceiverConfig{Lost: -1, Hang: -1, Strict: true, Scratch: t.scratch})
+		if err != nil {
+			t.logs.Debug("IPSCTranslator: cannot make voice receiver", "error", err)
+			return voice.Call{}, false
+		}
 	}
-	embOK := burst.HasEmbeddedSignalling() && !burst.EmbeddedSignalling.FEC.Uncorrectable
-	return ss.embedded.add(layer2.RawBurst(data).EmbeddedData(), burst.EmbeddedSignalling, embOK, burstIdx, lastPos)
-}
-
-// learnEmbeddedLC sets the LC of a call that has none from the embedded LC
-// that burst E completed, when it is a voice LC of the call's type. An XPR
-// 8400 builds the voice header of such a late-entry call from the LC that
-// burst E carries in bytes 56-64.
-func (ss *streamState) learnEmbeddedLC(groupCall bool) {
-	lc, res := layer2.DecodeEmbeddedLC(ss.embedded.raw, true)
-	flco := pdu.LCBytes(lc).FLCO()
-	if res.Uncorrectable || (groupCall && flco != enums.FLCOGroupVoiceChannelUser) ||
-		(!groupCall && flco != enums.FLCOUnitToUnitVoiceChannelUser) {
-		return
+	t.events = ss.voice.Burst(time.Duration(t.now().UnixNano()), &pkt.Burst, pkt.Hint(), t.events[:0])
+	for _, e := range t.events {
+		if e.Call.Origin == voice.OriginEmbedded {
+			return e.Call, true
+		}
 	}
-	ss.lc, ss.hasLC = lc, true
-	ss.privacy = ss.privacy || lcPrivacy(lc)
+	return voice.Call{}, false
 }
 
 // decodeBPTCPayload returns the 12-byte BPTC(196,96) payload of a 33-byte
