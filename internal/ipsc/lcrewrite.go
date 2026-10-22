@@ -298,6 +298,9 @@ func rewrittenLC(logs *logging.Queue, pkt *dmrd.Data, dataType enums.DataType) p
 	var lc pdu.LCBytes
 	if payload, ok := decodeBPTCPayload(pkt.Burst, dataType); ok {
 		lc = pdu.LCBytes(payload[:9])
+		if lc.FLCO() == enums.FLCOTerminatorDataLinkControl {
+			return rewrittenTDLC(lc, pkt)
+		}
 	} else {
 		logs.Debug("invalid full LC in burst, constructing from packet fields",
 			"dtype", dataType.String())
@@ -315,6 +318,23 @@ func rewrittenLC(logs *logging.Queue, pkt *dmrd.Data, dataType enums.DataType) p
 	}
 	_ = lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) // lcAddress keeps 24 bits
 	return lc
+}
+
+func rewrittenTDLC(lc pdu.LCBytes, pkt *dmrd.Data) pdu.LCBytes {
+	flc := pdu.DecodeFullLinkControlBytes(lc)
+	td, ok := flc.AsTerminatorDataLinkControl()
+	if !ok {
+		return lc
+	}
+	td.LLIDDestination, td.LLIDSource, td.Group = lcAddress(pkt.Destination), lcAddress(pkt.Source), !pkt.Private
+	if flc.SetTerminatorDataLinkControl(td) != nil {
+		return lc
+	}
+	b, err := flc.Bytes()
+	if err != nil {
+		return lc
+	}
+	return pdu.LCBytes(b)
 }
 
 // putEmbeddedFragment writes the embedded LC fragment for burst position pos

@@ -630,7 +630,8 @@ func (t *IPSCTranslator) buildVoiceHeader(pkt dmrd.Data, ss *streamState, isFirs
 // buildVoiceTerminator builds the IPSC voice terminator packet of pkt,
 // which carries the full LC lc.
 func (t *IPSCTranslator) buildVoiceTerminator(pkt dmrd.Data, ss *streamState, lc [12]byte) []byte {
-	u := t.newUser(pkt, ss, true, false, false, 0x5E)
+	l := pdu.LCBytes(lc[:9])
+	u := t.newUser(pkt, ss, true, l.FLCO() == enums.FLCOTerminatorDataLinkControl, false, 0x5E)
 	return t.buildDataBurst(&u, pkt.Burst, enums.DataTypeTerminatorWithLC, &lc)
 }
 
