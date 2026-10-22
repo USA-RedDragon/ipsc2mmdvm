@@ -973,11 +973,11 @@ func TestDataCallInProgress(t *testing.T) {
 // gen/cap1248.txt, a capture of uncertain origin in the form an XPR 8400
 // sends: a confirmed data header, a second 0x06 packet that fails its CRC
 // and carries the end flag, a 0x13 end packet, and then a rate 3/4 block
-// without the end flag. Both 0x06 packets go to MMDVM. The call ended
-// before the block, which has no header of its own, so the block must not
-// start a new MMDVM stream. The same holds when the 0x13 packet alone ends
-// the call.
-func TestDataBlockAfterEndIsDropped(t *testing.T) {
+// without the end flag. Every packet with a burst goes to MMDVM. The call
+// ended before the block, so the block goes as a stream of its own that
+// ends with it, and no stream is left open. The same holds when the 0x13
+// packet alone ends the call.
+func TestDataBlockAfterEndPassesOn(t *testing.T) {
 	t.Parallel()
 	packets := []string{
 		"840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679",
@@ -995,12 +995,13 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 			d, _ := hex.DecodeString(h)
 			got = append(got, tr.TranslateToMMDVM(d[0], d)...)
 		}
-		want := 2
+		want := 3
 		if skip == 1 {
-			want = 1
+			want = 2
 		}
-		if len(got) != want || got[0].Value != uint8(enums.DataTypeDataHeader) || got[want-1].Value != uint8(enums.DataTypeDataHeader) {
-			t.Fatalf("without packet %d: got %+v, want the %d data headers", skip, got, want)
+		if len(got) != want || got[0].Value != uint8(enums.DataTypeDataHeader) || got[want-2].Value != uint8(enums.DataTypeDataHeader) ||
+			got[want-1].Value != uint8(enums.DataTypeRate34) || got[want-1].Stream == got[0].Stream {
+			t.Fatalf("without packet %d: got %+v, want %d packets, the block on a stream of its own", skip, got, want)
 		}
 		if len(tr.reverseStreams) != 0 {
 			t.Fatalf("without packet %d: %d streams open after the call ended", skip, len(tr.reverseStreams))
@@ -1008,11 +1009,11 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 	}
 }
 
-// TestDataBlockLongAfterEndIsDropped sends the rate 3/4 block of
-// TestDataBlockAfterEndIsDropped long after its call ended. It starts a
-// new call with no data header, so it is dropped as well, and no stream is
-// left open.
-func TestDataBlockLongAfterEndIsDropped(t *testing.T) {
+// TestDataBlockLongAfterEndPassesOn sends the rate 3/4 block of
+// TestDataBlockAfterEndPassesOn long after its call ended. It starts a new
+// call with no data header, so it goes as a stream of its own, and no
+// stream is left open.
+func TestDataBlockLongAfterEndPassesOn(t *testing.T) {
 	t.Parallel()
 	tr, clock, _ := newClockedTranslator(t)
 	hdr, _ := hex.DecodeString("840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679")
@@ -1021,8 +1022,8 @@ func TestDataBlockLongAfterEndIsDropped(t *testing.T) {
 	tr.TranslateToMMDVM(hdr[0], hdr)
 	tr.TranslateToMMDVM(end[0], end)
 	clock.t = clock.t.Add(streamIdleTimeout + time.Second)
-	if out := tr.TranslateToMMDVM(block[0], block); len(out) != 0 {
-		t.Fatalf("block long after the end: got %d packets", len(out))
+	if out := tr.TranslateToMMDVM(block[0], block); len(out) != 1 || out[0].Value != uint8(enums.DataTypeRate34) {
+		t.Fatalf("block long after the end: got %+v", out)
 	}
 	if len(tr.reverseStreams) != 0 {
 		t.Fatalf("%d streams open", len(tr.reverseStreams))

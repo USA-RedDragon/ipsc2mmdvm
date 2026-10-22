@@ -1036,6 +1036,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 	slog.Debug("HandleIPSCBurst: received IPSC burst", "network", h.cfg.Name, "type", packetType, "from", addr, "length", len(data))
 
 	dataEnd := ipsc.EndsDataCall(packetType, data)
+	orphan := h.translator.OrphanBlock(data)
 	streamID, hadStream := h.translator.ReverseStreamID(data)
 	packets := h.translator.TranslateToMMDVM(packetType, data)
 	matched := false
@@ -1070,7 +1071,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			continue
 		}
 
-		end := isTerminator(pkt) || (dataEnd && i == len(packets)-1)
+		end := isTerminator(pkt) || ((dataEnd || orphan) && i == len(packets)-1)
 		h.noteInboundSlot(pkt.Stream, pkt.Slot, end)
 		switch h.inboundTSMgr.Submit(isTS2(pkt.Slot), uint(pkt.Stream), "ipsc", pkt, end, h.forwardInbound) {
 		case timeslot.Deliver:

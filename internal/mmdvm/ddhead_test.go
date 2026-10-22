@@ -29,10 +29,10 @@ func xprDDHeadCall() []string {
 	}
 }
 
-// TestXPRDDHeadCall replays xprDDHeadCall. The six preamble CSBKs go to
-// the master. The rate 1/2 blocks have no data header before them, so they
-// are dropped, as MMDVMHost drops them, and the end flag of the last one
-// still ends the call and releases TS2.
+// TestXPRDDHeadCall replays xprDDHeadCall. The six preamble CSBKs and the
+// two rate 1/2 blocks, which have no data header before them, go to the
+// master, and the end flag of the last block ends the call and releases
+// TS2.
 func TestXPRDDHeadCall(t *testing.T) {
 	t.Parallel()
 	c := newInboundTestClient(t)
@@ -56,7 +56,7 @@ func TestXPRDDHeadCall(t *testing.T) {
 		}
 		types = append(types, p.Value)
 	}
-	want := slices.Repeat([]uint8{uint8(enums.DataTypeCSBK)}, 6)
+	want := append(slices.Repeat([]uint8{uint8(enums.DataTypeCSBK)}, 6), uint8(enums.DataTypeRate12), uint8(enums.DataTypeRate12))
 	if !slices.Equal(types, want) {
 		t.Fatalf("sent %v, want %v", types, want)
 	}
@@ -71,5 +71,40 @@ func TestXPRDDHeadCall(t *testing.T) {
 	}
 	if v := c.inboundTSMgr.Submit(true, 999, "ipsc", nil, true, nil); v != timeslot.Deliver {
 		t.Errorf("TS2 still held: %v", v)
+	}
+}
+
+func TestOrphanBlockReleasesSlot(t *testing.T) {
+	t.Parallel()
+	c := newInboundTestClient(t)
+	t.Cleanup(c.inboundTSMgr.Stop)
+	c.rfRewrites = []rewrite.Rule{&rewrite.PassAllPC{Name: testRuleName, Slot: 1}}
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 0, 231), Port: 50000}
+	for _, h := range []string{
+		"840004ce2e2e30b43c30b43c0100006a7c0080ddedea3659efc9000000000640000a800a006043a230b43c30b43c8100d06d00764679",
+		"840004ce2e2e30b43c30b43c0100006a7c40805eedec3659f3890000000013000000",
+		"840004ce2e2e30b43c30b43c0100006a7c00805deded3659f569000000000840000d800a0090444d52474f20544553540000a3ecda7c002e0078469b",
+	} {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.HandleIPSCBurst(b[0], b, addr)
+	}
+	var types []uint8
+	for len(c.tx_chan) > 0 {
+		types = append(types, (<-c.tx_chan).Value)
+	}
+	if want := []uint8{uint8(enums.DataTypeDataHeader), uint8(enums.DataTypeRate34)}; !slices.Equal(types, want) {
+		t.Fatalf("sent %v, want %v", types, want)
+	}
+	c.inboundMu.Lock()
+	open := len(c.inboundSlots)
+	c.inboundMu.Unlock()
+	if open != 0 {
+		t.Errorf("%d inbound calls open", open)
+	}
+	if v := c.inboundTSMgr.Submit(false, 999, "ipsc", nil, true, nil); v != timeslot.Deliver {
+		t.Errorf("TS1 still held: %v", v)
 	}
 }

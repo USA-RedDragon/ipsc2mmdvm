@@ -3,6 +3,7 @@ package ipsc
 import (
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
@@ -123,5 +124,34 @@ func TestBadCRCIPSCBurstsReachMMDVM(t *testing.T) {
 	}
 	if seen[enums.DataTypeCSBK] == 0 || seen[enums.DataTypeDataHeader] == 0 {
 		t.Fatalf("capture has too few bad CRC bursts: %v", seen)
+	}
+}
+
+func TestEveryIPSCDataBlockReachesMMDVM(t *testing.T) {
+	t.Parallel()
+	blocks := 0
+	for _, g := range loadXPR8400Capture(t) {
+		tr := newTestTranslator(t)
+		tr.SetColorCode(7)
+		var now time.Time
+		tr.now = func() time.Time { return now }
+		for i, r := range g.records {
+			now = r.at
+			if r.data[0] != 0x83 && r.data[0] != 0x84 || len(r.data) <= 30 {
+				continue
+			}
+			bt := r.data[30]
+			if bt != ipscBurstRate12 && bt != ipscBurstRate34 && bt != ipscBurstMBCContinuation {
+				continue
+			}
+			out := tr.TranslateToMMDVM(r.data[0], r.data)
+			if len(out) != 1 || out[0].Value != bt {
+				t.Fatalf("%s packet %d: block %x gave %+v, want one DMRD of data type %d", g.name, i, r.data, out, bt)
+			}
+			blocks++
+		}
+	}
+	if blocks == 0 {
+		t.Fatal("capture has no data blocks")
 	}
 }
