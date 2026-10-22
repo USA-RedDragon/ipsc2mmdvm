@@ -50,6 +50,7 @@ type Metrics struct {
 	// Translator
 	TranslatorActiveStreams *prometheus.GaugeVec
 	TranslatorPackets       *prometheus.CounterVec
+	TranslatorUndeliverable *prometheus.CounterVec
 
 	// Logging
 	LogRecordsDropped prometheus.Counter
@@ -156,6 +157,10 @@ func NewMetrics() *Metrics {
 			Name: "translator_packets_total",
 			Help: "Total packets translated by direction.",
 		}, []string{labelDirection}),
+		TranslatorUndeliverable: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "translator_undeliverable_total",
+			Help: "Total bursts from a master that IPSC cannot carry, by data type and reason.",
+		}, []string{"data_type", labelReason}),
 		LogRecordsDropped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "log_records_dropped_total",
 			Help: "Total log records dropped because the log output was blocked.",
@@ -183,6 +188,7 @@ func NewMetrics() *Metrics {
 		m.TimeslotTimeouts,
 		m.TranslatorActiveStreams,
 		m.TranslatorPackets,
+		m.TranslatorUndeliverable,
 		m.LogRecordsDropped,
 	)
 

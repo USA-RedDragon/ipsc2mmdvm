@@ -42,6 +42,7 @@ type IPSCTranslator struct {
 	logs           logging.Queue // records made while mu is held
 	now            func() time.Time
 	lastPrune      time.Time
+	undeliveredLog time.Time
 
 	nextCallControl uint32
 	nextCallSeq     uint8
@@ -252,13 +253,8 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			t.removeStreamLocked(streamID)
 		case enums.DataTypeRate34:
 			last := ss.lastDataBlock(pkt.Burst)
-			// SetRawBurst would send a block that does not decode as its
-			// 196 info bits (0x1F), so such a block is dropped here first.
 			if _, res := pkt.Burst.Rate34Payload(); res.Uncorrectable {
-				t.logs.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
-				if last {
-					results = t.endDataCall(pkt, ss, streamID)
-				}
+				results = t.undeliverableLocked(pkt, ss, streamID, reasonUncorrectable, last)
 				break
 			}
 			results = appendPacket(results, t.buildIPSCRate34Packet(pkt, ss, last))
@@ -275,16 +271,13 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			if ok && burstType == ipscBurstPIHeader {
 				ss.privacy = true
 			}
-			var payload [12]byte
-			if ok {
-				payload, ok = decodeBPTCPayload(pkt.Burst, enums.DataType(dtypeOrVSeq))
-			}
 			if !ok {
-				t.logs.Debug("IPSCTranslator: dropping data burst with no IPSC encoding or uncorrectable BPTC errors",
-					"dtype", enums.DataType(dtypeOrVSeq).String())
-				if last {
-					results = t.endDataCall(pkt, ss, streamID)
-				}
+				results = t.undeliverableLocked(pkt, ss, streamID, reasonNoIPSCForm, last)
+				break
+			}
+			payload, ok := decodeBPTCPayload(pkt.Burst, enums.DataType(dtypeOrVSeq))
+			if !ok {
+				results = t.undeliverableLocked(pkt, ss, streamID, reasonUncorrectable, last)
 				break
 			}
 			results = appendPacket(results, t.buildIPSCDataPacket(pkt, ss, burstType, payload, last))
@@ -293,10 +286,9 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 				t.removeStreamLocked(streamID)
 			}
 		case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeReserved:
-			return nil
+			results = t.undeliverableLocked(pkt, ss, streamID, reasonNoIPSCForm, false)
 		default:
-			t.logs.Debug("IPSCTranslator: unhandled data sync dtype", "dtype", dtypeOrVSeq)
-			return nil
+			results = t.undeliverableLocked(pkt, ss, streamID, reasonNoIPSCForm, false)
 		}
 
 	case dmrd.FrameVoice, dmrd.FrameVoiceSync:
@@ -307,8 +299,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 		}
 
 	case dmrd.FrameReserved:
-		t.logs.Debug("IPSCTranslator: unknown frame type", "frameType", frameType)
-		return nil
+		results = t.undeliverableLocked(pkt, ss, streamID, reasonFrameType3, false)
 	}
 
 	if t.metrics != nil && len(results) > 0 {
@@ -316,6 +307,64 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 	}
 
 	return results
+}
+
+const (
+	reasonUncorrectable = "uncorrectable"
+	reasonNoIPSCForm    = "no_ipsc_form"
+	reasonFrameType3    = "frame_type_3"
+)
+
+func (t *IPSCTranslator) undeliverableLocked(pkt dmrd.Data, ss *streamState, streamID uint32, reason string, last bool) [][]byte {
+	label := "none"
+	if pkt.Frame == dmrd.FrameDataSync {
+		label = dataTypeLabel(enums.DataType(pkt.Value)) //nolint:gosec // the data type has 4 bits
+	}
+	if t.metrics != nil {
+		t.metrics.TranslatorUndeliverable.WithLabelValues(label, reason).Inc()
+	}
+	args := []any{"dataType", label, "reason", reason, "src", pkt.Source, "dst", pkt.Destination, "group", !pkt.Private, "slot", pkt.Slot, "streamID", streamID}
+	if now := t.now(); now.Sub(t.undeliveredLog) >= time.Second {
+		t.undeliveredLog = now
+		t.logs.Info("IPSCTranslator: burst not sent to IPSC, which cannot carry it", args...)
+	} else {
+		t.logs.Debug("IPSCTranslator: burst not sent to IPSC, which cannot carry it", args...)
+	}
+	if last {
+		return t.endDataCall(pkt, ss, streamID)
+	}
+	return nil
+}
+
+func dataTypeLabel(dt enums.DataType) string {
+	switch dt {
+	case enums.DataTypePIHeader:
+		return "pi_header"
+	case enums.DataTypeVoiceLCHeader:
+		return "voice_lc_header"
+	case enums.DataTypeTerminatorWithLC:
+		return "terminator_with_lc"
+	case enums.DataTypeCSBK:
+		return "csbk"
+	case enums.DataTypeMBCHeader:
+		return "mbc_header"
+	case enums.DataTypeMBCContinuation:
+		return "mbc_continuation"
+	case enums.DataTypeDataHeader:
+		return "data_header"
+	case enums.DataTypeRate12:
+		return "rate_1_2"
+	case enums.DataTypeRate34:
+		return "rate_3_4"
+	case enums.DataTypeIdle:
+		return "idle"
+	case enums.DataTypeRate1:
+		return "rate_1"
+	case enums.DataTypeUnifiedSingleBlock:
+		return "unified_single_block"
+	case enums.DataTypeReserved:
+	}
+	return "reserved"
 }
 
 // appendPacket appends p to results unless it is nil, as for a packet that
