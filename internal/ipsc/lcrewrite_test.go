@@ -573,11 +573,11 @@ func TestLCRewriterPassesNonVoiceEmbeddedLC(t *testing.T) {
 	}
 }
 
-// TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost checks that a received
-// embedded LC is decoded as MMDVMHost decodes it: one bit error in a row is
-// corrected, so the talker alias passes through, and two bit errors in a row
-// make it undecodable, so it is replaced by the rewritten LC.
-func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
+// TestLCRewriterDecodesEmbeddedLC checks that a received embedded LC that
+// dmrgo corrects passes through, as the talker alias here does with one or
+// two bit errors in a row, and that one it cannot correct is replaced by the
+// rewritten LC.
+func TestLCRewriterDecodesEmbeddedLC(t *testing.T) {
 	t.Parallel()
 	priv := [9]byte{0x03, 0x00, 0x80, 0x00, 0x15, 0xB3, 0x00, 0x04, 0xD2}
 	newLC := [9]byte{0x00, 0x00, 0x80, 0x00, 0x00, 0x09, 0x00, 0x04, 0xD2}
@@ -586,6 +586,9 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 	one[0][0] ^= 0x04 // fragment bit 5: row 5, column 0
 	two := one
 	two[0][1] ^= 0x04 // fragment bit 13: row 5, column 1
+	bad := two
+	bad[0][0] ^= 0x0B
+	bad[0][1] ^= 0x0B
 
 	for _, tc := range []struct {
 		name string
@@ -593,7 +596,8 @@ func TestLCRewriterDecodesEmbeddedLCLikeMMDVMHost(t *testing.T) {
 		want [9]byte
 	}{
 		{"one error in a row", one, alias},
-		{"two errors in a row", two, newLC},
+		{"two errors in a row", two, alias},
+		{"two errors in each of four rows", bad, newLC},
 	} {
 		r := NewLCRewriter()
 		hdr := lcPacket(enums.DataTypeVoiceLCHeader, 1234, 5555, false, burstWithLC(t, priv, enums.DataTypeVoiceLCHeader, 1))
