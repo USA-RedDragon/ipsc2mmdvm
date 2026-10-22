@@ -89,3 +89,19 @@ func (h *MMDVMClient) sendPacket(packet dmrd.Data) {
 	}
 	h.enqueue(data)
 }
+
+func (h *MMDVMClient) sidebandFromMaster(cmd dmrd.Command, p []byte) {
+	reason := "position"
+	var info any
+	var err error
+	if cmd == dmrd.CommandDMRA {
+		reason = "talker_alias"
+		info, err = dmrd.DecodeTalkerAlias(p)
+	} else {
+		info, err = dmrd.DecodePosition(p)
+	}
+	slog.Debug("Ignoring a repeater sideband packet from the master", "network", h.cfg.Name, "command", cmd.String(), "length", len(p), "packet", info, "error", err)
+	if h.metrics != nil {
+		h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, reason).Inc()
+	}
+}

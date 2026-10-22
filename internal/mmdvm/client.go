@@ -429,6 +429,10 @@ func (h *MMDVMClient) outputs(out []dmrdsession.Output) {
 		case dmrdsession.OutputDown:
 			h.down(o)
 		case dmrdsession.OutputData:
+			if o.Command == dmrd.CommandDMRA || o.Command == dmrd.CommandDMRG {
+				h.sidebandFromMaster(o.Command, o.Packet)
+				continue
+			}
 			select {
 			case h.dataRX <- o.Packet:
 			default:
