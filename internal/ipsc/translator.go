@@ -94,7 +94,10 @@ const (
 	ipscBurstDataHeader      byte = 0x06
 	ipscBurstRate12          byte = 0x07
 	ipscBurstRate34          byte = 0x08
+	ipscBurstIdle            byte = 0x09
 	ipscBurstSlot1           byte = 0x0A
+	ipscBurstUSBD            byte = 0x0B
+	ipscBurstRaw             byte = byte(ipscpkt.BurstRaw)
 	ipscBurstSlot2           byte = 0x8A
 )
 
@@ -1043,7 +1046,8 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		results = append(results, pkts...)
 
 	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
-		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12, ipscBurstRate34:
+		ipscBurstMBCContinuation, ipscBurstDataHeader, ipscBurstRate12, ipscBurstRate34,
+		ipscBurstIdle, ipscBurstUSBD, ipscBurstRaw:
 		if pkt, ok := t.reverseDataBurstLocked(src, dst, groupCall, slot, rss, &u); ok {
 			results = append(results, pkt)
 		}
@@ -1073,10 +1077,14 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 }
 
 // payloadBits returns the payload size in bits that a data packet of
-// burstType needs: 144 for a rate 3/4 block and 96 for the others.
+// burstType needs: 144 for a rate 3/4 block, 196 for a raw block and 96 for
+// the others.
 func payloadBits(burstType byte) uint16 {
-	if burstType == ipscBurstRate34 {
+	switch burstType {
+	case ipscBurstRate34:
 		return 144
+	case ipscBurstRaw:
+		return 196
 	}
 	return 96
 }
@@ -1113,9 +1121,15 @@ func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool,
 		return dmrd.Data{}, false
 	}
 	var pkt dmrd.Data
-	if burstType == ipscBurstRate34 {
+	switch burstType {
+	case ipscBurstRate34:
 		pkt = t.buildMMDVMRate34Packet(src, dst, groupCall, slot, rss, u)
-	} else {
+	case ipscBurstRaw:
+		var ok bool
+		if pkt, ok = t.buildMMDVMRawPacket(src, dst, groupCall, slot, rss, u); !ok {
+			return dmrd.Data{}, false
+		}
+	default:
 		var ok bool
 		if pkt, ok = t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, [12]byte(u.Data.Octets[:12])); !ok {
 			return dmrd.Data{}, false
@@ -1332,7 +1346,7 @@ func lateEntryLC(payload [12]byte, src, dst uint32, groupCall bool) (pdu.LCBytes
 // are passed on, since MMDVMHost checks each one for a CRC that only the
 // last block of a standard MBC has.
 func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, burstType byte, payload [12]byte) (dmrd.Data, bool) {
-	if burstType != ipscBurstMBCContinuation &&
+	if burstType != ipscBurstMBCContinuation && burstType != ipscBurstIdle && burstType != ipscBurstUSBD &&
 		!layer2.MMDVMHostAccepts(enums.DataType(burstType), payload) {
 		t.logs.Debug("IPSCTranslator: dropping data burst that fails its CRC",
 			"burstType", fmt.Sprintf("0x%02X", burstType))
@@ -1366,6 +1380,37 @@ func (t *IPSCTranslator) buildMMDVMRate34Packet(src, dst uint32, groupCall bool,
 	}
 	rss.seq++
 	return pkt
+}
+
+func (t *IPSCTranslator) buildMMDVMRawPacket(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, u *ipscpkt.User) (dmrd.Data, bool) {
+	st, ok := u.Data.SlotType()
+	if !ok {
+		t.logs.Debug("IPSCTranslator: dropping raw block with no slot type")
+		return dmrd.Data{}, false
+	}
+	dt := st.DataType()
+	raw, err := u.RawBurst(t.colorCode, layer2.SyncSourceBS)
+	if err == nil {
+		err = raw.SetSlotType(pdu.SlotType{ColorCode: t.colorCode, DataType: dt})
+	}
+	if err != nil {
+		t.logs.Debug("IPSCTranslator: cannot build raw block", "error", err)
+		return dmrd.Data{}, false
+	}
+	pkt := dmrd.Data{
+		Seq:         rss.seq,
+		Source:      src,
+		Destination: dst,
+		Repeater:    t.repeaterID,
+		Slot:        slot,
+		Private:     !groupCall,
+		Frame:       dmrd.FrameDataSync,
+		Value:       uint8(dt),
+		Stream:      rss.streamID,
+		Burst:       raw,
+	}
+	rss.seq++
+	return pkt, true
 }
 
 // buildMMDVMVoiceBurst builds the MMDVM DMRD packet of the IPSC voice burst

@@ -1252,7 +1252,7 @@ func TestTranslateToMMDVMDataBurstTypes(t *testing.T) {
 
 func TestTranslateToMMDVMDropsUnsupportedDataBurstTypes(t *testing.T) {
 	t.Parallel()
-	for _, burstType := range []byte{0x08, 0x09, 0x0B, 0x0C, 0x40} {
+	for _, burstType := range []byte{0x08, 0x0C, 0x40} {
 		tr := newTestTranslator(t)
 		data := makeTestIPSCPacket(0x83, burstType, true, false)
 		if out := tr.TranslateToMMDVM(0x83, data); out != nil {
