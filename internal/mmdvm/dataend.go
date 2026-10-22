@@ -62,6 +62,9 @@ func (h *MMDVMClient) dataCallQuiet(stream uint32, oc *openDataCall) {
 	delete(h.openData, stream)
 	last := oc.last
 	h.openDataMu.Unlock()
+	h.outDataMu.Lock()
+	delete(h.outData, stream)
+	h.outDataMu.Unlock()
 	h.endOutboundCall(&preambleCall{id: stream, last: last})
 }
 

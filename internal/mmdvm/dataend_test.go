@@ -40,3 +40,29 @@ func TestEndedDataCallSendsNoEndPacket(t *testing.T) {
 		t.Fatalf("got %d packets after a complete data call, want 3 with the end flag on the last", len(recs))
 	}
 }
+
+func TestBlocksAfterQuietEndEndTheirCall(t *testing.T) {
+	t.Parallel()
+	call := rigPreambleCall()
+	for _, split := range []int{13, 14} {
+		c, rec := newPreambleTestClient(t)
+		ids := []uint32{105, 105, 105}
+		sendRig(t, c, call[12:split], ids[:split-12])
+		rec.waitFor(t, func(recs []ipscRecord) bool { return len(recs) == split-12+1 })
+		sendRig(t, c, call[split:15], ids[split-12:])
+		recs := rec.waitFor(t, func(recs []ipscRecord) bool {
+			n := 0
+			for _, r := range recs {
+				if r.raw[17]&0x40 != 0 {
+					n++
+				}
+			}
+			return n == 2
+		})
+		late := recs[split-12+1]
+		last := recs[len(recs)-1]
+		if late.callControl == recs[0].callControl || last.callControl != late.callControl || last.raw[17]&0x40 == 0 {
+			t.Fatalf("split %d: the blocks after the quiet end are not one call that ends: %+v", split, recs)
+		}
+	}
+}
