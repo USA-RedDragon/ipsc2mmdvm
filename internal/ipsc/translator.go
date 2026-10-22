@@ -12,6 +12,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/packet"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
+	"github.com/USA-RedDragon/dmrgo/v2/layer3"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
@@ -271,8 +272,8 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 			t.removeStreamLocked(streamID)
 		case enums.DataTypeRate34:
 			last := ss.lastDataBlock(pkt.Burst)
-			// SetRawBurst drops the FEC result of the block, so it is checked
-			// here first.
+			// SetRawBurst would send a block that does not decode as its
+			// 196 info bits (0x1F), so such a block is dropped here first.
 			if _, res := pkt.Burst.Rate34Payload(); res.Uncorrectable {
 				t.logs.Debug("IPSCTranslator: dropping rate 3/4 burst with uncorrectable trellis errors")
 				if last {
@@ -513,25 +514,31 @@ func (t *IPSCTranslator) encodeUser(u *ipscpkt.User) []byte {
 
 // buildDataBurst sets the burst of u to the data burst raw of type dt and
 // returns the octets of u. payload, when not nil, takes the place of the
-// BPTC payload of raw. The slot type of the packet gets the color code of
-// raw's slot type, or 0 when it does not decode. A voice LC header or
-// terminator leaves the RSSI status bit of the status octet clear, as an
-// XPR 8400 does on the voice headers it sends with no RSSI and as
-// node-dmr-lib's IPSCPeer does; other data packets set it with a zero
-// RSSI.
+// BPTC payload of raw, so the packet carries it even when raw does not
+// decode. The slot type of the packet gets the color code of raw's slot
+// type, or 0 when it does not decode. A voice LC header or terminator
+// leaves the RSSI status bit of the status octet clear, as an XPR 8400
+// does on the voice headers it sends with no RSSI and as node-dmr-lib's
+// IPSCPeer does; other data packets set it with a zero RSSI.
 func (t *IPSCTranslator) buildDataBurst(u *ipscpkt.User, raw layer2.RawBurst, dt enums.DataType, payload *[12]byte) []byte {
-	if err := u.SetRawBurst(raw, layer2.KindData, enums.VoiceBurstA, dt); err != nil {
+	cc := slotTypeColorCode(raw)
+	if payload != nil {
+		var err error
+		raw, err = layer2.BuildDataBurst(*payload, dt, cc, layer2.SyncSourceBS)
+		if err != nil {
+			t.logs.Debug("IPSCTranslator: cannot carry data burst", "dtype", dt.String(), "error", err)
+			return nil
+		}
+	}
+	if _, err := u.SetRawBurst(raw, layer2.Hint{Kind: layer2.KindData, DataType: dt, HasDataType: true}); err != nil {
 		t.logs.Debug("IPSCTranslator: cannot carry data burst", "dtype", dt.String(), "error", err)
 		return nil
-	}
-	if payload != nil {
-		copy(u.Data.Octets[:12], payload[:])
 	}
 	if dt == enums.DataTypeVoiceLCHeader || dt == enums.DataTypeTerminatorWithLC {
 		u.Data.Status &^= ipscStatusRSSI
 	}
 	var st pdu.SlotType
-	st.ColorCode, st.DataType = slotTypeColorCode(raw), dt
+	st.ColorCode, st.DataType = cc, dt
 	if info, err := st.Info(); err == nil {
 		u.Data.Trailer[1] = byte(info)
 	}
@@ -800,7 +807,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 		_ = lc.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) // lcAddress keeps 24 bits
 		u.Voice.LC = lc
 	}
-	if err := u.SetRawBurst(pkt.Burst, layer2.KindVoice, voiceBurst(burstIdx), 0); err != nil {
+	if _, err := u.SetRawBurst(pkt.Burst, layer2.Hint{Kind: layer2.KindVoice, VoiceBurst: voiceBurst(burstIdx)}); err != nil {
 		t.logs.Debug("IPSCTranslator: cannot carry voice burst", "error", err)
 		return nil
 	}
@@ -870,7 +877,7 @@ func constructLC(src, dst uint32, groupCall bool) pdu.LCBytes {
 	var lc pdu.LCBytes
 	lc.SetGroup(groupCall)
 	lc.SetFID(enums.FIDStandardized)
-	lc.SetServiceOptions(0x20)                          // the default reserved bit
+	_ = lc.SetServiceOptions(layer3.MotorolaServiceOptions())
 	_ = lc.SetAddresses(lcAddress(dst), lcAddress(src)) // lcAddress keeps 24 bits
 	return lc
 }

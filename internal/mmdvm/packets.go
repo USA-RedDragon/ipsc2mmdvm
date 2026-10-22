@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 )
 
@@ -33,7 +34,7 @@ func (h *MMDVMClient) rptcPacket() []byte {
 		c.SetRXFrequency(uint32(min(h.cfg.RXFreq, 999999999))), //nolint:gosec // clamped to 9 digits
 		c.SetTXFrequency(uint32(min(h.cfg.TXFreq, 999999999))), //nolint:gosec // clamped to 9 digits
 		c.SetPower(min(h.cfg.TXPower, 99)),
-		c.SetColorCode(min(h.cfg.ColorCode, 99)),
+		c.SetColorCode(enums.ColorCode(min(h.cfg.ColorCode, 99))),
 		c.SetLatitude(cut(fmt.Sprintf("%+08.4f", clampCoord(h.cfg.Latitude, 90)), 8)),
 		c.SetLongitude(cut(fmt.Sprintf("%+09.4f", clampCoord(h.cfg.Longitude, 180)), 9)),
 		c.SetHeight(min(h.cfg.Height, 999)),

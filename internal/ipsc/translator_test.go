@@ -2099,7 +2099,7 @@ func proprietaryPacketBursts(t *testing.T, confirmed, withPHead bool) ([][33]byt
 		u.BlocksToFollow++
 		p.Header.UnconfirmedDataHeader = &u
 	}
-	bursts, err := packet.Bursts(p, 0, layer2.SyncSourceBS)
+	bursts, err := packet.Bursts(&p, 0, layer2.SyncSourceBS)
 	if err != nil {
 		t.Fatal(err)
 	}
