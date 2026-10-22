@@ -84,6 +84,9 @@ type MMDVMClient struct {
 	preambles   [2]*preambleCall
 	slotStreams [2]map[uint32]time.Time
 
+	openDataMu sync.Mutex
+	openData   map[uint32]*openDataCall
+
 	// inboundSlots holds the timeslot of each inbound call that has not
 	// ended, to end a data call whose last packet was dropped.
 	inboundMu    sync.Mutex
@@ -669,6 +672,7 @@ func (h *MMDVMClient) Stop() {
 			h.forgetPreambleCallLocked(slot)
 		}
 		h.preambleMu.Unlock()
+		h.forgetDataCalls()
 
 		// Must follow close(done): Manager.Stop waits for replays, and
 		// a replay blocked in sendInbound only returns once done closes.
@@ -929,6 +933,7 @@ func (h *MMDVMClient) submitOutbound(packet dmrd.Data) {
 	if end {
 		h.preambleCallEnded(packet)
 	}
+	h.followDataCall(packet, end)
 	if h.outboundTSMgr == nil {
 		h.translateAndForwardToIPSC(packet)
 		return
