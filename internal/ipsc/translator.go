@@ -289,7 +289,7 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 				break
 			}
 			payload, ok := decodeBPTCPayload(pkt.Burst, enums.DataType(dtypeOrVSeq))
-			if !ok {
+			if !ok && burstType != ipscBurstMBCContinuation {
 				results = t.undeliverableLocked(pkt, ss, streamID, reasonUncorrectable, last)
 				break
 			}
