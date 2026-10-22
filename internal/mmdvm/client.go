@@ -1000,6 +1000,14 @@ func (h *MMDVMClient) SetIPSCHandler(handler func(ctx context.Context, data []by
 	h.ipscHandler.Store(&handler)
 }
 
+// SetIPSCRawBursts sets whether bursts that IPSC cannot carry decoded go to
+// IPSC as raw blocks (see ipsc.IPSCTranslator.SetRawBursts).
+func (h *MMDVMClient) SetIPSCRawBursts(on bool) {
+	if h.translator != nil {
+		h.translator.SetRawBursts(on)
+	}
+}
+
 // SetOutboundTSManager sets the shared timeslot manager used for the
 // MMDVM→IPSC direction. This manager is shared across all clients so
 // that only one MMDVM master can feed a given timeslot at a time.

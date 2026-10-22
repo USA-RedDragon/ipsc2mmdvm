@@ -71,3 +71,5 @@ ipsc:
   call-hang-hold: "2.5s"
   # Wait for data and CSBK calls to IPSC after a data call on a slot; 0 is off
   data-hang-hold: "1.2s"
+  # Send bursts that IPSC cannot carry decoded as raw 0x1F blocks; leave off until a rig test proves the repeater takes them
+  raw-bursts: false

@@ -96,6 +96,7 @@ type iPSCShadow struct {
 	Auth         *iPSCAuthShadow `json:"auth"           toml:"auth"           yaml:"auth"`
 	CallHangHold *impl.Duration  `json:"call-hang-hold" toml:"call-hang-hold" yaml:"call-hang-hold"`
 	DataHangHold *impl.Duration  `json:"data-hang-hold" toml:"data-hang-hold" yaml:"data-hang-hold"`
+	RawBursts    *bool           `json:"raw-bursts"     toml:"raw-bursts"     yaml:"raw-bursts"`
 }
 
 type configShadow struct {
@@ -419,6 +420,10 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 			cfg.IPSC.DataHangHold = v
 			set("ipsc.data-hang-hold", configulator.LayerFile, file)
 		}
+		if s.IPSC.RawBursts != nil {
+			cfg.IPSC.RawBursts = *s.IPSC.RawBursts
+			set("ipsc.raw-bursts", configulator.LayerFile, file)
+		}
 	}
 	return nil
 }
@@ -522,6 +527,19 @@ func configApplyEnv(cfg *Config, ec configulator.EnvContext, set configulator.Se
 		cfg.IPSC.DataHangHold = d
 		set("ipsc.data-hang-hold", configulator.LayerEnv, n)
 	}
+	if n, v, ok := impl.LookupEnv(ec.Getenv, ec.Opts.Prefix, ec.Opts.Separator, "ipsc", "raw-bursts"); ok {
+		p, err := strconv.ParseBool(v)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.raw-bursts",
+				Source: n,
+				Value:  v,
+			}
+		}
+		cfg.IPSC.RawBursts = p
+		set("ipsc.raw-bursts", configulator.LayerEnv, n)
+	}
 	return nil
 }
 
@@ -546,6 +564,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 		"ipsc" + o.Separator + "auth" + o.Separator + "key",
 		"ipsc" + o.Separator + "call-hang-hold",
 		"ipsc" + o.Separator + "data-hang-hold",
+		"ipsc" + o.Separator + "raw-bursts",
 	}
 	for i, name := range names {
 		if f := fs.Lookup(name); f != nil {
@@ -572,6 +591,7 @@ func configRegisterPFlags(fs *pflag.FlagSet, o *cpflag.Options) error {
 	fs.String(names[8], "", "Authentication key for IPSC clients. Required if auth is enabled")
 	fs.Duration(names[9], time.Duration(int64(2500000000)), "Wait for data and CSBK calls to IPSC after a voice call on a slot; 0 is off")
 	fs.Duration(names[10], time.Duration(int64(1200000000)), "Wait for data and CSBK calls to IPSC after a data call on a slot; 0 is off")
+	fs.Bool(names[11], false, "Send bursts that IPSC cannot carry decoded as raw 0x1F blocks; leave off until a rig test proves the repeater takes them")
 	return nil
 }
 
@@ -707,6 +727,18 @@ func configApplyPFlags(cfg *Config, fs *pflag.FlagSet, o *cpflag.Options, _ stri
 		}
 		cfg.IPSC.DataHangHold = v
 		set("ipsc.data-hang-hold", configulator.LayerCLI, "--"+n)
+	}
+	if n := "ipsc" + o.Separator + "raw-bursts"; fs.Changed(n) {
+		v, err := fs.GetBool(n)
+		if err != nil {
+			return &configulator.ParseError{
+				Err:    err,
+				Path:   "ipsc.raw-bursts",
+				Source: "--" + n,
+			}
+		}
+		cfg.IPSC.RawBursts = v
+		set("ipsc.raw-bursts", configulator.LayerCLI, "--"+n)
 	}
 	return nil
 }
@@ -2001,6 +2033,19 @@ func (s *iPSCShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 			default:
 				return configJSONError(path+".data-hang-hold", v, fmt.Errorf("expected a text scalar (e.g. \"30s\"), got %v", v.Kind()))
 			}
+		case "raw-bursts":
+			v, err := dec.ReadToken()
+			if err != nil {
+				return err
+			}
+			switch v.Kind() {
+			case jsontext.KindNull:
+			case jsontext.KindTrue, jsontext.KindFalse:
+				b := v.Bool()
+				s.RawBursts = &b
+			default:
+				return configJSONError(path+".raw-bursts", v, fmt.Errorf("expected a bool, got %v", v.Kind()))
+			}
 		default:
 			if reject, _ := json.GetOption(dec.Options(), json.RejectUnknownMembers); reject {
 				return &configulator.UnknownKeyError{Path: path + "." + configQuoteKey(key)}
@@ -2096,6 +2141,7 @@ func (c Config) PrintConfig() string {
 	b.WriteString("ipsc.auth.key = (redacted)\n")
 	fmt.Fprintf(&b, "ipsc.call-hang-hold = %v\n", c.IPSC.CallHangHold)
 	fmt.Fprintf(&b, "ipsc.data-hang-hold = %v\n", c.IPSC.DataHangHold)
+	fmt.Fprintf(&b, "ipsc.raw-bursts = %v\n", c.IPSC.RawBursts)
 	return b.String()
 }
 

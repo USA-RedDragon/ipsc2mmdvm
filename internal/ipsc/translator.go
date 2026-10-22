@@ -43,6 +43,7 @@ type IPSCTranslator struct {
 	now            func() time.Time
 	lastPrune      time.Time
 	undeliveredLog time.Time
+	rawBursts      bool
 
 	nextCallControl uint32
 	nextCallSeq     uint8
@@ -203,6 +204,18 @@ func (t *IPSCTranslator) SetColorCode(colorCode uint8) {
 	t.colorCode = enums.ColorCode(colorCode & 0x0F)
 }
 
+// SetRawBursts sets whether a burst from a master that IPSC cannot carry
+// decoded goes to IPSC as a raw block (burst type 0x1F) with its 196
+// information bits and its slot type, in the form an XPR 8400 sends such a
+// burst. This covers idle, unified single block, rate 1 and reserved data
+// types, and bursts that fail their FEC or CRC. Turn it on only after a
+// rig test shows that the repeater takes these blocks.
+func (t *IPSCTranslator) SetRawBursts(on bool) {
+	t.mu.Lock()
+	defer t.logs.Unlock(&t.mu)
+	t.rawBursts = on
+}
+
 // SetPeerID sets the local peer ID used in outgoing IPSC packets.
 func (t *IPSCTranslator) SetPeerID(peerID uint32) {
 	t.peerID = peerID
@@ -316,6 +329,15 @@ const (
 )
 
 func (t *IPSCTranslator) undeliverableLocked(pkt dmrd.Data, ss *streamState, streamID uint32, reason string, last bool) [][]byte {
+	if t.rawBursts && reason != reasonFrameType3 {
+		if p := t.buildIPSCRawPacket(pkt, ss, last); p != nil {
+			ss.firstPacket = false
+			if last {
+				t.removeStreamLocked(streamID)
+			}
+			return [][]byte{p}
+		}
+	}
 	label := "none"
 	if pkt.Frame == dmrd.FrameDataSync {
 		label = dataTypeLabel(enums.DataType(pkt.Value)) //nolint:gosec // the data type has 4 bits
@@ -334,6 +356,30 @@ func (t *IPSCTranslator) undeliverableLocked(pkt dmrd.Data, ss *streamState, str
 		return t.endDataCall(pkt, ss, streamID)
 	}
 	return nil
+}
+
+func (t *IPSCTranslator) buildIPSCRawPacket(pkt dmrd.Data, ss *streamState, last bool) []byte {
+	u := t.newUser(pkt, ss, last, true, ss.firstPacket, dataPayloadType(last))
+	status := uint8(ipscStatusRSSI)
+	if pkt.Slot == enums.Slot2 {
+		status |= 0x80
+	}
+	u.Burst = ipscpkt.BurstRaw
+	u.Data = ipscpkt.Payload{Status: status, Words: 17, HasBody: true, Flags: [2]byte{0x80, 0x0A}, Bits: 196, TrailerLen: 4}
+	info := pkt.Burst.Info()
+	copy(u.Data.Octets[:], info[:])
+	cc := t.colorCode
+	if st := pkt.Burst.SlotType(); !st.FEC.Uncorrectable {
+		cc = st.ColorCode
+	}
+	st := pdu.SlotType{ColorCode: cc, DataType: enums.DataType(pkt.Value)} //nolint:gosec // the data type has 4 bits
+	ti, err := st.Info()
+	if err != nil {
+		t.logs.Debug("IPSCTranslator: cannot build raw block", "error", err)
+		return nil
+	}
+	u.Data.Trailer[1] = byte(ti)
+	return t.encodeUser(&u)
 }
 
 func dataTypeLabel(dt enums.DataType) string {

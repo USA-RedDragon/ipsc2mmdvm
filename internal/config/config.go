@@ -51,6 +51,11 @@ type IPSC struct {
 	// timeslot that the next data and CSBK calls to IPSC wait. An XPR 8400
 	// drops a data call that comes too soon after another.
 	DataHangHold time.Duration `name:"data-hang-hold" description:"Wait for data and CSBK calls to IPSC after a data call on a slot; 0 is off" default:"1.2s"`
+	// RawBursts sends bursts that IPSC cannot carry decoded, such as rate
+	// 1, unified single block and idle bursts and bursts that fail their
+	// FEC or CRC, to IPSC as raw 0x1F blocks, as an XPR 8400 sends them.
+	// Leave it off until a rig test shows that the repeater takes them.
+	RawBursts bool `name:"raw-bursts" description:"Send bursts that IPSC cannot carry decoded as raw 0x1F blocks; leave off until a rig test proves the repeater takes them"`
 }
 
 // MaxCallHangHold is the longest ipsc.call-hang-hold or ipsc.data-hang-hold

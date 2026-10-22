@@ -117,6 +117,7 @@ func runRoot(cmd *cobra.Command, _ []string) error {
 	for i := range cfg.MMDVM {
 		client := mmdvm.NewMMDVMClient(&cfg.MMDVM[i], m)
 		client.SetOutboundTSManager(outboundTSMgr)
+		client.SetIPSCRawBursts(cfg.IPSC.RawBursts)
 		client.SetIPSCHandler(ipscServer.SendUserPacket)
 		err = client.Start()
 		if err != nil {
