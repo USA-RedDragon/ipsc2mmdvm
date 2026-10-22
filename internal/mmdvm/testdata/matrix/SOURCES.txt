@@ -1,0 +1,17 @@
+Captures that TestLoopbackMatrix replays. Each file is a copy of the file named here.
+
+From dmrgo v2.0.0-20261022230539-1f22504946fb (github.com/USA-RedDragon/dmrgo/v2):
+- anytone_sms_xpr.txt: data/testdata/anytone_sms_xpr.txt. A confirmed rate 3/4 SMS from a BTECH DA-7X2 (AnyTone firmware) as an XPR 8400 repeated it on TS2, with the SACK and ACKs that came from the network, 2026-10-16.
+- anytone_dmr_text.txt: sms/testdata/anytone_dmr_text.txt. An unconfirmed rate 1/2 "DMR Standard" text (SAP IP) after 5 preamble CSBKs, with idle bursts of the other slot, run sms-real-down, 2026-10-16.
+- anytone_hsms.txt: sms/testdata/anytone_hsms.txt. An H-SMS defined data packet (DD_HEAD) after a BS_Dwn_Act and 5 preamble CSBKs, run sms-hyt, 2026-10-16.
+- anytone_aprs.txt: layer2/testdata/anytone_aprs.txt. Ten position reports (compressed UDP/IPv4 with NMEA RMC), each after a BS_Dwn_Act and 5 preamble CSBKs, run anytone-aprs-20261020/aprs2.
+- dmrgateway-master.txt: transport/dmrd/testdata/dmrgateway-master.txt. DMRGateway ee79d38 and a fake master on 127.0.0.1, 2026-10-20: one voice superframe on TS2 to TG 91; the m>r DMRD lines are the master sending the call back.
+
+From /home/reddragon/Projects/dmrgo-rfcap/runs/anytone-v105-20261022 (rig run of 2026-10-22, DA-7X2 on firmware V1.05d2):
+- v105-b1-sent.txt: b1.sent.hex, the bursts sent to the radio for the AnyTone-format text "LONG TEXT ONE TWO THREE" (unconfirmed rate 1/2, SAP IP, 3140598 to 3191868). The first column is the burst number times 60 ms.
+- v105-b4-sent.txt: b4.sent.hex, the same for the ETSI IP text "B4 etsi".
+- v105-phaseA.txt: the bursts of phaseA.rx3.txt, which the radio sent in phase A of the run, as the RTL-SDR received them.
+
+The XPR 8400 IPSC capture is internal/ipsc/testdata/xpr8400-ipsc.txt.zst (see its loader in internal/ipsc/golden_test.go).
+
+The Motorola TMS text is the TMS value of dmrgo internal/appcapture: the AnyTone M-SMS "MOTO TEST" as an XPR 8400 relayed it over IPSC on 2026-10-16.
