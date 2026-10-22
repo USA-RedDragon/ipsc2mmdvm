@@ -908,37 +908,44 @@ func rigConfirmedRate12Packet(badCRC bool) ([][33]byte, []enums.DataType) {
 	return bursts, []enums.DataType{enums.DataTypeDataHeader, enums.DataTypeRate12, enums.DataTypeRate12}
 }
 
-// TestDroppedHeaderDropsItsBlocks sends rigConfirmedRate12Packet with and
-// without a bit of the header CRC flipped. A header that fails its CRC is
-// dropped, and dmrgo's packet assembler drops it too, as MMDVMHost does, so
-// its blocks have no data packet to belong to. MMDVMHost discards such
-// blocks, and so does the translator: no call is left open without an end.
-// The intact packet goes through and ends at its last block. A rate 3/4
-// block of rigRate34Calls with no header before it is dropped the same way.
-func TestDroppedHeaderDropsItsBlocks(t *testing.T) {
+// TestDroppedHeaderKeepsItsBlocks sends rigConfirmedRate12Packet with and
+// without a bit of the header CRC flipped. A header that fails its CRC
+// cannot go on IPSC, and dmrgo's packet assembler drops it too, so its
+// blocks have no data packet to belong to. They still go to IPSC, with no
+// end flag, and the call stays open until EndDataCall ends it. The intact
+// packet goes through and ends at its last block. A rate 3/4 block of
+// rigRate34Calls with no header before it goes the same way.
+func TestDroppedHeaderKeepsItsBlocks(t *testing.T) {
 	t.Parallel()
 	for _, badCRC := range []bool{true, false} {
 		tr := newTestTranslator(t)
 		bursts, types := rigConfirmedRate12Packet(badCRC)
+		var pkt dmrd.Data
 		for i, b := range bursts {
-			out := tr.TranslateToIPSC(dmrd.Data{
+			pkt = dmrd.Data{
 				Private: true,
 				Source:  3191868, Destination: 3140598,
 				Frame: dmrd.FrameDataSync, Value: uint8(types[i]), Stream: 85, Burst: b,
-			})
+			}
+			out := tr.TranslateToIPSC(pkt)
 			want := 1
-			if badCRC {
+			if badCRC && i == 0 {
 				want = 0
 			}
 			if len(out) != want {
 				t.Fatalf("bad CRC %v burst %d: got %d packets, want %d", badCRC, i, len(out), want)
 			}
-			if want == 1 && (out[0][17]&ipscCallInfoEnd != 0) != (i == 2) {
+			if want == 1 && (out[0][17]&ipscCallInfoEnd != 0) != (i == 2 && !badCRC) {
 				t.Errorf("bad CRC %v burst %d: call info %02x", badCRC, i, out[0][17])
 			}
 		}
-		if len(tr.streams) != 0 {
-			t.Fatalf("bad CRC %v: call still open after its last block: %d streams", badCRC, len(tr.streams))
+		if open := len(tr.streams); (open != 0) != badCRC {
+			t.Fatalf("bad CRC %v: %d streams open after the last block", badCRC, open)
+		}
+		if badCRC {
+			if end := tr.EndDataCall(pkt); len(end) != 1 || len(tr.streams) != 0 {
+				t.Fatalf("EndDataCall gave %d packets and left %d streams", len(end), len(tr.streams))
+			}
 		}
 	}
 	c := rigRate34Calls()[0]
@@ -947,8 +954,8 @@ func TestDroppedHeaderDropsItsBlocks(t *testing.T) {
 	if out := tr.TranslateToIPSC(dmrd.Data{
 		Source: 3191868, Destination: c.dst, Private: !c.group, Slot: enums.Slot2,
 		Frame: dmrd.FrameDataSync, Value: uint8(c.types[1]), Stream: 86, Burst: [33]byte(block),
-	}); len(out) != 0 || len(tr.streams) != 0 {
-		t.Errorf("rate 3/4 block with no header: got %d packets and %d streams, want none", len(out), len(tr.streams))
+	}); len(out) != 1 || out[0][30] != ipscBurstRate34 || out[0][17]&ipscCallInfoEnd != 0 {
+		t.Errorf("rate 3/4 block with no header: got %x, want one rate 3/4 packet without the end flag", out)
 	}
 }
 

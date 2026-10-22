@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
@@ -153,5 +154,52 @@ func TestEveryIPSCDataBlockReachesMMDVM(t *testing.T) {
 	}
 	if blocks == 0 {
 		t.Fatal("capture has no data blocks")
+	}
+}
+
+func TestHeaderlessMMDVMBlocksReachIPSC(t *testing.T) {
+	t.Parallel()
+	r12 := [12]byte{0x45, 0x00, 0x48, 0x00, 0x59, 0x00, 0x54, 0x00, 0x20, 0x00, 0x54, 0x00}
+	r34 := [18]byte{0x00, 0x50, 0x44, 0x5c, 0x56, 0x47, 0x1f, 0x20, 0x54, 0x45, 0x53, 0x14, 0x20, 0x00, 0x00, 0x00, 0x00, 0x01}
+	b12, err := layer2.BuildDataBurst(r12, enums.DataTypeRate12, 7, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b34, err := layer2.BuildRate34DataBurst(r34, 7, layer2.SyncSourceBS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := newTestTranslator(t)
+	tr.SetColorCode(7)
+	for i, b := range []layer2.RawBurst{b12, b34, b12} {
+		dt := enums.DataTypeRate12
+		if i == 1 {
+			dt = enums.DataTypeRate34
+		}
+		pkt := makeTestMMDVMPacket(false, false, dmrd.FrameDataSync, uint8(dt))
+		pkt.Burst = b
+		out := tr.TranslateToIPSC(pkt)
+		if len(out) != 1 {
+			t.Fatalf("block %d: %v with no header gave %d IPSC packets, want 1", i, dt, len(out))
+		}
+		u, err := ipscpkt.DecodeUser(out[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := u.RawBurst(7, layer2.SyncSourceBS)
+		if err != nil || byte(u.Burst) != byte(dt) || u.Info.End() {
+			t.Fatalf("block %d: burst %02x end %v error %v", i, byte(u.Burst), u.Info.End(), err)
+		}
+		if dt == enums.DataTypeRate12 {
+			if p, _ := raw.BPTCPayload(); p != r12 {
+				t.Fatalf("block %d: payload %x", i, p)
+			}
+		} else if p, _ := raw.Rate34Payload(); p != r34 {
+			t.Fatalf("block %d: payload %x", i, p)
+		}
+	}
+	end := tr.EndDataCall(makeTestMMDVMPacket(false, false, dmrd.FrameDataSync, uint8(enums.DataTypeRate12)))
+	if len(end) != 1 || end[0][30] != ipscBurstSyncUndetect || end[0][17]&ipscCallInfoEnd == 0 {
+		t.Fatalf("end of the call gave %x", end)
 	}
 }

@@ -234,11 +234,6 @@ func (t *IPSCTranslator) TranslateToIPSC(pkt dmrd.Data) (results [][]byte) {
 
 	switch frameType {
 	case dmrd.FrameDataSync:
-		if ss.headerless(enums.DataType(dtypeOrVSeq)) {
-			t.logs.Debug("IPSCTranslator: dropping data block outside a data packet",
-				"dtype", enums.DataType(dtypeOrVSeq).String())
-			return nil
-		}
 		// Voice LC Header, Terminator, or Data
 		switch enums.DataType(dtypeOrVSeq) {
 		case enums.DataTypeVoiceLCHeader:
@@ -544,14 +539,6 @@ func (t *IPSCTranslator) buildVoiceTerminator(pkt dmrd.Data, ss *streamState, lc
 	return t.buildDataBurst(&u, pkt.Burst, enums.DataTypeTerminatorWithLC, &lc)
 }
 
-// headerless reports whether dataType is a rate 1/2, 3/4 or 1 data block
-// and the call has no data packet in progress for it: its header failed
-// its CRC or never came, or its packet already ended. MMDVMHost discards
-// such a block from the network (CDMRSlot::writeNetwork).
-func (ss *streamState) headerless(dataType enums.DataType) bool {
-	return ss.data.headerless(dataType)
-}
-
 // lastDataBlock adds a data burst to the data packet of the call and
 // reports whether it completes the packet (see DataBurstEndsCall).
 func (ss *streamState) lastDataBlock(data [33]byte) bool {
@@ -564,16 +551,6 @@ type DataCall struct {
 	// pHead is set after a first header with the proprietary SAP, which a
 	// P_HEAD should follow.
 	pHead bool
-}
-
-// headerless reports whether dataType is a rate 1/2, 3/4 or 1 data block
-// and c has no data packet in progress for it.
-func (c *DataCall) headerless(dataType enums.DataType) bool {
-	switch dataType { //nolint:exhaustive // only data blocks belong to a packet
-	case enums.DataTypeRate12, enums.DataTypeRate34, enums.DataTypeRate1:
-		return c.asm == nil || !c.asm.InProgress()
-	}
-	return false
 }
 
 // DataBurstEndsCall adds the data burst data, a data header or a rate 1/2,
