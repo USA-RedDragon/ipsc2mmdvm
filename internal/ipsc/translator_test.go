@@ -20,9 +20,19 @@ import (
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
+func unconfirmedHeader(t *testing.T, u pdu.UnconfirmedDataHeader) pdu.DataHeader {
+	t.Helper()
+	var h pdu.DataHeader
+	if err := h.SetUnconfirmed(u); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 func testFullLC(t *testing.T, lc [9]byte, dt enums.DataType) [12]byte {
 	t.Helper()
-	full, err := pdu.LCBytes(lc).Codeword(dt)
+	l := pdu.LCBytes(lc)
+	full, err := l.Codeword(dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,10 +1164,10 @@ func TestTranslateRandomInputsDoNotPanic(t *testing.T) {
 // as MMDVMHost does.
 func startDataPacket(t *testing.T, tr *IPSCTranslator, pkt dmrd.Data) {
 	t.Helper()
-	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+	h := unconfirmedHeader(t, pdu.UnconfirmedDataHeader{
 		Group: !pkt.Private, SAP: enums.SAPIPBasedPacketData,
 		LLIDDestination: pkt.Destination, LLIDSource: pkt.Source, BlocksToFollow: 2, //nolint:gosec // test addresses are small
-	}}
+	})
 	burst, err := layer2.BuildBurst(&h, 0, layer2.SyncSourceBS)
 	if err != nil {
 		t.Fatal(err)
@@ -1296,9 +1306,9 @@ func TestTranslateToIPSCDataPayloadIsBPTCDecoded(t *testing.T) {
 // that a data block of the call of data belongs to a data packet.
 func startIPSCDataPacket(t *testing.T, tr *IPSCTranslator, data []byte) {
 	t.Helper()
-	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+	h := unconfirmedHeader(t, pdu.UnconfirmedDataHeader{
 		SAP: enums.SAPIPBasedPacketData, LLIDDestination: 200, LLIDSource: 100, BlocksToFollow: 2,
-	}}
+	})
 	burst, err := layer2.BuildBurst(&h, 0, layer2.SyncSourceBS)
 	if err != nil {
 		t.Fatal(err)
@@ -2078,34 +2088,40 @@ func TestTranslateToIPSCClearsPI(t *testing.T) {
 // blocks.
 func proprietaryPacketBursts(t *testing.T, confirmed, withPHead bool) ([][33]byte, []enums.DataType) {
 	t.Helper()
-	h := pdu.DataHeader{Format: pdu.FormatUnconfirmed, UnconfirmedDataHeader: &pdu.UnconfirmedDataHeader{
+	h := unconfirmedHeader(t, pdu.UnconfirmedDataHeader{
 		Group: true, SAP: enums.SAPProprietaryPacketData, LLIDDestination: 200, LLIDSource: 100,
-	}}
+	})
 	if confirmed {
-		h = pdu.DataHeader{Format: pdu.FormatConfirmed, ConfirmedDataHeader: &pdu.ConfirmedDataHeader{
+		h = pdu.DataHeader{}
+		if err := h.SetConfirmed(pdu.ConfirmedDataHeader{
 			Group: true, SAP: enums.SAPProprietaryPacketData, LLIDDestination: 200, LLIDSource: 100,
-		}}
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	p, err := packet.NewPacket(h, make([]byte, 30), enums.DataTypeRate12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if confirmed {
-		c := *p.Header.ConfirmedDataHeader
+	if c, ok := p.Header.AsConfirmed(); ok {
 		c.BlocksToFollow++
-		p.Header.ConfirmedDataHeader = &c
-	} else {
-		u := *p.Header.UnconfirmedDataHeader
+		if err := p.Header.SetConfirmed(c); err != nil {
+			t.Fatal(err)
+		}
+	} else if u, ok := p.Header.AsUnconfirmed(); ok {
 		u.BlocksToFollow++
-		p.Header.UnconfirmedDataHeader = &u
+		if err := p.Header.SetUnconfirmed(u); err != nil {
+			t.Fatal(err)
+		}
 	}
 	bursts, err := packet.Bursts(&p, 0, layer2.SyncSourceBS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ph := pdu.DataHeader{Format: pdu.FormatProprietary, ProprietaryHeader: &pdu.ProprietaryHeader{
-		SAP: enums.SAPProprietaryPacketData, MFID: 0x10,
-	}}
+	var ph pdu.DataHeader
+	if err := ph.SetProprietary(pdu.ProprietaryHeader{SAP: enums.SAPProprietaryPacketData, MFID: 0x10}); err != nil {
+		t.Fatal(err)
+	}
 	bits, err := ph.Encode()
 	if err != nil {
 		t.Fatal(err)

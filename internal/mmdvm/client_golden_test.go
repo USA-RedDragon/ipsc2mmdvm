@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/session"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/dmrdsession"
 )
 
 // TestGoldenLoginMessages logs the session of the client into a master
@@ -19,9 +19,9 @@ func TestGoldenLoginMessages(t *testing.T) {
 	}
 	p := client.peer
 	var got []string
-	keep := func(out []session.Output) {
+	keep := func(out []dmrdsession.Output) {
 		for _, o := range out {
-			if o.Kind == session.OutputSend {
+			if o.Kind == dmrdsession.OutputSend {
 				got = append(got, hex.EncodeToString(o.Packet))
 			}
 		}
@@ -31,8 +31,8 @@ func TestGoldenLoginMessages(t *testing.T) {
 	keep(p.Packet(0, []byte("RPTACK\x12\x34\xab\xcd"), nil))
 	keep(p.Packet(0, ack, nil))
 	keep(p.Packet(0, ack, nil))
-	keep(p.Tick(session.RetryDefault, nil))
-	keep(p.Close(nil))
+	keep(p.Tick(dmrdsession.RetryDefault, nil))
+	keep(p.Close(dmrdsession.RetryDefault, nil))
 	want := []string{
 		goldenRPTL, goldenRPTK, goldenRPTC, goldenRPTPING, goldenRPTCL,
 	}

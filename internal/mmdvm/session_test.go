@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/session"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/dmrdsession"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 )
 
@@ -130,11 +130,11 @@ func TestPacketFromClosedConnectionIsDropped(t *testing.T) {
 	c.peer.Tick(0, nil)
 	c.peerMu.Unlock()
 	c.fromMaster(rxPacket{gen: c.connGen.Load() + 1, data: []byte("RPTACK\x01\x02\x03\x04")}, nil)
-	if st := c.peer.State(); st != session.StateLogin {
+	if st := c.peer.State(); st != dmrdsession.StateLogin {
 		t.Fatalf("a packet from a closed connection moved the session to %s", st)
 	}
 	c.fromMaster(rxPacket{gen: c.connGen.Load(), data: []byte("RPTACK\x01\x02\x03\x04")}, nil)
-	if st := c.peer.State(); st != session.StateAuth {
+	if st := c.peer.State(); st != dmrdsession.StateAuth {
 		t.Fatalf("expected the RPTACK of the current connection to move the session to Auth, got %s", st)
 	}
 }

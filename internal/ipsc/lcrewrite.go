@@ -105,12 +105,13 @@ func (b *embeddedLCBuffer) add(frag [4]byte, emb pdu.EmbeddedSignalling, embOK b
 	if !b.fragments.add(frag, emb, embOK, pos, lastPos) {
 		return
 	}
-	lc, result := layer2.DecodeEmbeddedLC(b.fragments.raw, true)
+	lc, result := layer2.DecodeEmbeddedLC(b.fragments.raw)
 	if result.Uncorrectable {
 		return
 	}
 	b.valid = true
-	b.flco = pdu.LCBytes(lc).FLCO()
+	l := pdu.LCBytes(lc)
+	b.flco = l.FLCO()
 	b.raw = layer2.EncodeEmbeddedLC(lc)
 }
 
@@ -268,7 +269,7 @@ func rewriteCSBK(b [12]byte, pkt *dmrd.Data) ([12]byte, bool) {
 	if csbk.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) != nil {
 		return b, false
 	}
-	csbk.SetGroup(!pkt.Private)
+	_ = csbk.SetGroup(!pkt.Private)
 	csbk.Reseal()
 	return csbk, true
 }
@@ -283,7 +284,7 @@ func rewriteDataHeader(b [12]byte, pkt *dmrd.Data) ([12]byte, bool) {
 	if h.SetAddresses(lcAddress(pkt.Destination), lcAddress(pkt.Source)) != nil {
 		return b, false
 	}
-	h.SetGroup(!pkt.Private)
+	_ = h.SetGroup(!pkt.Private)
 	h.Reseal()
 	return h, true
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
-	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/session"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd/dmrdsession"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
@@ -42,7 +42,7 @@ type MMDVMClient struct {
 	// peerMu guards peer, epoch and pingSent. The session goroutine holds
 	// it for each call of the Peer and Stop holds it for Close.
 	peerMu      sync.Mutex
-	peer        *session.Peer
+	peer        *dmrdsession.Peer
 	epoch       time.Time
 	pingSent    time.Time
 	up          atomic.Bool
@@ -330,7 +330,7 @@ func (h *MMDVMClient) Start() error {
 // DMRGateway speaks and BrandMeister, HBlink, FreeDMR and DMRHub masters
 // accept.
 func (h *MMDVMClient) newPeer() error {
-	p, err := session.NewPeer(&session.PeerConfig{
+	p, err := dmrdsession.NewPeer(&dmrdsession.PeerConfig{
 		Dialect:  dmrd.DialectMMDVM,
 		ID:       h.cfg.ID,
 		Password: []byte(h.cfg.Password),
@@ -363,7 +363,7 @@ func (h *MMDVMClient) session() {
 	defer h.wg.Done()
 	timer := time.NewTimer(0)
 	defer timer.Stop()
-	out := make([]session.Output, 0, session.MaxOutputs)
+	out := make([]dmrdsession.Output, 0, dmrdsession.MaxOutputs)
 	for {
 		h.peerMu.Lock()
 		at, ok := h.peer.Deadline()
@@ -396,7 +396,7 @@ func (h *MMDVMClient) session() {
 // fromMaster passes a packet of the master to the Peer. A packet from a
 // connection that has since been closed is dropped, so it cannot act on
 // the session that replaced it.
-func (h *MMDVMClient) fromMaster(pkt rxPacket, out []session.Output) []session.Output {
+func (h *MMDVMClient) fromMaster(pkt rxPacket, out []dmrdsession.Output) []dmrdsession.Output {
 	if pkt.gen != h.connGen.Load() {
 		slog.Debug("Dropping packet from a closed connection", "network", h.cfg.Name)
 		return out
@@ -414,18 +414,18 @@ func (h *MMDVMClient) fromMaster(pkt rxPacket, out []session.Output) []session.O
 
 // outputs acts on the outputs of the Peer. Must be called with peerMu
 // held.
-func (h *MMDVMClient) outputs(out []session.Output) {
+func (h *MMDVMClient) outputs(out []dmrdsession.Output) {
 	for _, o := range out {
 		switch o.Kind {
-		case session.OutputSend:
+		case dmrdsession.OutputSend:
 			h.sendControl(o.Packet)
-		case session.OutputUp:
+		case dmrdsession.OutputUp:
 			slog.Info("Logged in", "network", h.cfg.Name)
 			h.up.Store(true)
 			h.setConnState(2)
-		case session.OutputDown:
+		case dmrdsession.OutputDown:
 			h.down(o)
-		case session.OutputData:
+		case dmrdsession.OutputData:
 			select {
 			case h.dataRX <- o.Packet:
 			default:
@@ -434,11 +434,11 @@ func (h *MMDVMClient) outputs(out []session.Output) {
 					h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "handler_busy").Inc()
 				}
 			}
-		case session.OutputMessage:
+		case dmrdsession.OutputMessage:
 			if o.Command == dmrd.CommandRPTSBKN {
 				slog.Info("Server requested a roaming beacon transmission", "network", h.cfg.Name)
 			}
-		case session.OutputLogin, session.OutputConfig, session.OutputOptions, session.OutputPong:
+		case dmrdsession.OutputLogin, dmrdsession.OutputConfig, dmrdsession.OutputOptions, dmrdsession.OutputPong:
 		}
 	}
 }
@@ -459,17 +459,17 @@ func (h *MMDVMClient) sendControl(p []byte) {
 	h.enqueue(append([]byte(nil), p...))
 }
 
-// down acts on the end of a session. After a timeout or an MSTCL the
+// down acts on the end of a dmrdsession. After a timeout or an MSTCL the
 // master may have moved or restarted, so the next login dials it again;
 // after an MSTNAK the login goes again on the same connection.
-func (h *MMDVMClient) down(o session.Output) {
+func (h *MMDVMClient) down(o dmrdsession.Output) {
 	h.up.Store(false)
 	slog.Warn("Session with the master ended", "network", h.cfg.Name, "reason", o.Reason.String(), "state", o.State.String())
-	if o.Reason == session.ReasonRefused && o.State == session.StateAuth && h.metrics != nil {
+	if o.Reason == dmrdsession.ReasonRefused && o.State == dmrdsession.StateAuth && h.metrics != nil {
 		h.metrics.MMDVMAuthFailures.WithLabelValues(h.cfg.Name).Inc()
 	}
 	switch o.Reason { //nolint:exhaustive // the other reasons keep the connection
-	case session.ReasonTimeout, session.ReasonClosed:
+	case dmrdsession.ReasonTimeout, dmrdsession.ReasonClosed:
 		h.reconnect()
 	default:
 		h.setConnState(1)
@@ -634,7 +634,7 @@ func (h *MMDVMClient) tx() {
 func (h *MMDVMClient) rx(conn net.Conn, stop <-chan struct{}, gen uint64) {
 	defer h.wg.Done()
 	for {
-		data := make([]byte, session.MaxPacket+1)
+		data := make([]byte, dmrdsession.MaxPacket+1)
 		n, err := conn.Read(data)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
@@ -691,9 +691,9 @@ func (h *MMDVMClient) Stop() {
 func (h *MMDVMClient) closeSession() {
 	h.peerMu.Lock()
 	defer h.peerMu.Unlock()
-	var out []session.Output
+	var out []dmrdsession.Output
 	if h.peer != nil {
-		out = h.peer.Close(make([]session.Output, 0, session.MaxOutputs))
+		out = h.peer.Close(h.clock(), make([]dmrdsession.Output, 0, dmrdsession.MaxOutputs))
 	}
 	h.up.Store(false)
 	h.connMu.Lock()
@@ -702,7 +702,7 @@ func (h *MMDVMClient) closeSession() {
 		return
 	}
 	for _, o := range out {
-		if o.Kind != session.OutputSend {
+		if o.Kind != dmrdsession.OutputSend {
 			continue
 		}
 		if _, err := h.conn.Write(o.Packet); err != nil {

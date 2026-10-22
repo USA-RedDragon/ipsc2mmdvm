@@ -624,10 +624,13 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, ok := hb.Data.(*pdu.DataHeader)
-	if !ok || h.ResponsePacketHeader == nil || hb.FEC.PDU.Uncorrectable {
+	var r pdu.ResponsePacketHeader
+	if ok {
+		r, ok = h.AsResponse()
+	}
+	if !ok || hb.FEC.PDU.Uncorrectable {
 		t.Fatalf("header burst decodes to %T %+v, fec %+v", hb.Data, hb.Data, hb.FEC)
 	}
-	r := h.ResponsePacketHeader
 	if r.LLIDSource != 3140598 || r.LLIDDestination != 3191868 || r.ResponseClass != 2 || r.BlocksToFollow != 1 {
 		t.Errorf("response header %+v", r)
 	}

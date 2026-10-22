@@ -26,7 +26,7 @@ func (h *MMDVMClient) rptcPacket() []byte {
 	if slots == 0 {
 		slots = 3
 	}
-	var c dmrd.Config
+	var c dmrd.MMDVMConfig
 	c.Reset()
 	c.SetID(h.cfg.ID)
 	errs := []error{

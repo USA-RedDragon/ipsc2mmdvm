@@ -22,7 +22,7 @@ func positionLCSS(pos int) enums.LCSS {
 // and fails the test when it does not decode.
 func embeddedLCOf(t *testing.T, fragments [4][4]byte) [9]byte {
 	t.Helper()
-	lc, result := layer2.DecodeEmbeddedLC(fragments, true)
+	lc, result := layer2.DecodeEmbeddedLC(fragments)
 	if result.Uncorrectable {
 		t.Fatal("embedded LC does not decode")
 	}
@@ -340,7 +340,7 @@ func TestLCRewriterOutputCarriesRewrite(t *testing.T) {
 		}
 		fragments[vseq-1] = o.Burst.EmbeddedData()
 	}
-	lc := layer2.DecodeEmbeddedFullLinkControl(fragments, true)
+	lc := layer2.DecodeEmbeddedFullLinkControl(fragments)
 	if target, source, ok := lc.Addresses(); lc.FEC.Uncorrectable || !ok || target != 9 || source != 1234 {
 		t.Fatalf("embedded LC %s, want a call from 1234 to 9", lc.String())
 	}

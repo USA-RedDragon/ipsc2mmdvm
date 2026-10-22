@@ -618,10 +618,10 @@ func DataBurstEndsCall(c *DataCall, data [33]byte) bool {
 			c.pHead = announcesPHead(d)
 		case *pdu.Rate12Data, *pdu.Rate34Data, *pdu.Rate1Data:
 			if pHead {
-				_, _, _ = c.asm.Add(&pdu.DataHeader{
-					Format:            pdu.FormatProprietary,
-					ProprietaryHeader: &pdu.ProprietaryHeader{SAP: enums.SAPProprietaryPacketData},
-				})
+				var h pdu.DataHeader
+				if h.SetProprietary(pdu.ProprietaryHeader{SAP: enums.SAPProprietaryPacketData}) == nil {
+					_, _, _ = c.asm.Add(&h)
+				}
 			}
 		}
 	}
@@ -632,11 +632,11 @@ func DataBurstEndsCall(c *DataCall, data [33]byte) bool {
 // announcesPHead reports whether h is the first header of a proprietary
 // packet: an unconfirmed or confirmed data header with SAP 9.
 func announcesPHead(h *pdu.DataHeader) bool {
-	switch {
-	case h.Format == pdu.FormatUnconfirmed && h.UnconfirmedDataHeader != nil:
-		return h.UnconfirmedDataHeader.SAP == enums.SAPProprietaryPacketData
-	case h.Format == pdu.FormatConfirmed && h.ConfirmedDataHeader != nil:
-		return h.ConfirmedDataHeader.SAP == enums.SAPProprietaryPacketData
+	if u, ok := h.AsUnconfirmed(); ok {
+		return u.SAP == enums.SAPProprietaryPacketData
+	}
+	if c, ok := h.AsConfirmed(); ok {
+		return c.SAP == enums.SAPProprietaryPacketData
 	}
 	return false
 }
@@ -828,7 +828,7 @@ func (t *IPSCTranslator) buildVoiceBurst(pkt dmrd.Data, ss *streamState) []byte 
 func (t *IPSCTranslator) lateEntryLCLocked(ss *streamState, pkt dmrd.Data) (voice.Call, bool) {
 	if ss.voice == nil {
 		var err error
-		ss.voice, err = voice.NewReceiver(&voice.ReceiverConfig{Lost: -1, Hang: -1, Strict: true, Scratch: t.scratch})
+		ss.voice, err = voice.NewReceiver(&voice.ReceiverConfig{Lost: -1, Hang: -1, Scratch: t.scratch})
 		if err != nil {
 			t.logs.Debug("IPSCTranslator: cannot make voice receiver", "error", err)
 			return voice.Call{}, false
@@ -875,7 +875,7 @@ func fullLCCodeword(lc pdu.LCBytes, dataType enums.DataType) [12]byte {
 // with the standard feature set ID and the default service options.
 func constructLC(src, dst uint32, groupCall bool) pdu.LCBytes {
 	var lc pdu.LCBytes
-	lc.SetGroup(groupCall)
+	_ = lc.SetGroup(groupCall)
 	lc.SetFID(enums.FIDStandardized)
 	_ = lc.SetServiceOptions(layer3.MotorolaServiceOptions())
 	_ = lc.SetAddresses(lcAddress(dst), lcAddress(src)) // lcAddress keeps 24 bits
@@ -885,14 +885,12 @@ func constructLC(src, dst uint32, groupCall bool) pdu.LCBytes {
 // lcPrivacy reports whether lc is a group or unit-to-unit voice LC with the
 // privacy service option.
 func lcPrivacy(lc [9]byte) bool {
-	flc, err := pdu.DecodeFullLinkControlBytes(lc)
-	switch {
-	case err != nil:
-		return false
-	case flc.GroupVoice != nil:
-		return flc.GroupVoice.ServiceOptions.IsPrivacy
-	case flc.UnitToUnit != nil:
-		return flc.UnitToUnit.ServiceOptions.IsPrivacy
+	flc := pdu.DecodeFullLinkControlBytes(lc)
+	if g, ok := flc.AsGroupVoice(); ok {
+		return g.ServiceOptions.IsPrivacy
+	}
+	if u, ok := flc.AsUnitToUnit(); ok {
+		return u.ServiceOptions.IsPrivacy
 	}
 	return false
 }

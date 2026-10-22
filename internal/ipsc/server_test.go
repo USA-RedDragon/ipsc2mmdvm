@@ -14,7 +14,7 @@ import (
 	"time"
 
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
-	"github.com/USA-RedDragon/dmrgo/v2/transport/ipsc/session"
+	"github.com/USA-RedDragon/dmrgo/v2/transport/ipsc/ipscsession"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/config"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus"
@@ -81,23 +81,28 @@ func control(t *testing.T, op ipscpkt.Opcode, id uint32) []byte {
 	var flags ipscpkt.Flags
 	flags.Set(ipscpkt.FlagVoice, true)
 	flags.Set(ipscpkt.FlagData, true)
-	b, err := ipscpkt.Control{Opcode: op, ID: id, Mode: 0x6A, Flags: flags, Version: session.VersionDefault()}.AppendBinary(nil)
+	b, err := (&ipscpkt.Control{Opcode: op, ID: id, Mode: 0x6A, Flags: flags, Version: ipscsession.VersionDefault()}).AppendBinary(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
 }
 
-func signed(s *IPSCServer, p []byte) []byte {
+func signed(t *testing.T, s *IPSCServer, p []byte) []byte {
+	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.master.Sign(slices.Clone(p))
+	b, err := s.master.Sign(slices.Clone(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func registerPeer(t *testing.T, s *IPSCServer, peerID uint32) *net.UDPConn {
 	t.Helper()
 	conn, addr := listenPeer(t)
-	s.handlePacket(signed(s, control(t, ipscpkt.OpRegisterRequest, peerID)), addr)
+	s.handlePacket(signed(t, s, control(t, ipscpkt.OpRegisterRequest, peerID)), addr)
 	if reply := readUDP(t, conn); reply[0] != byte(ipscpkt.OpRegisterReply) {
 		t.Fatalf("register reply 0x%02X", reply[0])
 	}
@@ -691,10 +696,10 @@ func TestExpirePeersRemovesSilentPeers(t *testing.T) {
 	registerPeer(t, s, 2)
 	s.pacePeer(t.Context(), 2)
 
-	now = now.Add(session.TimeoutDefault / 2)
+	now = now.Add(ipscsession.TimeoutDefault / 2)
 	s.handlePacket(control(t, ipscpkt.OpAliveRequest, 1), liveAddr)
 	readUDP(t, live)
-	now = now.Add(session.TimeoutDefault/2 + time.Second)
+	now = now.Add(ipscsession.TimeoutDefault/2 + time.Second)
 	s.tick()
 
 	if ids := peerIDs(s); !slices.Equal(ids, []uint32{1}) {
@@ -739,7 +744,7 @@ func TestMaintenanceRunsTheMasterTimers(t *testing.T) {
 	s.armTimer = func(d time.Duration) *time.Timer {
 		waits <- d
 		tm := time.NewTimer(time.Hour)
-		if d == session.TimeoutDefault {
+		if d == ipscsession.TimeoutDefault {
 			tm.C = fire
 		}
 		return tm
@@ -756,14 +761,14 @@ func TestMaintenanceRunsTheMasterTimers(t *testing.T) {
 	registerPeer(t, s, 9)
 	select {
 	case d := <-waits:
-		if d != session.TimeoutDefault {
-			t.Fatalf("wait after registration %v, want %v", d, session.TimeoutDefault)
+		if d != ipscsession.TimeoutDefault {
+			t.Fatalf("wait after registration %v, want %v", d, ipscsession.TimeoutDefault)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("registration did not re-arm the timer")
 	}
 	mu.Lock()
-	now = now.Add(session.TimeoutDefault)
+	now = now.Add(ipscsession.TimeoutDefault)
 	mu.Unlock()
 	fire <- time.Now()
 	deadline := time.Now().Add(2 * time.Second)
