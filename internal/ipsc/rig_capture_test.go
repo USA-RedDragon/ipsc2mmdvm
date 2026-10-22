@@ -664,20 +664,24 @@ func TestRigSACKResponseToMMDVM(t *testing.T) {
 	}
 }
 
-// TestRigRate1BlockIsDropped uses a confirmed rate 1 packet from 3191868 to
+// TestRigRate1BlockPassesOn uses a confirmed rate 1 packet from 3191868 to
 // 3140598 on TS1. The XPR 8400 relayed its data header, then the rate 1
 // block as a 0x06 packet with a meaningless BPTC(196,96) decode that fails
-// the data header CRC (byte 31 bit 1 set), then a 0x13 end packet. Only the
-// header goes to MMDVM.
-func TestRigRate1BlockIsDropped(t *testing.T) {
+// the data header CRC (byte 31 bit 1 set), then a 0x13 end packet. Both
+// 0x06 packets go to MMDVM with their payloads; a receiver drops the one
+// that fails its CRC.
+func TestRigRate1BlockPassesOn(t *testing.T) {
 	t.Parallel()
 	got := translateRig(t, []string{
 		"840004ce2e6830b43c2febf6010000251c00805d2dd20f396f4f000000000640000a800a006043a82febf630b43c810083cf00765eba",
 		"840004ce2e6830b43c2febf6010000251c40805e2dd30f39712f000000000642000a800a006013054441204104844141601500765e7a",
 		"840004ce2e6830b43c2febf6010000251c40805e2dd40f39730f0000000013000000",
 	})
-	if len(got) != 1 || got[0].Value != uint8(enums.DataTypeDataHeader) {
-		t.Fatalf("got %+v, want the data header only", got)
+	if len(got) != 2 || got[0].Value != uint8(enums.DataTypeDataHeader) || got[1].Value != uint8(enums.DataTypeDataHeader) {
+		t.Fatalf("got %+v, want the two 0x06 packets", got)
+	}
+	if p, _ := got[1].Burst.BPTCPayload(); p != [12]byte(mustHex(t, "13054441204104844141601500765e7a")[:12]) {
+		t.Fatalf("second packet payload %x", p)
 	}
 }
 
@@ -969,9 +973,10 @@ func TestDataCallInProgress(t *testing.T) {
 // gen/cap1248.txt, a capture of uncertain origin in the form an XPR 8400
 // sends: a confirmed data header, a second 0x06 packet that fails its CRC
 // and carries the end flag, a 0x13 end packet, and then a rate 3/4 block
-// without the end flag. The call ended before the block, which has no
-// header of its own, so the block must not start a new MMDVM stream. The
-// same holds when the 0x13 packet alone ends the call.
+// without the end flag. Both 0x06 packets go to MMDVM. The call ended
+// before the block, which has no header of its own, so the block must not
+// start a new MMDVM stream. The same holds when the 0x13 packet alone ends
+// the call.
 func TestDataBlockAfterEndIsDropped(t *testing.T) {
 	t.Parallel()
 	packets := []string{
@@ -990,8 +995,12 @@ func TestDataBlockAfterEndIsDropped(t *testing.T) {
 			d, _ := hex.DecodeString(h)
 			got = append(got, tr.TranslateToMMDVM(d[0], d)...)
 		}
-		if len(got) != 1 || got[0].Value != uint8(enums.DataTypeDataHeader) {
-			t.Fatalf("without packet %d: got %+v, want the data header only", skip, got)
+		want := 2
+		if skip == 1 {
+			want = 1
+		}
+		if len(got) != want || got[0].Value != uint8(enums.DataTypeDataHeader) || got[want-1].Value != uint8(enums.DataTypeDataHeader) {
+			t.Fatalf("without packet %d: got %+v, want the %d data headers", skip, got, want)
 		}
 		if len(tr.reverseStreams) != 0 {
 			t.Fatalf("without packet %d: %d streams open after the call ended", skip, len(tr.reverseStreams))

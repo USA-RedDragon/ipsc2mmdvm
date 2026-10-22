@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2/pdu"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 )
@@ -85,5 +86,42 @@ func TestIdleIPSCBurstReachesMMDVM(t *testing.T) {
 	}
 	if st := out[0].Burst.SlotType(); st.DataType != enums.DataTypeIdle || st.ColorCode != 7 {
 		t.Fatalf("slot type %+v", st)
+	}
+}
+
+func TestBadCRCIPSCBurstsReachMMDVM(t *testing.T) {
+	t.Parallel()
+	seen := map[enums.DataType]int{}
+	for _, g := range loadXPR8400Capture(t) {
+		for _, r := range g.records {
+			if r.data[0] != 0x83 && r.data[0] != 0x84 || len(r.data) <= 30 {
+				continue
+			}
+			dt := enums.DataType(r.data[30])
+			if dt != enums.DataTypeCSBK && dt != enums.DataTypeDataHeader && dt != enums.DataTypeMBCHeader {
+				continue
+			}
+			u, err := ipscpkt.DecodeUser(r.data)
+			if err != nil || u.Data.Bits != 96 {
+				continue
+			}
+			payload := [12]byte(u.Data.Octets[:12])
+			if pdu.BlockCRCOK(payload, dt) {
+				continue
+			}
+			tr := newTestTranslator(t)
+			tr.SetColorCode(7)
+			out := tr.TranslateToMMDVM(r.data[0], r.data)
+			if len(out) != 1 {
+				t.Fatalf("%s: %v with a bad CRC %x gave %d DMRD packets, want 1", g.name, dt, r.data, len(out))
+			}
+			if got, _ := out[0].Burst.BPTCPayload(); got != payload || enums.DataType(out[0].Value) != dt {
+				t.Fatalf("%s: %v payload %x, want %v %x", g.name, enums.DataType(out[0].Value), got, dt, payload)
+			}
+			seen[dt]++
+		}
+	}
+	if seen[enums.DataTypeCSBK] == 0 || seen[enums.DataTypeDataHeader] == 0 {
+		t.Fatalf("capture has too few bad CRC bursts: %v", seen)
 	}
 }

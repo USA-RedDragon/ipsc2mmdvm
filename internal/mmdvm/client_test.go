@@ -1650,9 +1650,9 @@ func TestHandleIPSCBurstDataCallEndReleasesSlot(t *testing.T) {
 
 // TestHandleIPSCBurstDroppedDataEndReleasesSlot uses a confirmed rate 1
 // packet the XPR 8400 relayed on TS1: the header, the rate 1 block as a
-// 0x06 packet that fails its CRC and is dropped, and a 0x13 end packet. A
-// SACK on the same slot right after must reach the master at once, though
-// the packet that ended the data call produced nothing for MMDVM.
+// 0x06 packet that fails its CRC, and a 0x13 end packet. A SACK on the
+// same slot right after must reach the master at once, though the packet
+// that ended the data call produced nothing for MMDVM.
 func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
@@ -1680,7 +1680,7 @@ func TestHandleIPSCBurstDroppedDataEndReleasesSlot(t *testing.T) {
 		}
 		client.HandleIPSCBurst(data[0], data, addr)
 	}
-	for i, wantSrc := range []uint32{3191868, 3140598, 3140598} {
+	for i, wantSrc := range []uint32{3191868, 3191868, 3140598, 3140598} {
 		select {
 		case pkt := <-client.tx_chan:
 			if pkt.Source != wantSrc || pkt.Slot != enums.Slot1 {
@@ -1730,7 +1730,7 @@ func TestHandleIPSCBurstQueuedDroppedDataEnd(t *testing.T) {
 		}
 		client.HandleIPSCBurst(data[0], data, addr)
 	}
-	for i, wantSrc := range []uint32{3191868, 3191868, 3191868, 3140598, 3140598} {
+	for i, wantSrc := range []uint32{3191868, 3191868, 3191868, 3191868, 3140598, 3140598} {
 		select {
 		case pkt := <-client.tx_chan:
 			if pkt.Source != wantSrc || pkt.Slot != enums.Slot1 {

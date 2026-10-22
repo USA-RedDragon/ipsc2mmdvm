@@ -1130,10 +1130,12 @@ func (t *IPSCTranslator) reverseDataBurstLocked(src, dst uint32, groupCall bool,
 			return dmrd.Data{}, false
 		}
 	default:
-		var ok bool
-		if pkt, ok = t.dataBurstToMMDVM(src, dst, groupCall, slot, rss, burstType, [12]byte(u.Data.Octets[:12])); !ok {
-			return dmrd.Data{}, false
+		payload := [12]byte(u.Data.Octets[:12])
+		if !layer2.MMDVMHostAccepts(enums.DataType(burstType), payload) {
+			t.logs.Debug("IPSCTranslator: passing on a data burst that fails its CRC",
+				"burstType", fmt.Sprintf("0x%02X", burstType))
 		}
+		pkt = t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss, enums.DataType(burstType), payload)
 	}
 	DataBurstEndsCall(&rss.data, pkt.Burst)
 	return pkt, true
@@ -1335,24 +1337,6 @@ func lateEntryLC(payload [12]byte, src, dst uint32, groupCall bool) (pdu.LCBytes
 		return pdu.LCBytes{}, false
 	}
 	return lc, true
-}
-
-// dataBurstToMMDVM builds the MMDVM DMRD packet for an IPSC data packet
-// with a 12-byte BPTC(196,96) payload. Data bursts carry the DMR data type
-// in the burst type byte and the payload at the same offset as the voice
-// LC. A payload that fails its CRC is dropped, as MMDVMHost would drop it:
-// an XPR 8400 relays such blocks with bit 1 of byte 31 set, for example a
-// rate 1 block it decoded as a 0x06 data header. MBC continuation blocks
-// are passed on, since MMDVMHost checks each one for a CRC that only the
-// last block of a standard MBC has.
-func (t *IPSCTranslator) dataBurstToMMDVM(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, burstType byte, payload [12]byte) (dmrd.Data, bool) {
-	if burstType != ipscBurstMBCContinuation && burstType != ipscBurstIdle && burstType != ipscBurstUSBD &&
-		!layer2.MMDVMHostAccepts(enums.DataType(burstType), payload) {
-		t.logs.Debug("IPSCTranslator: dropping data burst that fails its CRC",
-			"burstType", fmt.Sprintf("0x%02X", burstType))
-		return dmrd.Data{}, false
-	}
-	return t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss, enums.DataType(burstType), payload), true
 }
 
 // buildMMDVMRate34Packet builds an MMDVM DMRD packet for the IPSC rate 3/4
