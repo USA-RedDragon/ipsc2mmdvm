@@ -71,7 +71,7 @@ const (
 
 // NewIPSCServer returns a server for cfg that reports to m, which may be nil.
 func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
-	mc := ipscsession.MasterConfig{MaxPeers: maxPeers}
+	mc := ipscsession.MasterConfig{MaxPeers: maxPeers, RegisterVersion: [4]byte{0x04, 0x02, 0x04, 0x01}}
 	if len(cfg.MMDVM) > 0 {
 		mc.ID = cfg.MMDVM[0].ID
 	}

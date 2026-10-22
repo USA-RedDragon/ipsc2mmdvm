@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/USA-RedDragon/configulator/v2 v2.5.0
-	github.com/USA-RedDragon/dmrgo/v2 v2.0.0-20261022153240-64d3b9f492a6
+	github.com/USA-RedDragon/dmrgo/v2 v2.0.0-20261022230539-1f22504946fb
 	github.com/goccy/go-yaml v1.19.2
 	github.com/klauspost/compress v1.20.1
 	github.com/lmittmann/tint v1.2.1

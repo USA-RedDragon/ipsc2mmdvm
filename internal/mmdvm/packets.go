@@ -79,7 +79,7 @@ func (h *MMDVMClient) sendPacket(packet dmrd.Data) {
 		return
 	}
 	packet.Size = 0
-	data, err := packet.AppendBinary(make([]byte, 0, 53))
+	data, err := packet.AppendBinary(make([]byte, 0, 55))
 	if err != nil {
 		slog.Warn("Dropping DMRD that does not encode", "network", h.cfg.Name, "error", err)
 		return

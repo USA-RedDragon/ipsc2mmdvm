@@ -179,9 +179,9 @@ func replayGroup(t *testing.T, g captureGroup) []byte {
 	return out.Bytes()
 }
 
-// goldenDMRD returns the 53 octets of pkt.
+// goldenDMRD returns the 53-octet core of pkt.
 func goldenDMRD(pkt dmrd.Data) []byte {
-	pkt.Size = 0
+	pkt.Size = 53
 	b, err := pkt.AppendBinary(nil)
 	if err != nil {
 		panic(err)

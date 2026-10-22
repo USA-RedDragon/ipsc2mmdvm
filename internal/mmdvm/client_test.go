@@ -170,8 +170,8 @@ func TestSendPacketEncodesAndSends(t *testing.T) {
 	client.sendPacket(pkt)
 
 	data := <-client.connTX
-	if len(data) != 53 {
-		t.Fatalf("expected 53 bytes, got %d", len(data))
+	if len(data) != 55 {
+		t.Fatalf("expected 55 bytes, got %d", len(data))
 	}
 	if string(data[:4]) != tagDMRD {
 		t.Fatalf("expected DMRD prefix, got %q", string(data[:4]))
@@ -507,8 +507,8 @@ func TestForwardTXSendsPackets(t *testing.T) {
 
 	select {
 	case data := <-client.connTX:
-		if len(data) != 53 {
-			t.Fatalf("expected 53 bytes, got %d", len(data))
+		if len(data) != 55 {
+			t.Fatalf("expected 55 bytes, got %d", len(data))
 		}
 		if string(data[:4]) != tagDMRD {
 			t.Fatalf("expected DMRD, got %q", string(data[:4]))

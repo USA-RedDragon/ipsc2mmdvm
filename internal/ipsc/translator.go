@@ -834,7 +834,8 @@ func (t *IPSCTranslator) lateEntryLCLocked(ss *streamState, pkt dmrd.Data) (voic
 			return voice.Call{}, false
 		}
 	}
-	t.events = ss.voice.Burst(time.Duration(t.now().UnixNano()), &pkt.Burst, pkt.Hint(), t.events[:0])
+	now := time.Duration(t.now().UnixNano())
+	t.events = ss.voice.Burst(now, &pkt.Burst, pkt.Hint(now), t.events[:0])
 	for _, e := range t.events {
 		if e.Call.Origin == voice.OriginEmbedded {
 			return e.Call, true

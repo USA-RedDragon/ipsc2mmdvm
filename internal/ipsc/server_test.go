@@ -81,7 +81,11 @@ func control(t *testing.T, op ipscpkt.Opcode, id uint32) []byte {
 	var flags ipscpkt.Flags
 	flags.Set(ipscpkt.FlagVoice, true)
 	flags.Set(ipscpkt.FlagData, true)
-	b, err := (&ipscpkt.Control{Opcode: op, ID: id, Mode: 0x6A, Flags: flags, Version: ipscsession.VersionDefault()}).AppendBinary(nil)
+	version := ipscsession.RegisterVersionDefault()
+	if op == ipscpkt.OpAliveRequest || op == ipscpkt.OpAliveReply {
+		version = ipscsession.AliveVersionDefault()
+	}
+	b, err := (&ipscpkt.Control{Opcode: op, ID: id, Mode: 0x6A, Flags: flags, Version: version}).AppendBinary(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
