@@ -19,16 +19,21 @@ const goldenControlKey = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
 // dmrgo transport codecs, for each control packet of the XPR 8400 capture
 // in the order they first appear, with the port of the peer in a peer list
 // and the trailer of a peer list written as zeros.
+// The register and keepalive replies carry 04 08 04 00, the version of the
+// XPR 8400, where they once carried 04 02 04 01: in the rig run
+// dmrgo-rfcap/runs/xpr-ipsc2hbrp-20261022 the XPR sends 04 08 04 00 in its
+// 0x90 and echoes the version of the master in its 0x96 (runC.ipsc.log:
+// 91003010af6a0000001d000104080400, then 960004ce2e6a0002805c04080400).
 // The last entry is the de-registration of Stop.
 func goldenControlReplies() []string {
 	return []string{
-		"900004ce2e6a0000805c04080400 -> 910004c2346a0000001d000104020401b02ee611702c5a361c92",
+		"900004ce2e6a0000805c04080400 -> 910004c2346a0000001d000104080400a51aa0d9ce01e52207ec",
 		"920004ce2e -> 930004c234000b0004ce2e7f00000100006a00000000000000000000",
 		"f00004ce2e00000000 -> ",
-		"960004ce2e6a000080dc04020401 -> 970004c2346a0000001d0402040119e426f53fde9881bd77",
+		"960004ce2e6a000080dc04020401 -> 970004c2346a0000001d040804006fcbf445261a9c451d66",
 		"850004ce2e000000010002 -> ",
 		"f00004ce2e56631100 -> ",
-		"960004ce2e6a000280dc04020401 -> 970004c2346a0000001d0402040119e426f53fde9881bd77",
+		"960004ce2e6a000280dc04020401 -> 970004c2346a0000001d040804006fcbf445261a9c451d66",
 		"850004ce2e000000010101 -> ",
 		"9a0004ce2e -> ",
 		"stop -> 9a0004c234bd3c58144f37430887a9",
