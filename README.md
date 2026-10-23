@@ -226,6 +226,7 @@ These limits were seen on an XPR 8400. ipsc2mmdvm cannot work around them.
 
 - **Defined Short Data.** The repeater does not send a Defined Short Data header (data header format 13) over IPSC. It sends a copy of the last preamble CSBK in its place, then the rate 1/2 blocks. The SAP and format of the header are lost, so a receiver cannot decode these messages. ipsc2mmdvm sends the preambles and the blocks to the master as they came.
 - **Rate 1 data.** The repeater does not relay rate 1 data correctly. It sends a clean rate 1 block as a data header packet with a meaningless payload, and a marginal one as a packet with the raw bits. ipsc2mmdvm sends both to the master as they came: the first as a data header that fails its CRC, the second as the rate 1 burst. ipsc2mmdvm sends rate 1 data to the repeater as raw blocks, which the repeater airs bit for bit.
+- **Bursts the repeater drops.** The repeater drops these bursts from the network with no RF and no side effects: data blocks with no data header before them (seen with rate 1/2 blocks), an MBC whose last block does not come, and any terminator data LC (TD_LC). ipsc2mmdvm still sends them to the repeater in their usual form. The repeater also drops every raw block but rate 1 (see `ipsc.raw-bursts`).
 
 ## Configuration Reference
 
