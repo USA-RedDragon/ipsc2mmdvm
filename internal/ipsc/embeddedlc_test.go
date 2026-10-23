@@ -229,3 +229,72 @@ func longestXPRVoiceCall(t *testing.T) [][]byte {
 	}
 	return best
 }
+
+func TestTranslateToMMDVMWithLCGivesEachTalkerAliasAndGPS(t *testing.T) {
+	t.Parallel()
+	packets := longestXPRVoiceCall(t)
+	var sync []int
+	for i, p := range packets {
+		u, err := ipscpkt.DecodeUser(p)
+		if err == nil && u.IsVoice() && u.Voice.Layout == ipscpkt.VoiceLayoutA {
+			sync = append(sync, i)
+		}
+	}
+	lcs := [][9]byte{testTalkerAliasLC(), testTalkerAliasLC(), testGPSLC(), testGPSLC()}
+	if len(sync) < len(lcs)+1 {
+		t.Fatalf("longest voice call has %d superframes", len(sync))
+	}
+	want := map[int][9]byte{}
+	for k, lc := range lcs {
+		a := sync[k+1]
+		frags := layer2.EncodeEmbeddedLC(lc)
+		for j := range 4 {
+			u, err := ipscpkt.DecodeUser(packets[a+1+j])
+			if err != nil || !u.IsVoice() {
+				t.Fatalf("packet %d is not a voice burst", a+1+j)
+			}
+			u.Voice.Embedded = frags[j]
+			b, err := u.AppendBinary(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packets[a+1+j] = b
+		}
+		if k != 1 {
+			want[a+4] = lc
+		}
+	}
+	lost := sync[2] + 2
+	tr := newTestTranslator(t)
+	tr.SetColorCode(7)
+	got := map[int][9]byte{}
+	for i, p := range packets {
+		if i == lost {
+			continue
+		}
+		pkts, lc, ok := tr.TranslateToMMDVMWithLC(p[0], p)
+		if !ok {
+			continue
+		}
+		last := pkts[len(pkts)-1]
+		if last.Frame != dmrd.FrameVoice || last.Value != 4 {
+			t.Fatalf("packet %d: LC with %+v, want voice burst E", i, last)
+		}
+		if lc.Source != last.Source {
+			t.Fatalf("packet %d: LC source %d, call source %d", i, lc.Source, last.Source)
+		}
+		b, err := lc.LC.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[i] = b
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got LCs at %v, want at %v", got, want)
+	}
+	for i, lc := range want {
+		if got[i] != lc {
+			t.Fatalf("packet %d: LC %x, want %x", i, got[i], lc)
+		}
+	}
+}

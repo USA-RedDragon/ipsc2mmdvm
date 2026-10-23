@@ -159,7 +159,7 @@ func TestTGRewriteRewritesLinkControlToMMDVM(t *testing.T) {
 	for _, p := range call {
 		c.HandleIPSCBurst(p[0], p, addr)
 		for len(c.tx_chan) > 0 {
-			out = append(out, <-c.tx_chan)
+			out = append(out, (<-c.tx_chan).Data)
 		}
 	}
 	if len(out) != 1+6+1 {
@@ -247,7 +247,7 @@ func TestPCRewriteRewritesCSBKToMMDVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := check.TranslateToIPSC(<-c.tx_chan)
+	out := check.TranslateToIPSC((<-c.tx_chan).Data)
 	if len(out) != 1 || hex.EncodeToString(out[0][38:50]) != "bd008001001a0a0004d2d38a" {
 		t.Fatalf("MMDVM CSBK %v, want BD 00 80 01 00 1A 0A 00 04 D2 D3 8A", out)
 	}

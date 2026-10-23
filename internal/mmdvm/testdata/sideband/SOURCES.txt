@@ -1,0 +1,14 @@
+mmdvmhost.txt is the output of harness.cpp, built on 2026-10-22 from the DMRA and DMRG functions of three g4klx programs:
+
+- MMDVMHost f71c8ce (2020-08-14), DMRNetwork.cpp lines 286-326: writeRadioPosition and writeTalkerAlias of the last MMDVMHost whose DMRA and DMRG to a master carry the repeater ID. They send DMRG in 18 octets and DMRA in 19. Commit 66a17f4 (2020-08-26, "Simplify the Host to DMR Gateway protocol") removed the repeater ID; DMRDirectNetwork.cpp, the direct master link from 136deac to 391e382, sent the short form without it.
+- MMDVMHost 9384d68 (2026-10-18), DMRNetwork.cpp lines 259-297: the same functions today. They send DMRG in 14 octets and DMRA in 15, without the repeater ID, to DMRGateway only (commit 391e382 removed the direct master link).
+- DMRGateway d751e20 (2026-10-22), DMRNetwork.cpp lines 314-353: writeRadioPosition and writeTalkerAlias toward the master. They put the repeater ID in front of what MMDVMHost sent but keep its length, so the master gets 14 and 15 octets and the last 4 octets of the LC are lost.
+
+MMDVMHost calls the functions from DMRSlot.cpp (9384d68 lines 721-828, f71c8ce lines 627-726) each time the embedded LC of a superframe decodes with FLCO GPS_INFO or TALKER_ALIAS_HEADER to BLOCK3, repeats included, with data set to the 9 LC octets. It does this at the last fragment, voice burst E, before it sends the DMRD of that burst (9384d68 line 852, f71c8ce line 750).
+
+The embedded LCs are the talker alias "KI5VMF ipsc2hbrp DMRA test!" (dmrgo pdu.EncodeTalkerAlias, ISO 8-bit) and the GPS Info LC of internal/ipsc/embeddedlc_test.go.
+
+To build the harness, put the function lines above in pre.inc, host.inc and gw.inc next to harness.cpp, then:
+
+  g++ -std=c++17 -o harness harness.cpp
+  printf '0400764b4935564d46\n050020697073633268\n060062727020444d52\n070041207465737421\n08000b9a6c3e27910d\n' | ./harness 311860 3191868

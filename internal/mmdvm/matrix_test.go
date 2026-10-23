@@ -35,6 +35,7 @@ type loopMaster struct {
 	peer atomic.Pointer[net.UDPAddr]
 	mu   sync.Mutex
 	got  []dmrd.Data
+	raw  [][]byte
 }
 
 func newLoopMaster(t *testing.T) *loopMaster {
@@ -57,7 +58,14 @@ func newLoopMaster(t *testing.T) *loopMaster {
 			data := buf[:n]
 			var reply []byte
 			switch {
+			case bytes.HasPrefix(data, []byte("DMRA")), bytes.HasPrefix(data, []byte("DMRG")):
+				m.mu.Lock()
+				m.raw = append(m.raw, slices.Clone(data))
+				m.mu.Unlock()
 			case bytes.HasPrefix(data, []byte("DMRD")):
+				m.mu.Lock()
+				m.raw = append(m.raw, slices.Clone(data))
+				m.mu.Unlock()
 				if p, err := dmrd.DecodeData(data); err == nil {
 					m.mu.Lock()
 					m.got = append(m.got, p)
@@ -82,6 +90,12 @@ func (m *loopMaster) packets() []dmrd.Data {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Clone(m.got)
+}
+
+func (m *loopMaster) rawPackets() [][]byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.raw)
 }
 
 func (m *loopMaster) send(t *testing.T, pkts []dmrd.Data) {

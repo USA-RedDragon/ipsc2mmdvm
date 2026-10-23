@@ -7,6 +7,7 @@ import (
 
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 )
 
 // enqueue hands data to tx. It gives up when the client stops, so a full
@@ -88,6 +89,68 @@ func (h *MMDVMClient) sendPacket(packet dmrd.Data) {
 		h.metrics.MMDVMPacketsSent.WithLabelValues(h.cfg.Name).Inc()
 	}
 	h.enqueue(data)
+}
+
+const (
+	txQueueSize   = 256
+	masterDialect = dmrd.DialectMMDVM
+)
+
+type toMaster struct {
+	dmrd.Data
+	side sideband
+}
+
+type sideband []byte
+
+func (h *MMDVMClient) sidebandOf(lc ipsc.EmbeddedLC) sideband {
+	var b []byte
+	var err error
+	if lc.LC.FLCO == enums.FLCOGPSInfo {
+		p := dmrd.Position{Repeater: h.cfg.ID, Source: lc.Source, Data: lc.LC.RawPayload, Size: 18}
+		b, err = p.AppendBinary(make([]byte, 0, 18))
+	} else {
+		ta := dmrd.TalkerAlias{Repeater: h.cfg.ID, Source: lc.Source, Type: uint8(lc.LC.FLCO - enums.FLCOTalkerAliasHeader), Data: lc.LC.RawPayload, Size: 19}
+		b, err = ta.AppendBinary(make([]byte, 0, 19))
+	}
+	if err != nil {
+		slog.Debug("Dropping a sideband message that does not encode", "network", h.cfg.Name, "error", err)
+		return nil
+	}
+	if dmrd.Classify(b, masterDialect) == dmrd.CommandUnknown {
+		return nil
+	}
+	return b
+}
+
+func (h *MMDVMClient) offerSideband(p sideband) {
+	if p == nil {
+		return
+	}
+	if len(h.tx_chan) <= cap(h.tx_chan)/2 {
+		select {
+		case h.tx_chan <- toMaster{side: p}:
+			return
+		default:
+		}
+	}
+	slog.Debug("Dropping a sideband message, the queue to the master is busy", "network", h.cfg.Name)
+	if h.metrics != nil {
+		h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "sideband_busy").Inc()
+	}
+}
+
+func (h *MMDVMClient) sendSideband(p sideband) {
+	if !h.up.Load() {
+		if h.metrics != nil {
+			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "not_ready").Inc()
+		}
+		return
+	}
+	if h.metrics != nil {
+		h.metrics.MMDVMPacketsSent.WithLabelValues(h.cfg.Name).Inc()
+	}
+	h.enqueue(p)
 }
 
 func (h *MMDVMClient) sidebandFromMaster(cmd dmrd.Command, p []byte) {

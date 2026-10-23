@@ -1006,6 +1006,8 @@ type reverseStreamState struct {
 
 	// data is the data packet of the call so far, sent to MMDVM.
 	data DataCall
+
+	embedded layer2.EmbeddedLCAssembler
 }
 
 // rtpMaxForward is the largest forward RTP timestamp step (8 kHz units,
@@ -1015,9 +1017,29 @@ type reverseStreamState struct {
 // packet, not a new call.
 const rtpMaxForward = 8000
 
+// EmbeddedLC is a talker alias or GPS Info LC that a voice call carried in
+// the embedded signalling of bursts B to E of one superframe.
+type EmbeddedLC struct {
+	// Source is the radio ID of the call, as the IPSC packet gave it.
+	Source uint32
+	// LC is the LC, with FLCO enums.FLCOTalkerAliasHeader to
+	// enums.FLCOTalkerAliasBlock3 or enums.FLCOGPSInfo, of any FID.
+	LC pdu.FullLinkControl
+}
+
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
 // Returns nil if the packet cannot be translated.
-func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results []dmrd.Data) {
+func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []dmrd.Data {
+	results, _, _ := t.TranslateToMMDVMWithLC(packetType, data)
+	return results
+}
+
+// TranslateToMMDVMWithLC converts an IPSC user packet as TranslateToMMDVM
+// does. When the packet is voice burst E and the embedded LC of bursts B
+// to E of its superframe decodes as a talker alias or GPS Info LC, ok is
+// true and lc is that LC. It belongs to the last packet of results, and
+// MMDVMHost sends it to the network just before that packet.
+func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (results []dmrd.Data, lc EmbeddedLC, ok bool) {
 	t.mu.Lock()
 	defer t.logs.Unlock(&t.mu)
 
@@ -1027,7 +1049,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 	u, err := ipscpkt.DecodeUser(data)
 	if err != nil {
 		t.logs.Debug("IPSCTranslator: ignoring IPSC packet", "type", packetType, "length", len(data), "error", err)
-		return nil
+		return nil, lc, false
 	}
 	src, dst := u.Source, u.Destination
 	groupCall := u.Opcode == ipscpkt.OpGroupVoice || u.Opcode == ipscpkt.OpGroupData
@@ -1043,12 +1065,12 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	if burstType&0x7F == ipscBurstSyncUndetect {
 		t.syncLostLocked(&u, now)
-		return nil
+		return nil, lc, false
 	}
 	if !u.IsVoice() && u.Data.Bits < payloadBits(burstType) {
 		t.logs.Debug("IPSCTranslator: IPSC burst too short",
 			"burstType", fmt.Sprintf("0x%02X", burstType), "bits", u.Data.Bits)
-		return nil
+		return nil, lc, false
 	}
 
 	// The call control identifies the stream.
@@ -1096,7 +1118,8 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
-		pkts := t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, &u)
+		var pkts []dmrd.Data
+		pkts, lc, ok = t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, &u)
 		results = append(results, pkts...)
 
 	case ipscBurstPIHeader, ipscBurstCSBK, ipscBurstMBCHeader,
@@ -1127,7 +1150,7 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) (results
 		t.metrics.TranslatorPackets.WithLabelValues("ipsc_to_mmdvm").Add(float64(len(results)))
 	}
 
-	return results
+	return results, lc, ok
 }
 
 // payloadBits returns the payload size in bits that a data packet of
@@ -1448,7 +1471,7 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	src, dst uint32, groupCall bool, slot enums.Slot,
 	rss *reverseStreamState,
 	u *ipscpkt.User,
-) []dmrd.Data {
+) ([]dmrd.Data, EmbeddedLC, bool) {
 	frames, bad := vocoder.UnpackAMBEVoiceFlags(u.Voice.AMBE)
 	bad[0] = u.Voice.Control&ipscVoiceCtrlBadFrame1 != 0
 	for i := range frames {
@@ -1460,14 +1483,14 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	burstIdx, ok := ipscVoiceBurstPosition(rss, u)
 	if !ok {
 		t.logs.Debug("IPSCTranslator: cannot place voice burst in superframe", "layout", u.Voice.Layout)
-		return nil
+		return nil, EmbeddedLC{}, false
 	}
 
 	v := *u
 	var err error
 	if v.Voice.AMBE, err = vocoder.PackAMBEVoice(frames); err != nil {
 		t.logs.Debug("IPSCTranslator: cannot pack voice burst", "error", err)
-		return nil
+		return nil, EmbeddedLC{}, false
 	}
 	// Burst A carries the BS-sourced voice SYNC, as the data bursts carry
 	// BS-sourced data SYNC: the repeater is a BS, and a duplex MMDVMHost
@@ -1476,12 +1499,12 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 		v.Voice.Layout = ipscpkt.VoiceLayoutA
 	} else if v.Voice.EMB, err = t.populateEmbeddedSignalling(burstIdx); err != nil {
 		t.logs.Debug("IPSCTranslator: cannot build EMB", "error", err)
-		return nil
+		return nil, EmbeddedLC{}, false
 	}
 	dmrData, err := v.RawBurst(t.colorCode, layer2.SyncSourceBS)
 	if err != nil {
 		t.logs.Debug("IPSCTranslator: cannot encode voice burst", "error", err)
-		return nil
+		return nil, EmbeddedLC{}, false
 	}
 
 	frameType := dmrd.FrameVoice
@@ -1503,7 +1526,25 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	}
 	rss.seq++
 
-	return []dmrd.Data{pkt}
+	lc, ok := rss.addEmbedded(burstIdx, u.Voice.Embedded, src)
+	return []dmrd.Data{pkt}, lc, ok
+}
+
+func (rss *reverseStreamState) addEmbedded(pos int, frag [4]byte, src uint32) (EmbeddedLC, bool) {
+	lcss, ok := voiceBurst(pos).LCSS()
+	if !ok {
+		rss.embedded.Reset()
+		return EmbeddedLC{}, false
+	}
+	raw, _, done, err := rss.embedded.Add(frag, lcss)
+	if !done || err != nil {
+		return EmbeddedLC{}, false
+	}
+	f := pdu.DecodeFullLinkControlBytes(raw)
+	if f.FLCO < enums.FLCOTalkerAliasHeader || f.FLCO > enums.FLCOGPSInfo {
+		return EmbeddedLC{}, false
+	}
+	return EmbeddedLC{Source: src, LC: f}, true
 }
 
 // ipscVoiceBurstPosition returns the superframe position (0-5 for A-F) of an

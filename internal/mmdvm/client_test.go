@@ -71,7 +71,7 @@ func newTestClient(t *testing.T) *MMDVMClient {
 		cfg:        cfg,
 		connTX:     make(chan []byte, 16),
 		connRX:     make(chan rxPacket, 16),
-		tx_chan:    make(chan dmrd.Data, 16),
+		tx_chan:    make(chan toMaster, 16),
 		done:       make(chan struct{}),
 		translator: translator,
 		netLC:      ipsc.NewLCRewriter(),
@@ -503,7 +503,7 @@ func TestForwardTXSendsPackets(t *testing.T) {
 		Slot:        enums.Slot1,
 		Stream:      0x7777,
 	}
-	client.tx_chan <- pkt
+	client.tx_chan <- toMaster{Data: pkt}
 
 	select {
 	case data := <-client.connTX:
@@ -654,7 +654,7 @@ func TestHandleIPSCBurstStopsOnDone(t *testing.T) {
 
 	// Fill tx_chan to make it block
 	for i := 0; i < cap(client.tx_chan); i++ {
-		client.tx_chan <- dmrd.Data{}
+		client.tx_chan <- toMaster{}
 	}
 
 	// Should not hang — done channel will prevent blocking send
@@ -1781,7 +1781,7 @@ func TestStopStopsInboundTimeslotManager(t *testing.T) {
 		t.Fatalf("expected Queued, got %v", v)
 	}
 	for len(client.tx_chan) < cap(client.tx_chan) {
-		client.tx_chan <- pkt(9)
+		client.tx_chan <- toMaster{Data: pkt(9)}
 	}
 	mgr.Release(false, 1)
 

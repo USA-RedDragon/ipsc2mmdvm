@@ -31,7 +31,7 @@ type MMDVMClient struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
-	tx_chan  chan dmrd.Data
+	tx_chan  chan toMaster
 	conn     net.Conn
 	connMu   sync.Mutex    // protects conn and connStop
 	connStop chan struct{} // closed when conn is replaced
@@ -180,7 +180,7 @@ type rxPacket struct {
 }
 
 func NewMMDVMClient(cfg *config.MMDVM, m *metrics.Metrics) *MMDVMClient {
-	tx_chan := make(chan dmrd.Data, 256)
+	tx_chan := make(chan toMaster, txQueueSize)
 	translator, err := ipsc.NewIPSCTranslator()
 	if err != nil {
 		slog.Warn("failed to load IPSC translator", "error", err)
@@ -334,7 +334,7 @@ func (h *MMDVMClient) Start() error {
 // accept.
 func (h *MMDVMClient) newPeer() error {
 	p, err := dmrdsession.NewPeer(&dmrdsession.PeerConfig{
-		Dialect:  dmrd.DialectMMDVM,
+		Dialect:  masterDialect,
 		ID:       h.cfg.ID,
 		Password: []byte(h.cfg.Password),
 		Config:   h.rptcPacket(),
@@ -406,7 +406,7 @@ func (h *MMDVMClient) fromMaster(pkt rxPacket, out []dmrdsession.Output) []dmrds
 	}
 	h.peerMu.Lock()
 	defer h.peerMu.Unlock()
-	if dmrd.Classify(pkt.data, dmrd.DialectMMDVM) == dmrd.CommandMSTPONG && h.metrics != nil && !h.pingSent.IsZero() {
+	if dmrd.Classify(pkt.data, masterDialect) == dmrd.CommandMSTPONG && h.metrics != nil && !h.pingSent.IsZero() {
 		h.metrics.MMDVMPingRTT.WithLabelValues(h.cfg.Name).Observe(time.Since(h.pingSent).Seconds())
 		h.pingSent = time.Time{}
 	}
@@ -460,7 +460,7 @@ func (h *MMDVMClient) sendControl(p []byte) {
 	if !connected && !h.connect() {
 		return
 	}
-	if dmrd.Classify(p, dmrd.DialectMMDVM) == dmrd.CommandRPTPING {
+	if dmrd.Classify(p, masterDialect) == dmrd.CommandRPTPING {
 		h.pingSent = time.Now()
 	}
 	h.enqueue(append([]byte(nil), p...))
@@ -746,8 +746,12 @@ func (h *MMDVMClient) forwardTX() {
 		select {
 		case <-h.done:
 			return
-		case pkt := <-h.tx_chan:
-			h.sendPacket(pkt)
+		case p := <-h.tx_chan:
+			if p.side != nil {
+				h.sendSideband(p.side)
+			} else {
+				h.sendPacket(p.Data)
+			}
 		}
 	}
 }
@@ -976,8 +980,11 @@ func (h *MMDVMClient) forwardOutbound(packet any) {
 }
 
 func (h *MMDVMClient) forwardInbound(packet any) {
-	if pkt, ok := packet.(dmrd.Data); ok {
-		h.sendInbound(pkt)
+	switch p := packet.(type) {
+	case dmrd.Data:
+		h.sendInbound(p)
+	case sideband:
+		h.offerSideband(p)
 	}
 }
 
@@ -985,7 +992,7 @@ func (h *MMDVMClient) forwardInbound(packet any) {
 // if the client is stopping.
 func (h *MMDVMClient) sendInbound(pkt dmrd.Data) bool {
 	select {
-	case h.tx_chan <- pkt:
+	case h.tx_chan <- toMaster{Data: pkt}:
 		return true
 	case <-h.done:
 		return false
@@ -1055,7 +1062,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 	dataEnd := ipsc.EndsDataCall(packetType, data)
 	orphan := h.translator.OrphanBlock(data)
 	streamID, hadStream := h.translator.ReverseStreamID(data)
-	packets := h.translator.TranslateToMMDVM(packetType, data)
+	packets, lc, hasLC := h.translator.TranslateToMMDVMWithLC(packetType, data)
 	matched := false
 	defer func() {
 		if dataEnd && hadStream {
@@ -1080,12 +1087,28 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 		h.rfLC.Rewrite(orig, &pkt)
 		slog.Debug("HandleIPSCBurst: post-rewrite", "network", h.cfg.Name, "src", pkt.Source, "dst", pkt.Destination, "groupCall", !pkt.Private, "slot", pkt.Slot)
 
+		var side sideband
+		if hasLC && i == len(packets)-1 {
+			side = h.sidebandOf(lc)
+		}
+
 		if h.inboundTSMgr == nil {
 			matched = true
+			h.offerSideband(side)
 			if !h.sendInbound(pkt) {
 				return matched
 			}
 			continue
+		}
+
+		if side != nil {
+			switch h.inboundTSMgr.Submit(isTS2(pkt.Slot), uint(pkt.Stream), "ipsc", side, false, h.forwardInbound) {
+			case timeslot.Deliver:
+				h.offerSideband(side)
+			case timeslot.Queued:
+			case timeslot.Dropped:
+				h.countTimeslotDrop(pkt)
+			}
 		}
 
 		end := isTerminator(pkt) || ((dataEnd || orphan) && i == len(packets)-1)
