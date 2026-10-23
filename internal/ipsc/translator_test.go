@@ -1224,14 +1224,6 @@ func TestTranslateToIPSCNeverEmitsVoiceBurstTypeForData(t *testing.T) {
 	}
 }
 
-func TestTranslateToIPSCDropsRate1(t *testing.T) {
-	t.Parallel()
-	tr := newTestTranslator(t)
-	if out := tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeRate1))); out != nil {
-		t.Fatalf("expected nil, got %d packets", len(out))
-	}
-}
-
 func TestTranslateToMMDVMDataBurstTypes(t *testing.T) {
 	t.Parallel()
 	for _, burstType := range []byte{0x00, 0x03, 0x04, 0x05, 0x06, 0x07} {
@@ -1778,7 +1770,7 @@ func TestCleanupStreamHandlesBothDirections(t *testing.T) {
 func TestDroppedPacketsDoNotCreateStreams(t *testing.T) {
 	t.Parallel()
 	tr, _, m := newClockedTranslator(t)
-	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeRate1)))
+	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeUnifiedSingleBlock)))
 	tr.TranslateToIPSC(makeTestMMDVMPacket(true, false, dmrd.FrameDataSync, uint8(enums.DataTypeIdle)))
 	tr.TranslateToMMDVM(0x83, makeTestIPSCPacket(0x83, 0x08, true, false))
 	tr.TranslateToMMDVM(0x80, make([]byte, 40))

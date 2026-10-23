@@ -51,12 +51,24 @@ type IPSC struct {
 	// timeslot that the next data and CSBK calls to IPSC wait. An XPR 8400
 	// drops a data call that comes too soon after another.
 	DataHangHold time.Duration `name:"data-hang-hold" description:"Wait for data and CSBK calls to IPSC after a data call on a slot; 0 is off" default:"1.2s"`
-	// RawBursts sends bursts that IPSC cannot carry decoded, such as rate
-	// 1, unified single block and idle bursts and bursts that fail their
-	// FEC or CRC, to IPSC as raw 0x1F blocks, as an XPR 8400 sends them.
-	// Leave it off until a rig test shows that the repeater takes them.
-	RawBursts bool `name:"raw-bursts" description:"Send bursts that IPSC cannot carry decoded as raw 0x1F blocks; leave off until a rig test proves the repeater takes them"`
+	// RawBursts selects the bursts that IPSC cannot carry decoded that go
+	// to IPSC as raw 0x1F blocks, as an XPR 8400 sends them.
+	RawBursts RawBursts `name:"raw-bursts" description:"Bursts IPSC cannot carry decoded to send as raw 0x1F blocks: rate1 (the only kind an XPR 8400 airs) or all" default:"rate1"`
 }
+
+// RawBursts is a value of ipsc.raw-bursts.
+type RawBursts string
+
+const (
+	// RawBurstsRate1 sends rate 1 blocks to IPSC as raw blocks. An XPR
+	// 8400 airs them bit for bit on both slots. The other bursts that
+	// IPSC cannot carry are counted as undeliverable.
+	RawBurstsRate1 RawBursts = "rate1"
+	// RawBurstsAll sends every burst that IPSC cannot carry decoded,
+	// except DMRD frame type 3, to IPSC as a raw block. An XPR 8400 drops
+	// all of them except rate 1 blocks, with no RF and no side effects.
+	RawBurstsAll RawBursts = "all"
+)
 
 // MaxCallHangHold is the longest ipsc.call-hang-hold or ipsc.data-hang-hold
 // that Validate accepts.
@@ -146,6 +158,7 @@ type SrcRewriteConfig struct {
 
 var (
 	ErrInvalidLogLevel          = errors.New("invalid log level provided")
+	ErrInvalidRawBursts         = errors.New("invalid ipsc.raw-bursts: want rate1 or all")
 	ErrNoMMDVMNetworks          = errors.New("at least one MMDVM network must be configured")
 	ErrInvalidMMDVMName         = errors.New("invalid MMDVM network name provided")
 	ErrDuplicateMMDVMName       = errors.New("duplicate MMDVM network name provided")
@@ -234,6 +247,12 @@ func (c Config) Validate() error {
 
 	if c.IPSC.Port == 0 {
 		return ErrInvalidIPSCPort
+	}
+
+	switch c.IPSC.RawBursts {
+	case RawBurstsRate1, RawBurstsAll:
+	default:
+		return ErrInvalidRawBursts
 	}
 
 	if c.IPSC.CallHangHold < 0 || c.IPSC.CallHangHold > MaxCallHangHold {

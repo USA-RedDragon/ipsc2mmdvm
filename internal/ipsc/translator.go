@@ -43,7 +43,7 @@ type IPSCTranslator struct {
 	now            func() time.Time
 	lastPrune      time.Time
 	undeliveredLog time.Time
-	rawBursts      bool
+	rawBurstsAll   bool
 
 	nextCallControl uint32
 	nextCallSeq     uint8
@@ -204,16 +204,17 @@ func (t *IPSCTranslator) SetColorCode(colorCode uint8) {
 	t.colorCode = enums.ColorCode(colorCode & 0x0F)
 }
 
-// SetRawBursts sets whether a burst from a master that IPSC cannot carry
-// decoded goes to IPSC as a raw block (burst type 0x1F) with its 196
+// SetRawBurstsAll sets whether every burst from a master that IPSC cannot
+// carry decoded goes to IPSC as a raw block (burst type 0x1F) with its 196
 // information bits and its slot type, in the form an XPR 8400 sends such a
-// burst. This covers idle, unified single block, rate 1 and reserved data
-// types, and bursts that fail their FEC or CRC. Turn it on only after a
-// rig test shows that the repeater takes these blocks.
-func (t *IPSCTranslator) SetRawBursts(on bool) {
+// burst. This covers idle, unified single block and reserved data types,
+// and bursts that fail their FEC or CRC. A rate 1 block always goes as a
+// raw block: it is the only kind that an XPR 8400 airs. The XPR drops the
+// others with no RF and no side effects.
+func (t *IPSCTranslator) SetRawBurstsAll(on bool) {
 	t.mu.Lock()
 	defer t.logs.Unlock(&t.mu)
-	t.rawBursts = on
+	t.rawBurstsAll = on
 }
 
 // SetPeerID sets the local peer ID used in outgoing IPSC packets.
@@ -329,7 +330,8 @@ const (
 )
 
 func (t *IPSCTranslator) undeliverableLocked(pkt dmrd.Data, ss *streamState, streamID uint32, reason string, last bool) [][]byte {
-	if t.rawBursts && reason != reasonFrameType3 {
+	rate1 := pkt.Frame == dmrd.FrameDataSync && enums.DataType(pkt.Value) == enums.DataTypeRate1 //nolint:gosec // the data type has 4 bits
+	if reason != reasonFrameType3 && (t.rawBurstsAll || rate1) {
 		if p := t.buildIPSCRawPacket(pkt, ss, last); p != nil {
 			ss.firstPacket = false
 			if last {

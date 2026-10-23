@@ -77,6 +77,9 @@ func scrapeTranslatorMetrics(t *testing.T, m *metrics.Metrics) string {
 func TestUndeliverableBurstsAreCounted(t *testing.T) {
 	t.Parallel()
 	for _, c := range undeliverableCases(t) {
+		if c.dt == enums.DataTypeRate1 && c.frame == dmrd.FrameDataSync {
+			continue
+		}
 		tr, _, m := newClockedTranslator(t)
 		tr.SetColorCode(7)
 		pkt := makeTestMMDVMPacket(false, false, c.frame, uint8(c.dt))

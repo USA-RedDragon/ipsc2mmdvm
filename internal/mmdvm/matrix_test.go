@@ -126,7 +126,7 @@ func startLoopClient(t *testing.T, m *loopMaster, raw bool) (*MMDVMClient, *ipsc
 	c.inboundTSMgr = nil
 	rec := &ipscRecorder{}
 	c.SetIPSCHandler(rec.handler("loop"))
-	c.SetIPSCRawBursts(raw)
+	c.SetIPSCRawBurstsAll(raw)
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,9 @@ func carriedToIPSC(d dmrd.Data, raw bool) bool {
 	}
 	dt := enums.DataType(d.Value)
 	switch dt { //nolint:exhaustive // the others are carried when they decode
-	case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock, enums.DataTypeRate1:
+	case enums.DataTypeRate1:
+		return true
+	case enums.DataTypeIdle, enums.DataTypeUnifiedSingleBlock:
 		return raw
 	case enums.DataTypeRate34:
 		_, res := d.Burst.Rate34Payload()

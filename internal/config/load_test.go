@@ -52,6 +52,9 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	if cfg.IPSC.Port != 50000 {
 		t.Errorf("expected ipsc.port default 50000, got %d", cfg.IPSC.Port)
 	}
+	if cfg.IPSC.RawBursts != RawBurstsRate1 {
+		t.Errorf("expected ipsc.raw-bursts default rate1, got %q", cfg.IPSC.RawBursts)
+	}
 	if len(cfg.MMDVM) != 1 {
 		t.Fatalf("expected 1 mmdvm entry, got %d", len(cfg.MMDVM))
 	}

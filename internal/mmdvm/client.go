@@ -1011,11 +1011,12 @@ func (h *MMDVMClient) SetIPSCHandler(handler func(ctx context.Context, data []by
 	h.ipscHandler.Store(&handler)
 }
 
-// SetIPSCRawBursts sets whether bursts that IPSC cannot carry decoded go to
-// IPSC as raw blocks (see ipsc.IPSCTranslator.SetRawBursts).
-func (h *MMDVMClient) SetIPSCRawBursts(on bool) {
+// SetIPSCRawBurstsAll sets whether every burst that IPSC cannot carry
+// decoded, not only a rate 1 block, goes to IPSC as a raw block (see
+// ipsc.IPSCTranslator.SetRawBurstsAll).
+func (h *MMDVMClient) SetIPSCRawBurstsAll(on bool) {
 	if h.translator != nil {
-		h.translator.SetRawBursts(on)
+		h.translator.SetRawBurstsAll(on)
 	}
 }
 

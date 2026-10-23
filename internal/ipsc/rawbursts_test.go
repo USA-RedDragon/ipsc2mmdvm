@@ -10,12 +10,12 @@ import (
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 )
 
-func TestRawBurstsSendUndeliverableBursts(t *testing.T) {
+func TestRawBurstsAllSendUndeliverableBursts(t *testing.T) {
 	t.Parallel()
 	for _, c := range undeliverableCases(t) {
 		tr, _, m := newClockedTranslator(t)
 		tr.SetColorCode(7)
-		tr.SetRawBursts(true)
+		tr.SetRawBurstsAll(true)
 		pkt := makeTestMMDVMPacket(false, true, c.frame, uint8(c.dt))
 		pkt.Burst = c.burst
 		out := tr.TranslateToIPSC(pkt)
@@ -68,7 +68,7 @@ func TestRawBurstsRoundTripXPRRawBlocks(t *testing.T) {
 			}
 			toIPSC := newTestTranslator(t)
 			toIPSC.SetColorCode(7)
-			toIPSC.SetRawBursts(true)
+			toIPSC.SetRawBurstsAll(true)
 			out := toIPSC.TranslateToIPSC(pkts[0])
 			if len(out) != 1 {
 				t.Fatalf("%s: %x came back as %d IPSC packets", g.name, r.data, len(out))
@@ -85,6 +85,44 @@ func TestRawBurstsRoundTripXPRRawBlocks(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatal("capture has no 68-octet raw blocks")
+	}
+}
+
+// TestRate1BlocksGoRawByDefault sends a rate 1 block to IPSC as a raw block
+// with no setting. In the rig run dmrgo-rfcap/runs/xpr-ipsc2hbrp-20261022
+// an XPR 8400 aired the 4 rate 1 blocks of each such call bit for bit on
+// both slots (C-r1u-ts1, C-r1u-ts2, C-r1c-ts1 and C-r1c-ts2 .match.txt:
+// "inj ts1 data dt=10(Rate ... EXACT").
+func TestRate1BlocksGoRawByDefault(t *testing.T) {
+	t.Parallel()
+	for _, c := range undeliverableCases(t) {
+		if c.dt != enums.DataTypeRate1 || c.frame != dmrd.FrameDataSync {
+			continue
+		}
+		for _, slot2 := range []bool{false, true} {
+			tr, _, m := newClockedTranslator(t)
+			tr.SetColorCode(7)
+			pkt := makeTestMMDVMPacket(false, slot2, c.frame, uint8(c.dt))
+			pkt.Burst = c.burst
+			out := tr.TranslateToIPSC(pkt)
+			if len(out) != 1 || out[0][30] != ipscBurstRaw {
+				t.Fatalf("slot 2 %v: got %x, want one 0x1F packet", slot2, out)
+			}
+			u, err := ipscpkt.DecodeUser(out[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := u.RawBurst(0, layer2.SyncSourceBS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if raw.Info() != c.burst.Info() || raw.SlotType().DataType != enums.DataTypeRate1 {
+				t.Fatalf("slot 2 %v: raw block %x, want the rate 1 block %x", slot2, raw.Info(), c.burst.Info())
+			}
+			if body := scrapeTranslatorMetrics(t, m); containsUndeliverable(body) {
+				t.Fatalf("slot 2 %v: counted as undeliverable", slot2)
+			}
+		}
 	}
 }
 

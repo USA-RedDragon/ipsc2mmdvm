@@ -300,9 +300,11 @@ func TestUndecodableLastBlockEndsCall(t *testing.T) {
 }
 
 // TestRate1LastBlockEndsCall sends a confirmed rate 1 packet from 3191868
-// to 3140598 on TS2, as an MMDVM master sent it on the rig. IPSC cannot
-// carry the rate 1 block, so it is dropped, and an end packet ends the call
-// in its place.
+// to 3140598 on TS2, as an MMDVM master sent it on the rig. The rate 1
+// block goes as a raw block with the end flag, which ends the call, as in
+// the rig run dmrgo-rfcap/runs/xpr-ipsc2hbrp-20261022 (runC.ipsc.log
+// 19:30:51.197, 84003010af022febf630b43c010000000340805e...1f40...7a0000),
+// where the XPR 8400 aired the block bit for bit (C-r1c-ts1.match.txt).
 func TestRate1LastBlockEndsCall(t *testing.T) {
 	t.Parallel()
 	tr := newTestTranslator(t)
@@ -320,10 +322,9 @@ func TestRate1LastBlockEndsCall(t *testing.T) {
 			Frame: dmrd.FrameDataSync, Value: uint8(types[i]), Stream: 84, Burst: [33]byte(w),
 		})...)
 	}
-	if len(got) != 2 || got[0][30] != ipscBurstDataHeader {
-		t.Fatalf("got %x, want the data header and an end packet", got)
+	if len(got) != 2 || got[0][30] != ipscBurstDataHeader || got[1][30] != ipscBurstRaw || got[1][17]&0x40 == 0 {
+		t.Fatalf("got %x, want the data header and the last block as a raw block with the end flag", got)
 	}
-	checkDataEndPacket(t, got[1])
 	if string(got[1][13:17]) != string(got[0][13:17]) || got[1][5] != got[0][5] {
 		t.Errorf("end packet is not in the call of the header:\n%x\n%x", got[0], got[1])
 	}

@@ -34,6 +34,7 @@ func validConfig() Config {
 			Port:       50000,
 			IP:         "10.10.250.1",
 			SubnetMask: 24,
+			RawBursts:  RawBurstsRate1,
 			Auth: IPSCAuth{
 				Enabled: false,
 			},
@@ -382,6 +383,9 @@ func TestValidateFieldLimits(t *testing.T) {
 		{"data hang hold negative", func(c *Config) { c.IPSC.DataHangHold = -time.Second }, ErrInvalidDataHangHold},
 		{"data hang hold too long", func(c *Config) { c.IPSC.DataHangHold = MaxCallHangHold + time.Millisecond }, ErrInvalidDataHangHold},
 		{"data hang hold off", func(c *Config) { c.IPSC.DataHangHold = 0 }, nil},
+		{"raw bursts all", func(c *Config) { c.IPSC.RawBursts = RawBurstsAll }, nil},
+		{"raw bursts empty", func(c *Config) { c.IPSC.RawBursts = "" }, ErrInvalidRawBursts},
+		{"raw bursts bool", func(c *Config) { c.IPSC.RawBursts = "true" }, ErrInvalidRawBursts},
 		{"ipsc ip empty", func(c *Config) { c.IPSC.IP = "" }, ErrInvalidIPSCIP},
 		{"ipsc ip garbage", func(c *Config) { c.IPSC.IP = "not-an-ip" }, ErrInvalidIPSCIP},
 		{"ipsc ip with mask", func(c *Config) { c.IPSC.IP = "10.10.250.1/24" }, ErrInvalidIPSCIP},

@@ -86,7 +86,8 @@ func loadXPR8400Capture(t *testing.T) []captureGroup {
 
 // goldenXPR8400 is the SHA-256 of what TestGoldenXPR8400 writes for each
 // capture group, from the translator before it moved onto the dmrgo
-// transport codecs (c0e6ef5 with dmrgo caac8d7).
+// transport codecs (c0e6ef5 with dmrgo caac8d7), with each rate 1 block
+// sent back to IPSC as a raw block.
 func goldenXPR8400(t *testing.T) map[string]string {
 	t.Helper()
 	data, err := os.ReadFile("testdata/xpr8400-golden.txt")
