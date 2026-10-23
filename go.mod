@@ -6,7 +6,7 @@ require (
 	github.com/USA-RedDragon/configulator/v2 v2.5.0
 	github.com/USA-RedDragon/dmrgo/v2 v2.0.0
 	github.com/goccy/go-yaml v1.19.2
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	github.com/lmittmann/tint v1.2.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/spf13/cobra v1.10.2
