@@ -1070,6 +1070,9 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			h.endInboundCall(streamID)
 		}
 	}()
+	if hasLC && len(packets) == 0 {
+		return h.sidebandAlone(lc)
+	}
 	for i, pkt := range packets {
 		slog.Debug("HandleIPSCBurst: pre-rewrite", "network", h.cfg.Name, "src", pkt.Source, "dst", pkt.Destination, "groupCall", !pkt.Private, "slot", pkt.Slot)
 		// Apply RF→Net rewrite rules (outbound to this master).
@@ -1102,15 +1105,7 @@ func (h *MMDVMClient) HandleIPSCBurst(packetType byte, data []byte, addr *net.UD
 			continue
 		}
 
-		if side != nil {
-			switch h.inboundTSMgr.Submit(isTS2(pkt.Slot), uint(pkt.Stream), "ipsc", side, false, h.forwardInbound) {
-			case timeslot.Deliver:
-				h.offerSideband(side)
-			case timeslot.Queued:
-			case timeslot.Dropped:
-				h.countTimeslotDrop(pkt)
-			}
-		}
+		h.submitSideband(pkt, side)
 
 		end := isTerminator(pkt) || ((dataEnd || orphan) && i == len(packets)-1)
 		h.noteInboundSlot(pkt.Stream, pkt.Slot, end)

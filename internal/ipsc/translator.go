@@ -1010,6 +1010,9 @@ type reverseStreamState struct {
 	data DataCall
 
 	embedded layer2.EmbeddedLCAssembler
+
+	headerSideband    [9]byte
+	hasHeaderSideband bool
 }
 
 // rtpMaxForward is the largest forward RTP timestamp step (8 kHz units,
@@ -1027,6 +1030,10 @@ type EmbeddedLC struct {
 	// LC is the LC, with FLCO enums.FLCOTalkerAliasHeader to
 	// enums.FLCOTalkerAliasBlock3 or enums.FLCOGPSInfo, of any FID.
 	LC pdu.FullLinkControl
+	// Call is the DMRD packet of the call that the LC goes with, with no
+	// burst. It is set when the LC came in a voice LC header packet, which
+	// is not sent to MMDVM.
+	Call dmrd.Data
 }
 
 // TranslateToMMDVM converts raw IPSC user packet data into MMDVM DMRD Packets.
@@ -1038,9 +1045,12 @@ func (t *IPSCTranslator) TranslateToMMDVM(packetType byte, data []byte) []dmrd.D
 
 // TranslateToMMDVMWithLC converts an IPSC user packet as TranslateToMMDVM
 // does. When the packet is voice burst E and the embedded LC of bursts B
-// to E of its superframe decodes as a talker alias or GPS Info LC, ok is
-// true and lc is that LC. It belongs to the last packet of results, and
-// MMDVMHost sends it to the network just before that packet.
+// to E of its superframe, or else the LC of the burst E packet, decodes as
+// a talker alias or GPS Info LC, ok is true and lc is that LC. It belongs
+// to the last packet of results, and MMDVMHost sends it to the network
+// just before that packet. An XPR 8400 also sends such an LC in voice LC
+// header packets in place of bursts E and F. Then results is empty, ok is
+// true and lc.Call is the call of the LC.
 func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (results []dmrd.Data, lc EmbeddedLC, ok bool) {
 	t.mu.Lock()
 	defer t.logs.Unlock(&t.mu)
@@ -1085,7 +1095,7 @@ func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (r
 	}
 	rss.lastSeen = now
 	defer func() {
-		if orphan || !existed && len(results) == 0 {
+		if orphan || !existed && len(results) == 0 && !ok {
 			t.removeReverseStreamLocked(callControl)
 		}
 	}()
@@ -1102,14 +1112,9 @@ func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (r
 		// place of a burst F.
 		rss.anchorPos, rss.anchorRTPSeq, rss.hasAnchor = burstF, u.RTP.Seq, true
 		rss.hasLast = false
-		// Voice LC Header — only process the first one (IPSC sends 3)
-		if !rss.started {
-			pkt := t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
-				enums.DataTypeVoiceLCHeader, [12]byte(u.Data.Octets[:12]))
-			results = append(results, pkt)
-			rss.started = true
-		}
-		// Skip duplicate headers
+		var pkts []dmrd.Data
+		pkts, lc, ok = t.reverseVoiceHeaderLocked(src, dst, groupCall, slot, rss, &u)
+		results = append(results, pkts...)
 
 	case ipscBurstVoiceTerm:
 		// Voice Terminator
@@ -1120,6 +1125,7 @@ func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (r
 
 	case ipscBurstSlot1, ipscBurstSlot2:
 		// Voice burst — extract AMBE, FEC-encode, build DMR burst
+		rss.hasHeaderSideband = false
 		var pkts []dmrd.Data
 		pkts, lc, ok = t.buildMMDVMVoiceBurst(src, dst, groupCall, slot, rss, &u)
 		results = append(results, pkts...)
@@ -1153,6 +1159,32 @@ func (t *IPSCTranslator) TranslateToMMDVMWithLC(packetType byte, data []byte) (r
 	}
 
 	return results, lc, ok
+}
+
+func (t *IPSCTranslator) reverseVoiceHeaderLocked(src, dst uint32, groupCall bool, slot enums.Slot, rss *reverseStreamState, u *ipscpkt.User) ([]dmrd.Data, EmbeddedLC, bool) {
+	raw := [9]byte(u.Data.Octets[:9])
+	if rss.hasHeaderSideband && raw == rss.headerSideband {
+		return nil, EmbeddedLC{}, false
+	}
+	rss.hasHeaderSideband = false
+	if f, side := sidebandLC(raw); side {
+		rss.headerSideband, rss.hasHeaderSideband = raw, true
+		return nil, EmbeddedLC{Source: src, LC: f, Call: dmrd.Data{
+			Source:      src,
+			Destination: dst,
+			Repeater:    t.repeaterID,
+			Slot:        slot,
+			Private:     !groupCall,
+			Stream:      rss.streamID,
+		}}, true
+	}
+	// Voice LC Header — only process the first one (IPSC sends 3)
+	if rss.started {
+		return nil, EmbeddedLC{}, false
+	}
+	rss.started = true
+	return []dmrd.Data{t.buildMMDVMDataPacket(src, dst, groupCall, slot, rss,
+		enums.DataTypeVoiceLCHeader, [12]byte(u.Data.Octets[:12]))}, EmbeddedLC{}, false
 }
 
 // payloadBits returns the payload size in bits that a data packet of
@@ -1528,25 +1560,33 @@ func (t *IPSCTranslator) buildMMDVMVoiceBurst(
 	}
 	rss.seq++
 
-	lc, ok := rss.addEmbedded(burstIdx, u.Voice.Embedded, src)
+	lc, ok := rss.addEmbedded(burstIdx, u, src)
 	return []dmrd.Data{pkt}, lc, ok
 }
 
-func (rss *reverseStreamState) addEmbedded(pos int, frag [4]byte, src uint32) (EmbeddedLC, bool) {
+func (rss *reverseStreamState) addEmbedded(pos int, u *ipscpkt.User, src uint32) (EmbeddedLC, bool) {
 	lcss, ok := voiceBurst(pos).LCSS()
 	if !ok {
 		rss.embedded.Reset()
 		return EmbeddedLC{}, false
 	}
-	raw, _, done, err := rss.embedded.Add(frag, lcss)
+	raw, _, done, err := rss.embedded.Add(u.Voice.Embedded, lcss)
 	if !done || err != nil {
-		return EmbeddedLC{}, false
+		if pos != burstE || u.Voice.Layout != ipscpkt.VoiceLayoutE {
+			return EmbeddedLC{}, false
+		}
+		raw = u.Voice.LC
 	}
-	f := pdu.DecodeFullLinkControlBytes(raw)
-	if f.FLCO < enums.FLCOTalkerAliasHeader || f.FLCO > enums.FLCOGPSInfo {
+	f, ok := sidebandLC(raw)
+	if !ok {
 		return EmbeddedLC{}, false
 	}
 	return EmbeddedLC{Source: src, LC: f}, true
+}
+
+func sidebandLC(raw [9]byte) (pdu.FullLinkControl, bool) {
+	f := pdu.DecodeFullLinkControlBytes(raw)
+	return f, f.FLCO >= enums.FLCOTalkerAliasHeader && f.FLCO <= enums.FLCOGPSInfo
 }
 
 // ipscVoiceBurstPosition returns the superframe position (0-5 for A-F) of an

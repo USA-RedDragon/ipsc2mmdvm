@@ -21,6 +21,7 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	ipscpkt "github.com/USA-RedDragon/dmrgo/v2/transport/ipsc"
 	"github.com/USA-RedDragon/dmrgo/v2/vocoder"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/metrics"
 	"github.com/klauspost/compress/zstd"
 )
@@ -417,7 +418,17 @@ type xprGroup struct {
 
 func loadXPRGroups(t *testing.T) []xprGroup {
 	t.Helper()
-	f, err := os.Open("../ipsc/testdata/xpr8400-ipsc.txt.zst")
+	return loadIPSCGroups(t, "../ipsc/testdata/xpr8400-ipsc.txt.zst")
+}
+
+func loadXPRSplitGroups(t *testing.T) []xprGroup {
+	t.Helper()
+	return loadIPSCGroups(t, "../ipsc/testdata/xpr8400-split-ipsc.txt.zst")
+}
+
+func loadIPSCGroups(t *testing.T, path string) []xprGroup {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +562,7 @@ func TestLoopbackMatrix(t *testing.T) {
 				matrixFromMaster(t, row, raw)
 			})
 		}
-		for _, g := range loadXPRGroups(t) {
+		for _, g := range append(loadXPRGroups(t), loadXPRSplitGroups(t)...) {
 			if len(g.packets) == 0 {
 				continue
 			}
@@ -602,8 +613,13 @@ func matrixFromIPSC(t *testing.T, g xprGroup, raw bool) {
 	c1, _, _ := startLoopClient(t, m1, raw)
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 50000}
 	in := make([][]byte, 0, len(g.packets))
+	splits := ipsc.NewCallSplits()
 	for _, p := range g.packets {
-		c1.HandleIPSCBurst(p[0], slices.Clone(p), addr)
+		op, p, ok := splits.Repair(p[0], slices.Clone(p))
+		if !ok {
+			continue
+		}
+		c1.HandleIPSCBurst(op, slices.Clone(p), addr)
 		in = append(in, p)
 	}
 	settle(t, func() int { return len(m1.packets()) }, 300*time.Millisecond)

@@ -40,6 +40,7 @@ type IPSCServer struct {
 
 	burstHandler func(packetType byte, data []byte, addr *net.UDPAddr)
 	bursts       chan burst
+	splits       *CallSplits
 
 	lifeMu   sync.Mutex
 	wg       sync.WaitGroup
@@ -98,6 +99,7 @@ func NewIPSCServer(cfg *config.Config, m *metrics.Metrics) *IPSCServer {
 		armTimer: time.NewTimer,
 		now:      time.Now,
 		bursts:   make(chan burst, burstQueueSize),
+		splits:   NewCallSplits(),
 		done:     make(chan struct{}),
 	}
 	if master != nil {
@@ -224,9 +226,15 @@ func (s *IPSCServer) burstWorker(quit <-chan struct{}) {
 		case <-quit:
 			return
 		case b := <-s.bursts:
-			if s.burstHandler != nil {
-				s.burstHandler(b.packetType, b.data, b.addr)
+			if s.burstHandler == nil {
+				continue
 			}
+			op, data, ok := s.splits.Repair(b.packetType, b.data)
+			if !ok {
+				s.countDropped("xpr_split")
+				continue
+			}
+			s.burstHandler(op, data, b.addr)
 		}
 	}
 }
@@ -310,6 +318,12 @@ func (s *IPSCServer) dataLocked(o *ipscsession.Output) {
 	case s.bursts <- burst{packetType: byte(op), data: append([]byte(nil), o.Packet...), addr: addr}:
 	default:
 		slog.Warn("IPSC burst queue full, dropping packet", "peer", addr, "peerID", o.ID)
+	}
+}
+
+func (s *IPSCServer) countDropped(reason string) {
+	if s.metrics != nil {
+		s.metrics.IPSCPacketsDropped.WithLabelValues(reason).Inc()
 	}
 }
 

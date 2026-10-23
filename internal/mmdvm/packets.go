@@ -8,6 +8,8 @@ import (
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
 	"github.com/USA-RedDragon/dmrgo/v2/transport/dmrd"
 	"github.com/USA-RedDragon/ipsc2mmdvm/internal/ipsc"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/mmdvm/rewrite"
+	"github.com/USA-RedDragon/ipsc2mmdvm/internal/timeslot"
 )
 
 // enqueue hands data to tx. It gives up when the client stops, so a full
@@ -137,6 +139,38 @@ func (h *MMDVMClient) offerSideband(p sideband) {
 	slog.Debug("Dropping a sideband message, the queue to the master is busy", "network", h.cfg.Name)
 	if h.metrics != nil {
 		h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "sideband_busy").Inc()
+	}
+}
+
+func (h *MMDVMClient) sidebandAlone(lc ipsc.EmbeddedLC) bool {
+	pkt := lc.Call
+	orig := pkt
+	if !rewrite.Apply(h.rfRewrites, &pkt) && !rewrite.Apply(h.passallRewrites, &pkt) {
+		if h.metrics != nil {
+			h.metrics.MMDVMPacketsDropped.WithLabelValues(h.cfg.Name, "no_rewrite").Inc()
+		}
+		return false
+	}
+	h.rfLC.Rewrite(orig, &pkt)
+	side := h.sidebandOf(lc)
+	if h.inboundTSMgr == nil {
+		h.offerSideband(side)
+		return true
+	}
+	h.submitSideband(pkt, side)
+	return true
+}
+
+func (h *MMDVMClient) submitSideband(pkt dmrd.Data, side sideband) {
+	if side == nil {
+		return
+	}
+	switch h.inboundTSMgr.Submit(isTS2(pkt.Slot), uint(pkt.Stream), "ipsc", side, false, h.forwardInbound) {
+	case timeslot.Deliver:
+		h.offerSideband(side)
+	case timeslot.Queued:
+	case timeslot.Dropped:
+		h.countTimeslotDrop(pkt)
 	}
 }
 
