@@ -75,6 +75,7 @@ type mMDVMShadow struct {
 	Slots        *byte                      `json:"slots"         toml:"slots"         yaml:"slots"`
 	MasterServer *string                    `json:"master-server" toml:"master-server" yaml:"master-server"`
 	Password     *string                    `json:"password"      toml:"password"      yaml:"password"`
+	SendPosition *bool                      `json:"send-position" toml:"send-position" yaml:"send-position"`
 	TGRewrites   *[]tGRewriteConfigShadow   `json:"tg-rewrite"    toml:"tg-rewrite"    yaml:"tg-rewrite"`
 	PCRewrites   *[]pCRewriteConfigShadow   `json:"pc-rewrite"    toml:"pc-rewrite"    yaml:"pc-rewrite"`
 	TypeRewrites *[]typeRewriteConfigShadow `json:"type-rewrite"  toml:"type-rewrite"  yaml:"type-rewrite"`
@@ -231,6 +232,10 @@ func (s *configShadow) applyTo(cfg *Config, _ string, set configulator.SetOrigin
 			if esh.Password != nil {
 				e.Password = *esh.Password
 				set(idx+".password", configulator.LayerFile, file)
+			}
+			if esh.SendPosition != nil {
+				e.SendPosition = *esh.SendPosition
+				set(idx+".send-position", configulator.LayerFile, file)
 			}
 			if esh.TGRewrites != nil {
 				out1 := make([]TGRewriteConfig, len(*esh.TGRewrites))
@@ -1183,6 +1188,19 @@ func (s *mMDVMShadow) decodeJSON(dec *jsontext.Decoder, path string) error {
 					Path:  path + ".password",
 					Value: "(redacted)",
 				}
+			}
+		case "send-position":
+			v, err := dec.ReadToken()
+			if err != nil {
+				return err
+			}
+			switch v.Kind() {
+			case jsontext.KindNull:
+			case jsontext.KindTrue, jsontext.KindFalse:
+				b := v.Bool()
+				s.SendPosition = &b
+			default:
+				return configJSONError(path+".send-position", v, fmt.Errorf("expected a bool, got %v", v.Kind()))
 			}
 		case "tg-rewrite":
 			if dec.PeekKind() == jsontext.KindNull {

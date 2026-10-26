@@ -62,6 +62,9 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	if m.Slots != 3 {
 		t.Errorf("expected slots default 3, got %d", m.Slots)
 	}
+	if m.SendPosition {
+		t.Error("expected send-position default false")
+	}
 	if len(m.TGRewrites) != 1 || m.TGRewrites[0].Range != 1 || m.TGRewrites[0].ToTG != 100 {
 		t.Errorf("unexpected tg-rewrite: %+v", m.TGRewrites)
 	}
@@ -73,5 +76,31 @@ func TestLoadFileAppliesElementDefaults(t *testing.T) {
 	}
 	if len(m.SrcRewrites) != 1 || m.SrcRewrites[0].Range != 1 || m.SrcRewrites[0].FromID != 1234 || m.SrcRewrites[0].ToTG != 9 {
 		t.Errorf("unexpected src-rewrite: %+v", m.SrcRewrites)
+	}
+}
+
+func TestLoadFileSendPosition(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`mmdvm:
+  - name: BM
+    send-position: true
+  - name: TGIF
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := configulator.New(ConfigSchema()).
+		WithFile(&configulator.FileOptions{
+			Search:       []string{path},
+			RequireFound: true,
+			Decoders:     configulator.Decoders{".yaml": yaml.Unmarshal},
+		}).
+		LoadWithoutValidation()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.MMDVM) != 2 || !cfg.MMDVM[0].SendPosition || cfg.MMDVM[1].SendPosition {
+		t.Fatalf("send-position of %+v, want true then false", cfg.MMDVM)
 	}
 }

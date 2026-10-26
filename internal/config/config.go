@@ -103,6 +103,10 @@ type MMDVM struct {
 	Slots        byte   `name:"slots" description:"Active timeslots bitmask (1=TS1, 2=TS2, 3=both)" default:"3"`
 	MasterServer string `name:"master-server" description:"Master server for the MMDVM connection"`
 	Password     string `name:"password" description:"Password for the MMDVM connection" secret:"true"`
+	// SendPosition sends the GPS positions that radios embed in their
+	// calls to this master as DMRG, as the Location setting of a
+	// DMRGateway network does.
+	SendPosition bool `name:"send-position" description:"Send the GPS positions that radios embed in calls to this master (DMRG), like DMRGateway's Location"`
 
 	// Rewrite rules for routing DMR data to/from this network.
 	TGRewrites   []TGRewriteConfig   `name:"tg-rewrite" description:"Talkgroup rewrite rules"`

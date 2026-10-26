@@ -109,6 +109,9 @@ func (h *MMDVMClient) sidebandOf(lc ipsc.EmbeddedLC) sideband {
 	var b []byte
 	var err error
 	if lc.LC.FLCO == enums.FLCOGPSInfo {
+		if !h.cfg.SendPosition {
+			return nil
+		}
 		p := dmrd.Position{Repeater: h.cfg.ID, Source: lc.Source, Data: lc.LC.RawPayload, Size: 18}
 		b, err = p.AppendBinary(make([]byte, 0, 18))
 	} else {

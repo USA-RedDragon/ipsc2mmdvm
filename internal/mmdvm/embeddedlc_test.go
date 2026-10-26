@@ -147,7 +147,21 @@ func TestEmbeddedLCToMasterMatchesMMDVMHost(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			embeddedLCToMaster(t, ts)
+			embeddedLCToMaster(t, ts, true)
+		})
+	}
+}
+
+func TestEmbeddedGPSNotSentWhenSendPositionOff(t *testing.T) {
+	t.Parallel()
+	for _, ts := range []bool{false, true} {
+		name := "direct"
+		if ts {
+			name = "timeslot manager"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			embeddedLCToMaster(t, ts, false)
 		})
 	}
 }
@@ -161,11 +175,23 @@ func startEmbeddedLCClient(t *testing.T, m *loopMaster, ts bool) *MMDVMClient {
 	return c
 }
 
-func embeddedLCToMaster(t *testing.T, ts bool) {
-	source, golden := loadSidebandGolden(t)
-	lcs := make([][9]byte, 0, len(golden))
-	for _, g := range golden {
+func embeddedLCToMaster(t *testing.T, ts, position bool) {
+	source, all := loadSidebandGolden(t)
+	lcs := make([][9]byte, 0, len(all))
+	golden := make([]sidebandGolden, 0, len(all))
+	gps := 0
+	for _, g := range all {
 		lcs = append(lcs, g.lc)
+		if bytes.HasPrefix(g.direct, []byte("DMRG")) {
+			gps++
+			if !position {
+				continue
+			}
+		}
+		golden = append(golden, g)
+	}
+	if gps == 0 {
+		t.Fatal("the sideband golden has no DMRG")
 	}
 	packets, _ := xprCallWithEmbeddedLCs(t, lcs)
 	if u, err := ipscpkt.DecodeUser(packets[0]); err != nil || u.Source != source {
@@ -174,6 +200,7 @@ func embeddedLCToMaster(t *testing.T, ts bool) {
 
 	m := newLoopMaster(t)
 	c := startEmbeddedLCClient(t, m, ts)
+	c.cfg.SendPosition = position
 	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 50000}
 	for _, p := range packets {
 		c.HandleIPSCBurst(p[0], slices.Clone(p), addr)

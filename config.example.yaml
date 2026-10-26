@@ -25,6 +25,7 @@ metrics:
 #     slots: 3
 #     master-server: ""
 #     password: "(secret)"
+#     send-position: false
 #     tg-rewrite:
 #       - from-slot: 0
 #         from-tg: 0
