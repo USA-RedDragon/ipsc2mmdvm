@@ -104,9 +104,10 @@ type MMDVM struct {
 	MasterServer string `name:"master-server" description:"Master server for the MMDVM connection"`
 	Password     string `name:"password" description:"Password for the MMDVM connection" secret:"true"`
 	// SendPosition sends the GPS positions that radios embed in their
-	// calls to this master as DMRG, as the Location setting of a
-	// DMRGateway network does.
-	SendPosition bool `name:"send-position" description:"Send the GPS positions that radios embed in calls to this master (DMRG), like DMRGateway's Location"`
+	// calls to this master as DMRG, and sends Latitude and Longitude in
+	// the login, as the Location setting of a DMRGateway network does.
+	// When false, the login carries zeros in place of the position.
+	SendPosition bool `name:"send-position" description:"Send radio GPS (DMRG) and the login latitude and longitude to this master, like DMRGateway's Location"`
 
 	// Rewrite rules for routing DMR data to/from this network.
 	TGRewrites   []TGRewriteConfig   `name:"tg-rewrite" description:"Talkgroup rewrite rules"`

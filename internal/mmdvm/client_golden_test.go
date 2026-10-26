@@ -13,7 +13,27 @@ import (
 // dmrgo transport codecs.
 func TestGoldenLoginMessages(t *testing.T) {
 	t.Parallel()
+	blank := hex.EncodeToString([]byte("0.00000000.000000"))
+	noPosition := goldenRPTC[:2*38] + blank + goldenRPTC[2*55:]
+	for _, tt := range []struct {
+		name     string
+		position bool
+		rptc     string
+	}{
+		{"send-position on", true, goldenRPTC},
+		{"send-position off", false, noPosition},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			goldenLogin(t, tt.position, tt.rptc)
+		})
+	}
+}
+
+func goldenLogin(t *testing.T, position bool, rptc string) {
+	t.Helper()
 	client := newTestClient(t)
+	client.cfg.SendPosition = position
 	if err := client.newPeer(); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +54,7 @@ func TestGoldenLoginMessages(t *testing.T) {
 	keep(p.Tick(dmrdsession.RetryDefault, nil))
 	keep(p.Close(dmrdsession.RetryDefault, nil))
 	want := []string{
-		goldenRPTL, goldenRPTK, goldenRPTC, goldenRPTPING, goldenRPTCL,
+		goldenRPTL, goldenRPTK, rptc, goldenRPTPING, goldenRPTCL,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d messages, want %d", len(got), len(want))

@@ -731,6 +731,7 @@ func TestStopSetsStartedFalse(t *testing.T) {
 func TestSendRPTCLatLong(t *testing.T) {
 	t.Parallel()
 	client := newTestClient(t)
+	client.cfg.SendPosition = true
 
 	data := client.rptcPacket()
 	// Latitude (8 bytes) starts at offset 38
@@ -743,6 +744,18 @@ func TestSendRPTCLatLong(t *testing.T) {
 	lon := string(data[46:55])
 	if lon != "-097.0000" {
 		t.Fatalf("expected longitude '-097.0000', got %q", lon)
+	}
+}
+
+func TestSendRPTCBlanksPositionWhenSendPositionOff(t *testing.T) {
+	t.Parallel()
+	client := newTestClient(t)
+	off := client.rptcPacket()
+	client.cfg.SendPosition = true
+	want := client.rptcPacket()
+	copy(want[38:55], "0.00000000.000000")
+	if string(off) != string(want) {
+		t.Fatalf("RPTC with send-position off:\n got %q\nwant %q", off, want)
 	}
 }
 
@@ -924,6 +937,7 @@ func TestSendRPTCOversizedFieldsKeepFixedLayout(t *testing.T) {
 	client.cfg.ColorCode = 255
 	client.cfg.Latitude = 123.4
 	client.cfg.Longitude = -500
+	client.cfg.SendPosition = true
 	client.cfg.Height = 5000
 	client.cfg.Location = strings.Repeat("L", 30)
 	client.cfg.Description = strings.Repeat("D", 30)

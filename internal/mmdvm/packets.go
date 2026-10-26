@@ -23,11 +23,17 @@ func (h *MMDVMClient) enqueue(data []byte) {
 
 // rptcPacket builds the RPTC configuration message. Every field has a fixed
 // width, so strings are cut and numbers are clamped to the range their
-// field can hold, as MMDVMHost does.
+// field can hold, as MMDVMHost does. With send-position off, the latitude
+// and longitude are the zeros that DMRGateway sends for Location=0.
 func (h *MMDVMClient) rptcPacket() []byte {
 	slots := h.cfg.Slots
 	if slots == 0 {
 		slots = 3
+	}
+	lat := cut(fmt.Sprintf("%+08.4f", clampCoord(h.cfg.Latitude, 90)), 8)
+	lon := cut(fmt.Sprintf("%+09.4f", clampCoord(h.cfg.Longitude, 180)), 9)
+	if !h.cfg.SendPosition {
+		lat, lon = []byte("0.000000"), []byte("00.000000")
 	}
 	var c dmrd.MMDVMConfig
 	c.Reset()
@@ -38,8 +44,8 @@ func (h *MMDVMClient) rptcPacket() []byte {
 		c.SetTXFrequency(uint32(min(h.cfg.TXFreq, 999999999))), //nolint:gosec // clamped to 9 digits
 		c.SetPower(min(h.cfg.TXPower, 99)),
 		c.SetColorCode(enums.ColorCode(min(h.cfg.ColorCode, 99))),
-		c.SetLatitude(cut(fmt.Sprintf("%+08.4f", clampCoord(h.cfg.Latitude, 90)), 8)),
-		c.SetLongitude(cut(fmt.Sprintf("%+09.4f", clampCoord(h.cfg.Longitude, 180)), 9)),
+		c.SetLatitude(lat),
+		c.SetLongitude(lon),
 		c.SetHeight(min(h.cfg.Height, 999)),
 		c.SetLocation(cut(h.cfg.Location, 20)),
 		c.SetDescription(cut(h.cfg.Description, 19)),

@@ -79,13 +79,13 @@ mmdvm:
     color-code: 7         # Must match your repeater's color code (0-15)
 
     # Optional, reported to BrandMeister:
-    # latitude: 30.000000
-    # longitude: -97.000000
+    # latitude: 30.000000   # Sent only with send-position: true
+    # longitude: -97.000000  # Sent only with send-position: true
     height: 3             # Antenna height in meters
     location: "My City, ST"
     # description: ""
     # url: ""
-    # send-position: true  # Send the GPS positions of radios to this master (DMRG)
+    # send-position: true  # Send radio GPS (DMRG) and latitude/longitude to this master
 
     # Routing rules (DMRGateway-compatible). A master with no rules gets no
     # traffic. These pass all group and private calls on both slots:
@@ -127,7 +127,7 @@ mmdvm:
 - **`mmdvm[].name`** - A friendly name for this network, used in log messages (e.g. `"BrandMeister"`, `"TGIF"`).
 - **`mmdvm[].master-server`** - The master's host and port. For BrandMeister, find the master covering your region in the [BrandMeister Master Server List](https://brandmeister.network/?page=masters). The format is `host:port` (e.g. `3104.master.brandmeister.network:62031`). BrandMeister masters accept MMDVM connections on UDP port 62031.
 - **`mmdvm[].pass-all-tg`, `mmdvm[].pass-all-pc`, and the rewrite lists** - Choose which traffic goes to this master. A master with no rules gets no traffic. See [Rewrite Rules](#rewrite-rules-per-mmdvm-entry).
-- **`mmdvm[].send-position`** - When true, ipsc2mmdvm sends this master a DMRG packet with the GPS position that a radio embeds in its call, as DMRGateway does for a network with `Location=1`. The default is false: the master gets no radio positions. Talker alias (DMRA) is always sent. Unlike DMRGateway with `Location=0`, this setting does not change the `latitude` and `longitude` that ipsc2mmdvm sends at login.
+- **`mmdvm[].send-position`** - When true, ipsc2mmdvm sends this master the `latitude` and `longitude` at login, and a DMRG packet with the GPS position that a radio embeds in its call, as DMRGateway does for a network with `Location=1`. The default is false, as DMRGateway does with `Location=0`: the login carries `0.000000` and `00.000000` in place of the latitude and longitude, and the master gets no radio positions. Talker alias (DMRA) is always sent. ipsc2mmdvm sends no home-position (RPTG) packet with either setting.
 - **`mmdvm[].password`** - Your hotspot security password, such as the one set in your BrandMeister self-care dashboard.
 - **`mmdvm[].radio-id`** - Your repeater's DMR ID, registered at [radioid.net](https://radioid.net/).
 
@@ -258,7 +258,7 @@ Settings can be given in the config file, as environment variables, or as comman
 | `mmdvm[].slots`                    | integer         | `3`           | —                     | —                       | Active timeslots bitmask (1=TS1, 2=TS2, 3=both)                                                            |
 | `mmdvm[].master-server`            | string          |               | —                     | —                       | Master server for the MMDVM connection                                                                     |
 | `mmdvm[].password`                 | string          |               | —                     | —                       | Password for the MMDVM connection (secret)                                                                 |
-| `mmdvm[].send-position`            | boolean         |               | —                     | —                       | Send the GPS positions that radios embed in calls to this master (DMRG), like DMRGateway's Location        |
+| `mmdvm[].send-position`            | boolean         |               | —                     | —                       | Send radio GPS (DMRG) and the login latitude and longitude to this master, like DMRGateway's Location      |
 | `mmdvm[].tg-rewrite`               | list of objects |               | —                     | —                       | Talkgroup rewrite rules                                                                                    |
 | `mmdvm[].tg-rewrite[].from-slot`   | integer         |               | —                     | —                       | Source timeslot (1 or 2)                                                                                   |
 | `mmdvm[].tg-rewrite[].from-tg`     | integer         |               | —                     | —                       | Source talkgroup start                                                                                     |
