@@ -6,7 +6,7 @@ internal/ipsc/split.go	75	71
 internal/ipsc/translator.go	628	588
 internal/logging/logging.go	35	35
 internal/metrics/metrics.go	7	7
-internal/mmdvm/client.go	472	403
+internal/mmdvm/client.go	472	404
 internal/mmdvm/dataend.go	42	34
 internal/mmdvm/packets.go	87	73
 internal/mmdvm/preamble.go	70	64
