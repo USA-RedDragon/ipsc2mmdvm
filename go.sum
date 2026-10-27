@@ -1,7 +1,7 @@
 github.com/USA-RedDragon/configulator/v2 v2.5.0 h1:Z6eY4ncXH6m7cTCfF0/chRJxUT5/TQnFDoBgh0CMV9Y=
 github.com/USA-RedDragon/configulator/v2 v2.5.0/go.mod h1:L/HGK6Bf1Wr7dbBibAW0zpXhvG0A+7cMI0U9Rz9Hplg=
-github.com/USA-RedDragon/dmrgo/v2 v2.0.3 h1:Ne7NM+b6vVTpW+UbTo5vyVxwAWUb2K8zTUti9FtK0KE=
-github.com/USA-RedDragon/dmrgo/v2 v2.0.3/go.mod h1:+vgzs3oSTUL/QsbDtj4KqbZtPO3kijdmHYOfN3ODoG8=
+github.com/USA-RedDragon/dmrgo/v2 v2.0.4 h1:0wzEg5dZ7OfFFj9mTiMNHLDAp/ZE01/d78AmjEtS/74=
+github.com/USA-RedDragon/dmrgo/v2 v2.0.4/go.mod h1:+vgzs3oSTUL/QsbDtj4KqbZtPO3kijdmHYOfN3ODoG8=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
